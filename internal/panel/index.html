@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qwen2api · 控制台</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --panel: #ffffff;
+    --border: #e4e7ec;
+    --text: #16181d;
+    --muted: #6b7280;
+    --brand: #615ced;
+    --brand-soft: #eef0ff;
+    --ok: #0f9d58;
+    --warn: #d97706;
+    --bad: #dc2626;
+    --code: #f1f3f6;
+    --shadow: 0 1px 2px rgba(16,24,40,.05), 0 4px 12px rgba(16,24,40,.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --border: #262b36;
+      --text: #e8eaee;
+      --muted: #9aa3b2;
+      --brand: #8b86ff;
+      --brand-soft: #1e1f3a;
+      --ok: #3ddc84;
+      --warn: #f0b429;
+      --bad: #ff6b6b;
+      --code: #10131a;
+      --shadow: 0 1px 2px rgba(0,0,0,.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.55 -apple-system, "SF Pro Text", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 22px 20px 60px; }
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 22px; }
+  .logo {
+    width: 34px; height: 34px; border-radius: 9px; background: var(--brand); color: #fff;
+    display: grid; place-items: center; font-weight: 700; font-size: 16px; letter-spacing: -.5px;
+  }
+  h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: -.2px; }
+  .sub { color: var(--muted); font-size: 12.5px; }
+  .spacer { flex: 1; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+  .dot.bad { background: var(--bad); }
+  .keybox { display: flex; gap: 6px; }
+  input[type=password], input[type=text], select, textarea {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 7px 10px; font: inherit; outline: none;
+  }
+  input:focus, select:focus, textarea:focus { border-color: var(--brand); }
+  button {
+    background: var(--brand); color: #fff; border: 0; border-radius: 8px;
+    padding: 7px 14px; font: inherit; font-weight: 550; cursor: pointer;
+  }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); font-weight: 450; }
+  button.ghost:hover { color: var(--text); }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; margin-bottom: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 11px; padding: 13px 14px; box-shadow: var(--shadow); }
+  .card .k { color: var(--muted); font-size: 11.5px; letter-spacing: .2px; text-transform: uppercase; }
+  .card .v { font-size: 22px; font-weight: 640; margin-top: 3px; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+  .card .v small { font-size: 12px; font-weight: 450; color: var(--muted); }
+
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; box-shadow: var(--shadow); }
+  section > h2 { font-size: 13px; margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--border); font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  section > h2 .hint { color: var(--muted); font-weight: 400; font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.8px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; font-size: 11.5px; text-transform: uppercase; letter-spacing: .3px; }
+  td { padding: 9px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: color-mix(in srgb, var(--brand) 4%, transparent); }
+  .num { font-variant-numeric: tabular-nums; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 20px; font-size: 11.5px; font-weight: 550; }
+  .pill.ready { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+  .pill.cooling { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+  .pill.auth_dead, .pill.err { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+  .pill.ok { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+  .muted { color: var(--muted); }
+  .err-text { color: var(--bad); font-size: 12px; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .try { padding: 14px 16px; display: grid; gap: 10px; }
+  .try-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .try textarea { width: 100%; min-height: 68px; resize: vertical; }
+  #out {
+    background: var(--code); border: 1px solid var(--border); border-radius: 9px;
+    padding: 12px 14px; min-height: 74px; max-height: 380px; overflow: auto;
+    white-space: pre-wrap; word-break: break-word; font-size: 13px;
+  }
+  #out .reason { color: var(--muted); font-size: 12.5px; }
+  .kv { display: flex; gap: 16px; flex-wrap: wrap; padding: 0 16px 14px; color: var(--muted); font-size: 12px; }
+  .kv b { color: var(--text); font-weight: 550; }
+  .empty { padding: 26px 16px; text-align: center; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">Q</div>
+    <div>
+      <h1>qwen2api 控制台</h1>
+      <div class="sub"><span id="dot" class="dot"></span> <span id="status">连接中…</span></div>
+    </div>
+    <div class="spacer"></div>
+    <div class="keybox">
+      <input id="key" type="password" placeholder="API Key（若已配置）" style="width:200px">
+      <button class="ghost" onclick="saveKey()">保存</button>
+      <button class="ghost" onclick="load()">刷新</button>
+    </div>
+  </header>
+
+  <div class="cards" id="cards"></div>
+
+  <section>
+    <h2>账号池 <span class="hint" id="pool-hint"></span></h2>
+    <div id="accounts"></div>
+  </section>
+
+  <section>
+    <h2>在线试跑 <span class="hint">直接打本机 /v1/chat/completions（流式）</span></h2>
+    <div class="try">
+      <div class="try-row">
+        <select id="model"></select>
+        <select id="thinking">
+          <option value="auto">思考：自动</option>
+          <option value="thinking">思考：强制</option>
+          <option value="fast">思考：快速</option>
+        </select>
+        <button id="send" onclick="send()">发送</button>
+        <span class="muted" id="trymeta"></span>
+      </div>
+      <textarea id="prompt" placeholder="输入一句话试试…">用一句话说明你是谁。</textarea>
+      <div id="out" class="muted">输出会显示在这里。</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>请求流水 <span class="hint">最近 80 条</span></h2>
+    <div id="reqs"></div>
+  </section>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let timer = null;
+
+function key() { return $('key').value.trim(); }
+function saveKey() {
+  localStorage.setItem('qwen2api_key', key());
+  load();
+}
+function authHeaders() {
+  const k = key();
+  return k ? { 'Authorization': 'Bearer ' + k } : {};
+}
+
+async function load() {
+  try {
+    const r = await fetch('/panel/api/overview', { headers: authHeaders() });
+    if (r.status === 401) {
+      $('dot').className = 'dot bad';
+      $('status').textContent = '需要 API Key（在右上角填入并保存）';
+      return;
+    }
+    const d = await r.json();
+    render(d);
+    $('dot').className = 'dot ok';
+    $('status').textContent = `运行中 · v${d.version} · 已运行 ${fmtDur(d.uptime_s)}`;
+  } catch (e) {
+    $('dot').className = 'dot bad';
+    $('status').textContent = '无法连接网关：' + e.message;
+  }
+}
+
+function fmtDur(s) {
+  if (s < 60) return s + ' 秒';
+  if (s < 3600) return Math.floor(s / 60) + ' 分';
+  if (s < 86400) return Math.floor(s / 3600) + ' 时 ' + Math.floor(s % 3600 / 60) + ' 分';
+  return Math.floor(s / 86400) + ' 天';
+}
+function fmtMs(ms) { return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms'; }
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function render(d) {
+  const s = d.stats || {};
+  const acc = d.accounts || [];
+  const ready = acc.filter(a => a.state === 'ready').length;
+  const cool = acc.filter(a => a.state === 'cooling').length;
+  const dead = acc.filter(a => a.state === 'auth_dead').length;
+  const rate = s.total ? Math.round((s.ok / s.total) * 100) : 0;
+
+  $('cards').innerHTML = [
+    card('账号', acc.length, `可用 ${ready} · 冷却 ${cool} · 失效 ${dead}`),
+    card('请求', s.total || 0, `流式 ${s.streaming || 0}`),
+    card('成功率', rate + '%', `成功 ${s.ok || 0} · 失败 ${s.failed || 0}`),
+    card('Token', (s.tokens_total || 0).toLocaleString(), '输入 + 输出'),
+    card('平均耗时', fmtMs(s.avg_duration_ms || 0), '请求全周期'),
+  ].join('');
+
+  $('pool-hint').textContent = d.config?.pool
+    ? `最多换号 ${d.config.pool.max_rotate} 次 · 单号在途 ${d.config.pool.max_inflight_per_account}`
+    : '';
+
+  if (!acc.length) {
+    $('accounts').innerHTML = '<div class="empty">还没有配置账号 —— 在 config.json 的 accounts 里加 Bearer token，或用环境变量 QWEN2API_ACCOUNTS</div>';
+  } else {
+    $('accounts').innerHTML = `<table><thead><tr>
+      <th>名称</th><th>状态</th><th>今日出图</th><th>在途</th><th>已服务</th><th>失败</th><th>最近使用</th><th>最近错误</th><th></th>
+    </tr></thead><tbody>${acc.map(a => `
+      <tr>
+        <td><b>${esc(a.name)}</b>${a.email ? `<div class="muted mono">${esc(a.email)}</div>` : ''}</td>
+        <td><span class="pill ${a.state}">${a.state === 'ready' ? '可用' : a.state === 'cooling' ? '冷却 ' + a.cooldown_left_s + 's' : '凭据失效'}</span></td>
+        <td class="num">${a.image_limit > 0 ? `${a.image_today || 0}/${a.image_limit}` : (a.image_today || 0)}</td>
+        <td class="num">${a.inflight}</td>
+        <td class="num">${a.served}</td>
+        <td class="num">${a.failures || 0}</td>
+        <td class="muted mono">${a.last_used ? new Date(a.last_used).toLocaleTimeString() : '—'}</td>
+        <td class="err-text" title="${esc(a.last_error || '')}">${esc(a.last_error || '—')}</td>
+        <td>${a.state !== 'ready' ? `<button class="ghost" onclick="reset('${esc(a.name)}')">重置</button>` : ''}</td>
+      </tr>`).join('')}</tbody></table>`;
+  }
+
+  const reqs = d.requests || [];
+  if (!reqs.length) {
+    $('reqs').innerHTML = '<div class="empty">还没有请求</div>';
+  } else {
+    $('reqs').innerHTML = `<table><thead><tr>
+      <th>时间</th><th>路径</th><th>模型</th><th>账号</th><th>状态</th><th>首字</th><th>耗时</th><th>Token</th><th>错误</th>
+    </tr></thead><tbody>${reqs.map(r => `
+      <tr>
+        <td class="muted mono">${new Date(r.time).toLocaleTimeString()}</td>
+        <td class="mono">${esc(r.path)}${r.stream ? ' <span class="muted">stream</span>' : ''}</td>
+        <td class="mono">${esc(r.model || '—')}</td>
+        <td class="mono">${esc(r.account || '—')}</td>
+        <td><span class="pill ${r.error ? 'err' : 'ok'}">${r.status}</span></td>
+        <td class="num muted">${r.first_byte_ms ? fmtMs(r.first_byte_ms) : '—'}</td>
+        <td class="num">${fmtMs(r.duration_ms || 0)}</td>
+        <td class="num muted">${(r.prompt_tokens || 0) + '/' + (r.output_tokens || 0)}</td>
+        <td class="err-text" title="${esc(r.error || '')}">${esc(r.error || '')}</td>
+      </tr>`).join('')}</tbody></table>`;
+  }
+
+  if (!$('model').dataset.filled) {
+    $('model').innerHTML = '<option>加载中…</option>';
+    fetch('/v1/models', { headers: authHeaders() })
+      .then(r => r.json())
+      .then(m => {
+        const list = (m.data || []).map(x => x.id);
+        $('model').innerHTML = list.map(id => `<option>${esc(id)}</option>`).join('') || '<option>（无模型）</option>';
+        $('model').dataset.filled = '1';
+      })
+      .catch(() => { $('model').innerHTML = '<option>（读取失败）</option>'; });
+  }
+}
+
+function card(k, v, sub) {
+  return `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="k" style="margin-top:4px;text-transform:none;letter-spacing:0">${esc(sub)}</div></div>`;
+}
+
+async function reset(name) {
+  const r = await fetch('/panel/api/reset?name=' + encodeURIComponent(name), { method: 'POST', headers: authHeaders() });
+  if (!r.ok) alert('重置失败：' + (await r.text()));
+  load();
+}
+
+async function send() {
+  const btn = $('send'), out = $('out');
+  btn.disabled = true;
+  out.textContent = '';
+  out.classList.remove('muted');
+  const t0 = performance.now();
+  let first = 0, text = '', reasoning = '';
+
+  try {
+    const r = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+      body: JSON.stringify({
+        model: $('model').value,
+        thinking: $('thinking').value,
+        stream: true,
+        stream_options: { include_usage: true },
+        messages: [{ role: 'user', content: $('prompt').value }],
+      }),
+    });
+    if (!r.ok && r.headers.get('content-type')?.includes('json')) {
+      const e = await r.json();
+      throw new Error(e.error?.message || ('HTTP ' + r.status));
+    }
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split('\n\n');
+      buf = parts.pop();
+      for (const p of parts) {
+        const line = p.trim();
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        let j; try { j = JSON.parse(payload); } catch { continue; }
+        if (j.error) throw new Error(j.error.message || '上游错误');
+        const d = j.choices?.[0]?.delta || {};
+        if (!first && (d.content || d.reasoning_content)) first = performance.now() - t0;
+        if (d.reasoning_content) { reasoning += d.reasoning_content; renderOut(reasoning, text); }
+        if (d.content) { text += d.content; renderOut(reasoning, text); }
+        if (j.usage) {
+          $('trymeta').textContent = `tokens ${j.usage.prompt_tokens}/${j.usage.completion_tokens} · 首字 ${Math.round(first)}ms · 总 ${Math.round(performance.now() - t0)}ms`;
+        }
+      }
+    }
+    if (!text && !reasoning) out.textContent = '（上游没有返回任何文本）';
+  } catch (e) {
+    out.innerHTML = `<span style="color:var(--bad)">${esc(e.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderOut(reasoning, text) {
+  const out = $('out');
+  out.innerHTML = (reasoning ? `<div class="reason">${esc(reasoning)}</div><hr style="border:0;border-top:1px solid var(--border);margin:8px 0">` : '') + esc(text);
+  out.scrollTop = out.scrollHeight;
+}
+
+// 启动：URL ?key= 优先（便于直接给一条可点的链接）→ localStorage → 拉数据 → 3s 轮询
+const urlKey = new URLSearchParams(location.search).get('key');
+if (urlKey) {
+  localStorage.setItem('qwen2api_key', urlKey);
+  history.replaceState(null, '', location.pathname); // 不把 key 留在地址栏
+}
+$('key').value = localStorage.getItem('qwen2api_key') || '';
+load();
+timer = setInterval(load, 3000);
+</script>
+</body>
+</html>

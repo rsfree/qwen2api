@@ -1,0 +1,59 @@
+{
+  "listen": ":8400",
+  "// api_keys": "对外鉴权。留空 = 不鉴权（只建议本机/内网）；支持 QWEN2API_API_KEYS 覆盖。",
+  "api_keys": [
+    "sk-qwen-change-me"
+  ],
+  "default_model": "qwen3.7-plus",
+  "// default_thinking": "auto = 自动（前端默认）/ thinking = 强制思考 / fast = 关闭思考（首字最快）",
+  "default_thinking": "auto",
+  "// image_model": "文生图用的图片模型名，写进 extra.meta.model。🔴 不传它时上游只会「聊图」不保证出图（2026-10-28 实测）",
+  "image_model": "qwen-image-3.0",
+  "// video": "文生视频默认参数，写进 extra.meta.biz_data（字符串化 JSON）",
+  "video": {
+    "resolution": "720P",
+    "duration": 5,
+    "audio": true,
+    "root_model": "happyhorse11",
+    "size": "16:9"
+  },
+  "// expose_reasoning": "是否把上游思考摘要透出为 reasoning_content（默认 true）",
+  "expose_reasoning": true,
+  "// new_chat_per_request": "每请求新建会话（无状态，默认 true）；false = 复用会话（省一次上游调用）",
+  "new_chat_per_request": true,
+  "state_file": "./data/state.json",
+  "upstream": {
+    "base_url": "https://chat.qwen.ai",
+    "auth_base_url": "https://auth.qwen.ai",
+    "// version": "HTTP 头 version；必须与当前前端版本自洽（2026-10-28 实测 0.3.26）",
+    "version": "0.3.26",
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+    "// bx_ua": "阿里设备指纹头。实测页面自己也常 load_failed，不是硬门槛；留空即不发",
+    "bx_ua": "",
+    "bx_umidtoken": "",
+    "timeout_s": 180,
+    "connect_timeout_s": 20,
+    "insecure_skip_verify": false
+  },
+  "pool": {
+    "max_rotate": 3,
+    "cooldown_soft_s": 600,
+    "cooldown_auth_s": 1800,
+    "max_inflight_per_account": 2,
+    "// max_image_per_day": "单账号每日成功出图上限，0 = 不限，默认 6。为什么 6 而不是上游实测的 9：留 3 张缓冲，避免打到硬限后上游只发心跳、静默挂起。只统计成功张数（实测挂起不扣上游额度）",
+    "max_image_per_day": 6
+  },
+  "// accounts": "凭据两种给法：① token（Barear 或 cookie jar，启动时自动探测形态）；② email+password（signin→refresh 自动换 access_token，失效自动重登）。注意 token 与 password 可同时给，password 用于续期。",
+  "accounts": [
+    {
+      "name": "acct-1",
+      "// token": "二选一：从 F12 复制的 Authorization Bearer 值；也可写 cookie:<jwt> / bearer:<jwt> 显式指定形态",
+      "token": "",
+      "// password": "二选一：配了邮箱+密码，网关会自动走 signin→refresh 换 access_token，并在失效时自动重登",
+      "email": "your@email.com",
+      "password": "",
+      "note": "可选备注"
+    }
+  ],
+  "// video.duration": "合法档位 5 / 10 / 15 秒；720P 5s=40 积分，1080P 5s=70 积分"
+}

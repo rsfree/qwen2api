@@ -1,0 +1,239 @@
+name: release
+
+# push main → 测 → 自增 patch → 交叉编译 5 平台二进制 → 多架构镜像推 GHCR → 打 tag → 建 Release。
+# 人工 tag（v0.2.0）→ 以该 tag 发布，不递增。workflow_dispatch + tag → 补发某个已存在的版本。
+#
+# 三条纪律（改这个文件前先读）：
+#   1. 版本号唯一来源是 git tag；代码里不写死（-ldflags 注入），也不写回文件 ——
+#      写回需要向主干提交、会自触发本 workflow，且 GITHUB_TOKEN 推的提交不触发其他流水线。
+#   2. 测试不过不推镜像、不打 tag；且**先推镜像后打 tag** —— 构建失败时不会留下
+#      "有 tag、没镜像"的半成品（那种状态只能靠人肉发现）。
+#   3. 打 tag 前必须配 git 身份：runner 上没有全局 git config，annotated tag 需要 committer，
+#      缺了就是 exit 128。症状是"镜像有了、tag 和 Release 没有"，极易误判成权限问题。
+
+on:
+  push:
+    branches: [main]
+    tags: ['v[0-9]*.[0-9]*.[0-9]*'] # 人工 tag：只发版，不递增
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要补发的 tag（必须已存在，如 v0.2.0）'
+        required: true
+        type: string
+
+# 缺 contents: write 会在创建 tag 时 403 —— 本 workflow 最高频的失败原因。
+permissions:
+  contents: write
+  packages: write
+
+# 串行：两人先后 push 时若并发，会各自读到同一个最新 tag 再各自自增，撞版本号。
+# 不用 cancel-in-progress：跑到一半被取消会留下"镜像推了、tag 还没打"的中间态。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  release:
+    # 逃生阀：commit message 含 [skip release] 就整条跳过。
+    # workflow_dispatch 没有 head_commit，用 || '' 兜底。
+    # ⚠️ 别在要发版的 commit message 里写这个字面量（包括"给逃生阀写说明"的那次提交）。
+    if: >-
+      ${{ github.actor != 'github-actions[bot]' &&
+          !contains(github.event.head_commit.message || '', '[skip release]') }}
+    runs-on: ubuntu-latest
+    steps:
+      # 🔴 按入口取 ref，三条路径都不能错：
+      #   · workflow_dispatch → 必须检出 inputs.tag 那一个提交（否则用主干代码构建，
+      #     却把 :<version> 和 :latest 覆盖过去，镜像与那个 tag 的承诺不再对应）
+      #   · tag 推送         → github.ref（refs/tags/vX）
+      #   · 分支推送         → github.sha（**不能**用 github.ref：那是会移动的分支指针，
+      #     等构建跑完若又有 push，tag 会打到不是本次触发发布的那一个提交上）
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref || github.sha) }}
+          fetch-depth: 0 # 浅克隆拿不到历史 tag，版本号会永远从 v0.0.0 起算
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Test
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test ./... -count=1
+
+      - name: Resolve version
+        id: ver
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            MODE=tag; TAG="$INPUT_TAG"
+          elif [ "${REF#refs/tags/}" != "$REF" ]; then
+            MODE=tag; TAG="${REF#refs/tags/}"
+          else
+            MODE=auto
+          fi
+
+          if [ "$MODE" = auto ]; then
+            # 排序必须 -v:refname：字典序会把 v1.9.0 判成新于 v1.10.0。
+            PREV=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 || true)
+            BASE="${PREV:-v0.0.0}"            # 零 tag 的冷启动回落
+            CORE="${BASE#v}"
+            MAJOR="${CORE%%.*}"; REST="${CORE#*.}"
+            MINOR="${REST%%.*}"; PATCH="${REST#*.}"
+            PATCH="${PATCH%%[-+]*}"           # 剥 -rc.1 这类后缀，否则 $(( )) 报错
+            TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+            END=HEAD
+          else
+            END="$TAG"
+            PREV=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' "${TAG}^" 2>/dev/null || true)
+          fi
+
+          echo "mode=$MODE"       >> "$GITHUB_OUTPUT"
+          echo "prev=$PREV"       >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "模式=$MODE  上一个=${PREV:-<无>}  本次=$TAG"
+
+      - name: Build changelog
+        id: log
+        env:
+          PREV: ${{ steps.ver.outputs.prev }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PREV:-}" ]; then
+            RANGE="HEAD"; LIMIT="--max-count=50"   # 首版走全量历史，但要限长
+          else
+            RANGE="${PREV}..${TAG}"; LIMIT=""
+          fi
+          # 多行内容必须 heredoc 写 $GITHUB_OUTPUT，单行 echo 会被截断成第一条。
+          {
+            echo 'body<<CHANGELOG_EOF'
+            echo '## Changes'
+            echo ''
+            git log "$RANGE" --pretty='- %s (%h)' --no-merges $LIMIT || echo '- Initial release'
+            echo 'CHANGELOG_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build binaries into dist/
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            GOOS=${target%%/*}
+            GOARCH=${target##*/}
+            EXT=''
+            [ "$GOOS" = windows ] && EXT='.exe'
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build \
+              -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "dist/qwen2api-${GOOS}-${GOARCH}${EXT}" ./cmd/server
+          done
+
+      - name: Verify dist/
+        run: |
+          set -euo pipefail
+          [ -n "$(ls -A dist)" ] || { echo "::error::dist/ 是空的，Release 会没有附件"; exit 1; }
+          ls -la dist
+          (cd dist && sha256sum * > SHA256SUMS)
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 先推镜像、后打 tag（见文件头第 2 条）。
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+          # git tag 带 v 前缀，镜像 tag 不带 —— 核验 manifest 时写 v0.1.3 会 404。
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ steps.ver.outputs.sha }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create tag
+        if: ${{ steps.ver.outputs.mode == 'auto' }}
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # annotated tag 需要 committer 身份，否则 exit 128（见文件头第 3 条）。
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::tag ${TAG} 已存在（并发运行，或有人手工打了同一版本）"; exit 1
+          fi
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # 幂等：重跑同一 tag 不该变红（补发、失败重试都依赖这个性质）。
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "release ${TAG} 已存在，跳过创建"; exit 0
+          fi
+          printf '%s\n' "${{ steps.log.outputs.body }}" > /tmp/notes.md
+          gh release create "${TAG}" \
+            --title "${TAG}" \
+            --notes-file /tmp/notes.md \
+            dist/*
+
+      - name: Move latest tag
+        if: ${{ steps.ver.outputs.mode == 'auto' }}
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # force push 单个可变 tag 是这里的预期行为：以 latest 固定引用的下游会随之跳版本。
+          git tag -f latest "${TAG}"
+          git push -f origin latest
+
+      - name: Summary
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          MODE: ${{ steps.ver.outputs.mode }}
+          SHA: ${{ steps.ver.outputs.sha }}
+        run: |
+          {
+            echo "### 发布 ${TAG}"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 模式 | ${MODE} |"
+            echo "| 版本 | ${TAG} |"
+            echo "| 提交 | ${SHA} |"
+            echo "| 镜像 | \`${REGISTRY}/${IMAGE_NAME}:${TAG#v}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

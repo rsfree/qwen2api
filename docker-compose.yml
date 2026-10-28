@@ -1,0 +1,25 @@
+services:
+  qwen2api:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+    image: ghcr.io/yuanjie-ai/qwen2api:latest
+    container_name: qwen2api
+    restart: unless-stopped
+    ports:
+      - "8400:8400"
+    environment:
+      # 账号用环境变量注入，别写进镜像（QWEN2API_ACCOUNTS 是整体替换配置文件里的列表）。
+      QWEN2API_ACCOUNTS: ${QWEN2API_ACCOUNTS:-}
+      QWEN2API_API_KEYS: ${QWEN2API_API_KEYS:-}
+      QWEN2API_LISTEN: ":8400"
+      QWEN2API_STATE_FILE: /app/data/state.json
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8400/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

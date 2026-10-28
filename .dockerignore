@@ -1,0 +1,13 @@
+.git
+.github
+.gitignore
+*.md
+!README.md
+data/
+config.json
+.env
+.env.*
+qwen2api
+qwen2api-*
+*.log
+.DS_Store

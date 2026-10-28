@@ -1,0 +1,17 @@
+# 真实配置与凭据一律不入库
+config.json
+.env
+.env.*
+data/
+*.log
+
+# 构建产物
+qwen2api
+qwen2api-*
+dist/
+
+.DS_Store
+*.swp
+
+# 工作记忆（含账号邮箱/内部决策记录，绝不入库）
+.workbuddy/
