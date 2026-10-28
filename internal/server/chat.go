@@ -19,8 +19,18 @@ import (
 // errNoAccount 池里没有可用账号。
 var errNoAccount = errors.New("当前没有可用账号：全部处于冷却/失效状态，或未配置账号")
 
-// errVideoQuotaLocal 本地每日视频配额用尽。
+// errVideoQuotaLocal 本地每日视频配额（配置的每日预算）用尽。
 var errVideoQuotaLocal = errors.New("本地每日视频配额已用尽")
+
+// errCreditsShort 账号积分余额不足（上游账本口径，不是我们设的预算）。
+//
+// 与 errVideoQuotaLocal 分开是因为**处置完全不同**：
+//   - 预算用尽 ⇒ 今天就是不能做了，改配置或等明天；
+//   - 余额不足 ⇒ 可以充值，或换一个有余额的号，或等每日赠送。
+//
+// 两个都映射 429/insufficient_quota，但文案不能混 —— 混了就会让人去改一个
+// 根本不生效的配置项（2026-10-29 实测踩到：报了"本地配额用尽"其实该充值）。
+var errCreditsShort = errors.New("账号积分余额不足")
 
 // errImageQuotaLocal 本地每日出图配额用尽（网关自己的限制，不是上游报错）。
 //
@@ -450,7 +460,7 @@ func httpStatusFor(err error) int {
 		return http.StatusServiceUnavailable
 	}
 	if errors.Is(err, upstream.ErrQuota) || errors.Is(err, errImageQuotaLocal) ||
-		errors.Is(err, errVideoQuotaLocal) {
+		errors.Is(err, errVideoQuotaLocal) || errors.Is(err, errCreditsShort) {
 		// 额度耗尽是"现在不行、等下/升级才行" ⇒ 429 而不是 502。
 		return http.StatusTooManyRequests
 	}
@@ -476,7 +486,8 @@ func errTypeFor(err error) string {
 	if errors.Is(err, upstream.ErrQuota) {
 		return "insufficient_quota"
 	}
-	if errors.Is(err, errImageQuotaLocal) || errors.Is(err, errVideoQuotaLocal) {
+	if errors.Is(err, errImageQuotaLocal) || errors.Is(err, errVideoQuotaLocal) ||
+		errors.Is(err, errCreditsShort) {
 		return "insufficient_quota"
 	}
 	switch upstream.KindOf(err) {

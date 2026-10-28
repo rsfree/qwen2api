@@ -602,6 +602,103 @@ GET /api/v2/tts/config?omni_speakers=v1&audio_tts_speakers=v1&omni_language=v1&a
 ❌ 不要用 `tts/config` 里的 speaker 参数去猜 `/api/v2/tts/speech` 之类的路径 —— 该端点不存在，
    猜出来也只能是 404 或空响应。
 
+## 4.10 积分（Credits）：第三个域名（✅ 2026-10-29 实测）
+
+前面几节里上游是三块：`chat.qwen.ai`（对话/图片/视频/文件）、`auth.qwen.ai`（登录态）。
+积分是**第四块**，而且很容易漏，因为它既不在用量页的 HTML 里、也不在 chat 域的 API 里。
+
+### 4.10.1 怎么找到的（方法比结果有用）
+
+先按常理猜了一圈 `/api/v2/credits/balance`、`/credits/summary`、`/credits/account` … 全 404。
+后来换了做法：**让页面自己告诉我们**。
+
+```js
+// 在用量与账单页执行
+performance.getEntriesByType('resource')
+  .filter(e => e.initiatorType === 'xmlhttprequest')
+  .map(e => e.name)
+```
+
+结果里出现两个新域名：
+
+```
+https://sg-member.qwen.com/api/member/level/query?biz_id=ai_qwen&…
+https://sg-entitlement.qwen.com/api/entitlement/credits/credits/history?biz_id=ai_qwen&…&pageNum=1&pageSize=20
+```
+
+📌 两个之前踩过的坑：
+- 页面用 **XHR**（不是 `fetch`）⇒ 之前 hook `window.fetch` 一条都没抓到，误判成"没有接口"；
+- 余额**不是 SSR**（未水合的 HTML 里没有数字）⇒ 抓 HTML 也找不到。
+
+### 4.10.2 端点与响应
+
+```
+GET https://sg-entitlement.qwen.com/api/entitlement/credits/credits/history
+    ?biz_id=ai_qwen&chat_client=h5&device=pc&fr=pc&pr=qwen-i18n
+    &la=zh-CN&tz=Asia%2FShanghai&wv=0.3.26&pageNum=1&pageSize=20
+```
+
+信封和 chat 域**不一样**（chat 是 `{success, request_id, data}`）：
+
+```json
+{"traceId":"…","httpCode":200,"success":true,"errorCode":null,"errorMsg":null,
+ "data":{"totalCredits":280,"subscriptionCredits":270,"bonusCredits":10,
+         "pageNum":1,"pageSize":20,"total":32,
+         "usageList":[{"id":"217970435829026816",
+           "title":"credits.dec.HappyHorse1.1.720P.5s.video",
+           "date":1793209700000,"unit":"Credits","amount":30,"state":"-"}]}}
+```
+
+- `totalCredits` = 可用总额（= 订阅 + 奖励），**判够不够只看这个**；
+- `usageList[]` 是流水：`amount` 正数入账、`state:"-"` 表示扣费；`title` 里带模型与档位；
+- `biz_id` 少了会 404；`pageSize=1` 只取余额时返回体很小，适合高频轮询（本仓 60s 一次）。
+
+### 4.10.3 计价表：`GET /api/v2/credits/pricing`（chat 域）
+
+同一个概念在两个域各有一半，**必须两个都读**：
+
+```json
+{"success":true,"data":{
+  "user":{"is_member":true,"member_type":"lite","member_expire_at":{…}},
+  "image_generation":{"credits":1,"user_type":"all"},        // 出图 1 张 = 1 分
+  "video_generation":[
+    {"scene":"hh11T2v720P5s","desc":"视频生成-HappyHorse-高清-5s","consumeAmount":30,"kind":"all"},
+    {"scene":"hhT2v720P5s",  "desc":"视频生成-HappyHorse-高清-5s","consumeAmount":40,"kind":"all"},
+    … 共 132 条
+  ]}}
+```
+
+🔴 **`scene` 前缀区分模型版本，价格差 33%~75%**：
+
+| scene 前缀 | 模型 | 720P 5/10/15s | 1080P 5/10/15s |
+|---|---|---|---|
+| `hh11*` | HappyHorse **1.1**（本仓默认 `root_model=happyhorse11`） | **30 / 60 / 90** | **40 / 80 / 120** |
+| `hh*` | HappyHorse 1.0 | 40 / 80 / 120 | 70 / 140 / 210 |
+| `wan27*` / `wan25Preview*` / `wan30*` | Wan 系列 | 20~45 | 25~180 |
+
+这条**踩过一次**：先按账单里的 `HappyHorse1.1.720P.5s = -30` 推了整张表，
+再从 pricing 里读到 `hhT2v720P5s = 40`，一度以为账单和接口矛盾 ——
+其实是我拿 `hh`（1.0）的行去对 `hh11`（1.1）的单。**按 scene 前缀取，别按 desc 取**
+（desc 里两版都写"HappyHorse"，没有版本号）。
+
+`kind` 字段：`all` = 任何额度可用；`purchase` = 需付费额度（1.0 的 1080P 全是这个）。
+本仓不做区分，统一按"余额 ≥ 单价"判断 —— 余额不足时上游会给明确文案（见 §4.5.4）。
+
+### 4.10.4 第三个"伪装成正常回复"的地方
+
+积分不足时**提交视频仍返回 HTTP 200 + `success:true`**，只是没有 `task_id`：
+
+```json
+{"success":true,"data":{"messages":[{"content":
+  "Credits 不足\n本次生成需要 30 Credits，当前可用 10 Credits。开通 Qwen 会员…"}]}}
+```
+
+本仓识别它（`isVideoCreditShortage`）并归类为 `KindQuota` ⇒ 对外 **429 insufficient_quota**。
+
+> 至此"伪装成正常回复"共三处，都要单独识别：
+> ① 图片流 `extra.update_member`（§4.5.4）；② 视频提交 `messages[0].content`（本节）；
+> ③ 余额本身要主动查（本节 4.10.2），不查就永远不知道还剩多少。
+
 ## 5. 模型清单（✅ 2026-10-28）
 
 `GET /api/v2/models/` 响应：

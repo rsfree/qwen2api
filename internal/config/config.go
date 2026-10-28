@@ -38,8 +38,13 @@ type Account struct {
 type Upstream struct {
 	BaseURL     string `json:"base_url"`      // https://chat.qwen.ai
 	AuthBaseURL string `json:"auth_base_url"` // https://auth.qwen.ai（登录态刷新域，与业务域分离）
-	Version     string `json:"version"`       // version 请求头；0.3.26 为当前前端版本
-	UserAgent   string `json:"user_agent"`    // Chrome UA，需与 sec-ch-ua 版本自洽
+	// EntitlementBaseURL 积分（Credits）域。
+	//
+	// 🔴 它是**第三个域名**：余额/消费明细既不在 chat.qwen.ai 也不在 auth.qwen.ai，
+	// 而在 sg-entitlement.qwen.com。2026-10-29 实测：用量与账单页的余额走这里。
+	EntitlementBaseURL string `json:"entitlement_base_url"`
+	Version            string `json:"version"`    // version 请求头；0.3.26 为当前前端版本
+	UserAgent          string `json:"user_agent"` // Chrome UA，需与 sec-ch-ua 版本自洽
 	// BxUA / BxUmidtoken 是阿里的设备指纹头。实测前端自己也会带
 	// "defaultFY2_load_failed with timeout"，说明**不是硬门槛**；留空即不发。
 	BxUA        string `json:"bx_ua"`
@@ -166,9 +171,15 @@ func Default() Config {
 		StateFile:       "./data/state.json",
 		ImageModel:      "qwen-image-3.0",
 		Video: Video{
-			// 积分单价：来自用量页真实扣费记录（2026-10-29）。
-			//   720P 5s = -30、1080P 15s = -120（后者正好是 5s 的 3 倍 ⇒ 按秒线性）。
-			//   1080P 5s 未直接观测到，按同一条线性关系推得 40。
+			// 积分单价：来自官方计价接口 `GET /api/v2/credits/pricing`（2026-10-29 实测）。
+			//
+			// 🔴 价格**按模型版本分两套**，别拿错表：
+			//   hh11*（HappyHorse 1.1，本仓 root_model 默认值 happyhorse11）
+			//     720P 30/60/90  1080P 40/80/120
+			//   hh*（HappyHorse 1.0）
+			//     720P 40/80/120 1080P 70/140/210
+			// 下面这张是 hh11 的。账单实测 `HappyHorse1.1.720P.5s = -30`、`1080P.15s = -120`
+			// 与之一致；换 root_model 时价格表要跟着换，否则预算会算错 33%~75%。
 			// 🔴 别用「个数」想象视频成本：720P 5s 与 1080P 15s 差 4 倍。
 			Pricing: map[string]map[string]int{
 				"720P":  {"5": 30, "10": 60, "15": 90},
@@ -181,9 +192,10 @@ func Default() Config {
 			Size:       "16:9",
 		},
 		Upstream: Upstream{
-			BaseURL:     "https://chat.qwen.ai",
-			AuthBaseURL: "https://auth.qwen.ai",
-			Version:     "0.3.26",
+			BaseURL:            "https://chat.qwen.ai",
+			AuthBaseURL:        "https://auth.qwen.ai",
+			EntitlementBaseURL: "https://sg-entitlement.qwen.com",
+			Version:            "0.3.26",
 			UserAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
 				"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
 			TimeoutS: 180,
@@ -196,8 +208,10 @@ func Default() Config {
 			MaxInflightPerAccount: 2,
 			MaxImagePerDay:        6,
 			MaxVideoPerDay:        1,
-			// 普号每天送 40 积分（用户确认 + 用量页 `已授予每日免费积分 +40` 实测）。
-			MaxVideoCreditsPerDay: 40,
+			// 默认 0 = 不启用。理由：现在能读**账号真实余额**了（见 upstream.Credits），
+			// 余额才是唯一真口径；再叠一层「40 分/天」会把会员号的 270 分锁死。
+			// 想额外设上限就填正数（按账号、按自然日）。
+			MaxVideoCreditsPerDay: 0,
 		},
 	}
 }

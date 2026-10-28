@@ -40,8 +40,14 @@ type Account struct {
 	videoDay   string
 	videoCount int
 	// 视频积分预算（与个数并存：积分是主口径，个数是硬上限）
-	creditDay     string
-	creditUsed    int
+	creditDay  string
+	creditUsed int
+	// 账号真实积分余额（上游读数，不是本地估算）。
+	// 与 creditUsed 的区别：creditUsed 是我们自己算的"今天花了多少"，
+	// creditBalance 是上游账本上的钱 —— 后者才是"这一步能不能做"的唯一依据。
+	creditBalance int
+	creditKnown   bool
+	creditAt      time.Time
 	cooldownUntil time.Time
 	failures      int
 	lastUsed      time.Time
@@ -71,6 +77,10 @@ type View struct {
 	// CreditsUsed 今日已用视频积分；CreditsLimit 每日积分预算（0 = 不启用）。
 	CreditsUsed  int `json:"credits_used"`
 	CreditsLimit int `json:"credits_limit"`
+	// CreditBalance 上游账本上的真实余额；CreditKnown=false 表示还没读到
+	// （此时不做余额拦截，靠上游 insufficient_quota 兜底）。
+	CreditBalance int  `json:"credit_balance"`
+	CreditKnown   bool `json:"credit_known"`
 }
 
 // Pool 账号池（并发安全）。
@@ -156,6 +166,11 @@ func (p *Pool) pickVideo(needCredits int) (*Account, bool) {
 			if a.creditUsed+needCredits > p.cfg.MaxVideoCreditsPerDay {
 				continue
 			}
+		}
+		// 真实余额不足就别选它 —— 选它只会拿回一句「Credits 不足」，
+		// 白跑一次上游还可能被记成一次失败。
+		if a.creditKnown && needCredits > 0 && a.creditBalance < needCredits {
+			continue
 		}
 		candidates = append(candidates, a)
 	}
@@ -298,6 +313,100 @@ func (p *Pool) VideoQuotaLeft() int {
 		}
 	}
 	return total
+}
+
+// SetCreditBalance 记录从上游读到的真实余额。
+//
+// balance < 0 表示"读不到"：此时清掉 known，让选号退回不拦截
+// （靠上游 insufficient_quota 兜底），而不是拿一个过期的数当真。
+func (p *Pool) SetCreditBalance(name string, balance int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.lookupLocked(name)
+	if a == nil {
+		return
+	}
+	if balance < 0 {
+		a.creditKnown = false
+		return
+	}
+	a.creditBalance = balance
+	a.creditKnown = true
+	a.creditAt = time.Now()
+}
+
+// DebitCreditBalance 提交成功后**乐观扣减**本地缓存的余额。
+//
+// 为什么要乐观扣：余额缓存有 60s TTL，一分钟内连发两个 720P 会让第二个
+// 仍看到旧余额。乐观扣减让同分钟内的请求看到正确数字；下次上游刷新会覆盖它。
+func (p *Pool) DebitCreditBalance(name string, credits int) {
+	if credits <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.lookupLocked(name)
+	if a == nil || !a.creditKnown {
+		return
+	}
+	a.creditBalance -= credits
+	if a.creditBalance < 0 {
+		a.creditBalance = 0
+	}
+}
+
+// CreditBalance 取账号余额与"是否已知"。
+func (p *Pool) CreditBalance(name string) (int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.lookupLocked(name)
+	if a == nil {
+		return 0, false
+	}
+	return a.creditBalance, a.creditKnown
+}
+
+// lookupLocked 按名找账号（调用方必须已持锁）。
+//
+// 🔴 别在持写锁时调 Get()：它内部 RLock，会把自己锁死（2026-10-29 踩过一次）。
+func (p *Pool) lookupLocked(name string) *Account {
+	for _, a := range p.accounts {
+		if a.Name == name {
+			return a
+		}
+	}
+	return nil
+}
+
+// CreditStale 列出余额过期（或从没读过）的账号名，供上层批量刷新。
+func (p *Pool) CreditStale(ttl time.Duration) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	var out []string
+	for _, a := range p.accounts {
+		if a.authDead {
+			continue
+		}
+		if !a.creditKnown || now.Sub(a.creditAt) > ttl {
+			out = append(out, a.Name)
+		}
+	}
+	return out
+}
+
+// AnyCreditBalance 全池余额（已知的那些），给 /stats 与面板看。
+func (p *Pool) AnyCreditBalance() (total int, known int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, a := range p.accounts {
+		if a.authDead || !a.creditKnown {
+			continue
+		}
+		total += a.creditBalance
+		known++
+	}
+	return total, known
 }
 
 // rollCreditDay 视频积分预算跨天清零（持锁调用）。
@@ -598,19 +707,21 @@ func (p *Pool) Snapshot() []View {
 			creditsUsed = a.creditUsed
 		}
 		v := View{
-			Name:         a.Name,
-			Email:        a.Email,
-			Note:         a.Note,
-			Inflight:     int(atomic.LoadInt32(&a.inflight)),
-			Failures:     a.failures,
-			Served:       a.served,
-			LastError:    a.lastError,
-			ImageToday:   imageToday,
-			ImageLimit:   p.cfg.MaxImagePerDay,
-			VideoToday:   videoToday,
-			VideoLimit:   p.cfg.MaxVideoPerDay,
-			CreditsUsed:  creditsUsed,
-			CreditsLimit: p.cfg.MaxVideoCreditsPerDay,
+			Name:          a.Name,
+			Email:         a.Email,
+			Note:          a.Note,
+			Inflight:      int(atomic.LoadInt32(&a.inflight)),
+			Failures:      a.failures,
+			Served:        a.served,
+			LastError:     a.lastError,
+			ImageToday:    imageToday,
+			ImageLimit:    p.cfg.MaxImagePerDay,
+			VideoToday:    videoToday,
+			VideoLimit:    p.cfg.MaxVideoPerDay,
+			CreditsUsed:   creditsUsed,
+			CreditsLimit:  p.cfg.MaxVideoCreditsPerDay,
+			CreditBalance: a.creditBalance,
+			CreditKnown:   a.creditKnown,
 		}
 		switch {
 		case a.authDead:

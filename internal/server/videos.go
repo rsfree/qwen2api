@@ -162,6 +162,11 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 选号前把余额刷一遍（TTL 60s，并发只跑一轮）。
+	// 没有这一步，"够不够"只能靠配置里的预算猜 —— 而真实余额是账号级的：
+	// 免费号 40、会员号 270、昨天剩 10 都可能（2026-10-29 实测 alt 号只有 10）。
+	s.refreshStaleCredits(r.Context(), creditTTL)
+
 	spec := upstream.VideoSpec(size, resolution, duration, audio, s.cfg.Video.RootModel)
 
 	var (
@@ -176,12 +181,10 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 			if lastErr != nil {
 				break
 			}
-			// 先分辨"积分不够"与"账号都不可用"：两者都让 Pick 失败，
-			// 但调用方的处置完全不同（一个该等额度、一个该换号或看冷却）。
-			if !s.pool.CanSpendVideoCredits(needCredits) {
-				lastErr = fmt.Errorf("%w：本次需要 %d 积分，剩余预算不足以承担"+
-					"（预算 %d 分/号/天；720P 5s=30、1080P 15s=120）",
-					errVideoQuotaLocal, needCredits, s.cfg.Pool.MaxVideoCreditsPerDay)
+			// 先分辨"钱不够"与"账号都不可用"：两者都让 Pick 失败，
+			// 但调用方的处置完全不同（一个该充值/等额度、一个该等冷却或加号）。
+			if sent, msg, short := s.creditsShortfall(needCredits); short {
+				lastErr = fmt.Errorf("%w：%s", sent, msg)
 				break
 			}
 			lastErr = errNoAccount
@@ -207,10 +210,14 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if taskID == "" {
-		// 全池视频额度用尽时给明确信号，而不是笼统的"没有可用账号"。
-		if !s.pool.CanSpendVideoCredits(needCredits) && s.cfg.Pool.MaxVideoCreditsPerDay > 0 {
-			lastErr = fmt.Errorf("%w：全部 %d 个账号今日视频积分都不够这一次（预算 %d 分/号/天，本次需要 %d 分）",
-				errVideoQuotaLocal, s.pool.Len(), s.cfg.Pool.MaxVideoCreditsPerDay, needCredits)
+		// 全池钱不够时给明确信号，而不是笼统的"没有可用账号"。
+		if lastErr == errNoAccount || lastErr == nil {
+			if sent, msg, short := s.creditsShortfall(needCredits); short {
+				lastErr = fmt.Errorf("%w：%s", sent, msg)
+			}
+		}
+		if lastErr == nil {
+			lastErr = errNoAccount
 		}
 		code := httpStatusFor(lastErr)
 		entry.Status = code
@@ -226,6 +233,8 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 	s.pool.MarkVideoDone(s.pool.Get(acct))
 	if needCredits > 0 {
 		s.pool.SpendVideoCredits(s.pool.Get(acct), needCredits)
+		// 余额缓存 60s 才刷一次；乐观扣减让同一分钟内的下一个请求看到正确数字。
+		s.pool.DebitCreditBalance(acct, needCredits)
 	}
 
 	// 对外 id 用 video_ 前缀，避免客户端把上游 tsk_ 当成我们的资源 id。

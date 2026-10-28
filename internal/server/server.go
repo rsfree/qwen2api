@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yuanjie-ai/qwen2api/internal/config"
@@ -33,6 +34,9 @@ type Server struct {
 	videos *videoStore
 	// files 上传条目的暂存（内存 2h）。
 	files *FileStore
+	// 积分余额读取失败的日志去重（见 credits.go）。
+	creditErrMu sync.Mutex
+	creditErrAt time.Time
 }
 
 // New 构造前门。
@@ -189,6 +193,11 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	// 顺便刷一遍余额（2 分钟 TTL，比视频路径的 60s 松）：
+	// 面板要能看到真实余额，但轮询不该把第三方域名打热。
+	// 这是 **零花钱** 的读法 —— 不提交任何生成任务。
+	s.refreshStaleCredits(r.Context(), creditTTLStats)
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service":  "qwen2api",
 		"version":  s.version,

@@ -15,6 +15,19 @@
     "duration": 5,
     "audio": true,
     "root_model": "happyhorse11",
+    "// pricing": "积分单价 resolution→秒→积分。⚠️ 价格按模型版本分两套：happyhorse11(hh11*) 是 720P 30/60/90、1080P 40/80/120；happyhorse1.0(hh*) 是 720P 40/80/120、1080P 70/140/210。改 root_model 必须同步改这张表，否则预算会算错 33%~75%。查不到的档位会被 400 拒绝（不猜价）",
+    "pricing": {
+      "720P": {
+        "5": 30,
+        "10": 60,
+        "15": 90
+      },
+      "1080P": {
+        "5": 40,
+        "10": 80,
+        "15": 120
+      }
+    },
     "size": "16:9"
   },
   "// expose_reasoning": "是否把上游思考摘要透出为 reasoning_content（默认 true）",
@@ -25,6 +38,8 @@
   "upstream": {
     "base_url": "https://chat.qwen.ai",
     "auth_base_url": "https://auth.qwen.ai",
+    "// entitlement_base_url": "积分（余额/消费明细）所在域名。第三个域名：chat 管对话、auth 管登录、sg-entitlement 管积分。不配则不做余额拦截（退回上游 insufficient_quota 兜底）",
+    "entitlement_base_url": "https://sg-entitlement.qwen.com",
     "// version": "HTTP 头 version；必须与当前前端版本自洽（2026-10-28 实测 0.3.26）",
     "version": "0.3.26",
     "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
@@ -41,7 +56,11 @@
     "cooldown_auth_s": 1800,
     "max_inflight_per_account": 2,
     "// max_image_per_day": "单账号每日成功出图上限，0 = 不限，默认 6。为什么 6 而不是上游实测的 9：留 3 张缓冲，避免打到硬限后上游只发心跳、静默挂起。只统计成功张数（实测挂起不扣上游额度）",
-    "max_image_per_day": 6
+    "max_image_per_day": 6,
+    "// max_video_per_day": "单账号每日视频任务个数上限，0 = 不限，默认 1（兜底防护）",
+    "max_video_per_day": 1,
+    "// max_video_credits_per_day": "单账号每日视频积分预算，0 = 不启用（默认）。现在会读账号真实余额（upstream.entitlement_base_url），余额才是真口径；这条只在你想额外加一道日上限时才填",
+    "max_video_credits_per_day": 0
   },
   "// accounts": "凭据两种给法：① token（Barear 或 cookie jar，启动时自动探测形态）；② email+password（signin→refresh 自动换 access_token，失效自动重登）。注意 token 与 password 可同时给，password 用于续期。",
   "accounts": [

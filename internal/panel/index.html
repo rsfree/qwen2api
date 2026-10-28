@@ -219,13 +219,14 @@ function render(d) {
     $('accounts').innerHTML = '<div class="empty">还没有配置账号 —— 在 config.json 的 accounts 里加 Bearer token，或用环境变量 QWEN2API_ACCOUNTS</div>';
   } else {
     $('accounts').innerHTML = `<table><thead><tr>
-      <th>名称</th><th>状态</th><th>今日出图</th><th>视频积分</th><th>在途</th><th>已服务</th><th>失败</th><th>最近使用</th><th>最近错误</th><th></th>
+      <th>名称</th><th>状态</th><th>今日出图</th><th>视频积分</th><th>余额</th><th>在途</th><th>已服务</th><th>失败</th><th>最近使用</th><th>最近错误</th><th></th>
     </tr></thead><tbody>${acc.map(a => `
       <tr>
         <td><b>${esc(a.name)}</b>${a.email ? `<div class="muted mono">${esc(a.email)}</div>` : ''}</td>
         <td><span class="pill ${a.state}">${a.state === 'ready' ? '可用' : a.state === 'cooling' ? '冷却 ' + a.cooldown_left_s + 's' : '凭据失效'}</span></td>
         <td class="num">${a.image_limit > 0 ? `${a.image_today || 0}/${a.image_limit}` : (a.image_today || 0)}</td>
         <td class="num">${a.credits_limit > 0 ? `${a.credits_used || 0}/${a.credits_limit}` : '—'}</td>
+        <td class="num">${a.credit_known ? a.credit_balance : '—'}</td>
         <td class="num">${a.inflight}</td>
         <td class="num">${a.served}</td>
         <td class="num">${a.failures || 0}</td>
