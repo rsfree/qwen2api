@@ -35,8 +35,13 @@ type Account struct {
 	inflight int32
 	// imageDay / imageCount 是"本地每日出图配额"：跨天自动清零。
 	// 存日期而不是时间戳，因为上游的口径是「今日」（自然日），不是滚动 24h。
-	imageDay      string
-	imageCount    int
+	imageDay   string
+	imageCount int
+	videoDay   string
+	videoCount int
+	// 视频积分预算（与个数并存：积分是主口径，个数是硬上限）
+	creditDay     string
+	creditUsed    int
 	cooldownUntil time.Time
 	failures      int
 	lastUsed      time.Time
@@ -60,6 +65,12 @@ type View struct {
 	// ImageToday 今日已成功出图张数；ImageLimit 本地每日上限（0 = 不限）。
 	ImageToday int `json:"image_today"`
 	ImageLimit int `json:"image_limit"`
+	// VideoToday 今日已提交的视频任务数；VideoLimit 本地每日上限（0 = 不限）。
+	VideoToday int `json:"video_today"`
+	VideoLimit int `json:"video_limit"`
+	// CreditsUsed 今日已用视频积分；CreditsLimit 每日积分预算（0 = 不启用）。
+	CreditsUsed  int `json:"credits_used"`
+	CreditsLimit int `json:"credits_limit"`
 }
 
 // Pool 账号池（并发安全）。
@@ -98,7 +109,7 @@ func (p *Pool) Len() int {
 //
 // 选择顺序：在途数少的优先；同等在途取最久未用的（近似轮询，避免一个号被连打）。
 func (p *Pool) Pick() (*Account, bool) {
-	return p.pick(false)
+	return p.pick(kindAny)
 }
 
 // PickForImage 取一个"今日出图额度还没用完"的账号。
@@ -106,10 +117,73 @@ func (p *Pool) Pick() (*Account, bool) {
 // 与 Pick 的唯一区别是多一道本地配额过滤：某号今日已出够 `max_image_per_day` 张，
 // 就先跳过它，别等打到上游硬限（那时上游只会挂起，没有明确报错）。
 func (p *Pool) PickForImage() (*Account, bool) {
-	return p.pick(true)
+	return p.pick(kindImage)
 }
 
-func (p *Pool) pick(needImage bool) (*Account, bool) {
+// PickForVideo 取一个"今日视频额度还够这一次"的账号。
+//
+// needCredits 是本次视频要扣的积分（由 server 按价格表算好传入）。
+// 积分模式启用时按"剩余预算 ≥ needCredits"过滤；未启用时只看个数上限。
+//
+// 🔴 不能只看个数：720P 5s 是 30 分、1080P 15s 是 120 分，
+// 按"1 个/天"放行的话，1080P 请求会把预算打穿 3 倍。
+func (p *Pool) PickForVideo(needCredits int) (*Account, bool) {
+	return p.pickVideo(needCredits)
+}
+
+// pickVideo 视频选号（带积分过滤）。
+func (p *Pool) pickVideo(needCredits int) (*Account, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := time.Now()
+	var candidates []*Account
+	for _, a := range p.accounts {
+		if a.authDead || now.Before(a.cooldownUntil) {
+			continue
+		}
+		if int(atomic.LoadInt32(&a.inflight)) >= p.cfg.MaxInflightPerAccount {
+			continue
+		}
+		if p.cfg.MaxVideoPerDay > 0 {
+			p.rollVideoDay(a, now)
+			if a.videoCount >= p.cfg.MaxVideoPerDay {
+				continue
+			}
+		}
+		if p.cfg.MaxVideoCreditsPerDay > 0 {
+			p.rollCreditDay(a, now)
+			if a.creditUsed+needCredits > p.cfg.MaxVideoCreditsPerDay {
+				continue
+			}
+		}
+		candidates = append(candidates, a)
+	}
+	if len(candidates) == 0 {
+		return nil, false
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		ci, cj := atomic.LoadInt32(&candidates[i].inflight), atomic.LoadInt32(&candidates[j].inflight)
+		if ci != cj {
+			return ci < cj
+		}
+		return candidates[i].lastUsed.Before(candidates[j].lastUsed)
+	})
+	chosen := candidates[0]
+	atomic.AddInt32(&chosen.inflight, 1)
+	chosen.lastUsed = now
+	return chosen, true
+}
+
+type pickKind int
+
+const (
+	kindAny pickKind = iota
+	kindImage
+	kindVideo
+)
+
+func (p *Pool) pick(need pickKind) (*Account, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -125,12 +199,19 @@ func (p *Pool) pick(needImage bool) (*Account, bool) {
 		if int(atomic.LoadInt32(&a.inflight)) >= p.cfg.MaxInflightPerAccount {
 			continue
 		}
-		if needImage && p.cfg.MaxImagePerDay > 0 {
+		if need == kindImage && p.cfg.MaxImagePerDay > 0 {
 			p.rollImageDay(a, now)
 			if a.imageCount >= p.cfg.MaxImagePerDay {
 				continue
 			}
 		}
+		if need == kindVideo && p.cfg.MaxVideoPerDay > 0 {
+			p.rollVideoDay(a, now)
+			if a.videoCount >= p.cfg.MaxVideoPerDay {
+				continue
+			}
+		}
+		_ = need
 		candidates = append(candidates, a)
 	}
 	if len(candidates) == 0 {
@@ -158,6 +239,145 @@ func (p *Pool) rollImageDay(a *Account, now time.Time) {
 		a.imageDay = today
 		a.imageCount = 0
 	}
+}
+
+// rollVideoDay 跨天清零（持锁调用）。
+func (p *Pool) rollVideoDay(a *Account, now time.Time) {
+	today := now.Format("2006-01-02")
+	if a.videoDay != today {
+		a.videoDay = today
+		a.videoCount = 0
+	}
+}
+
+// MarkVideoDone 记一次**已提交**的视频任务。
+//
+// 与图片的差别：视频提交成功就扣上游额度（异步任务，产物 15 分钟后才知道），
+// 所以计数点在"拿到 task_id"，不在"下载成功"。反过来说，提交失败不该计数 ——
+// 那种情况上游根本没建任务。
+func (p *Pool) MarkVideoDone(a *Account) {
+	if a == nil {
+		return
+	}
+	p.mu.Lock()
+	p.rollVideoDay(a, time.Now())
+	a.videoCount++
+	p.mu.Unlock()
+	p.save()
+}
+
+// VideoUsage 返回该号今日已提交视频数与上限（limit=0 表示不限）。
+func (p *Pool) VideoUsage(a *Account) (used, limit int) {
+	if a == nil {
+		return 0, p.cfg.MaxVideoPerDay
+	}
+	p.mu.Lock()
+	p.rollVideoDay(a, time.Now())
+	used = a.videoCount
+	p.mu.Unlock()
+	return used, p.cfg.MaxVideoPerDay
+}
+
+// VideoQuotaLeft 全池今日剩余视频额度（0 且 limit>0 ⇒ 用尽；-1 ⇒ 不限）。
+func (p *Pool) VideoQuotaLeft() int {
+	limit := p.cfg.MaxVideoPerDay
+	if limit <= 0 {
+		return -1
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	total := 0
+	for _, a := range p.accounts {
+		if a.authDead {
+			continue
+		}
+		p.rollVideoDay(a, now)
+		if left := limit - a.videoCount; left > 0 {
+			total += left
+		}
+	}
+	return total
+}
+
+// rollCreditDay 视频积分预算跨天清零（持锁调用）。
+func (p *Pool) rollCreditDay(a *Account, now time.Time) {
+	today := now.Format("2006-01-02")
+	if a.creditDay != today {
+		a.creditDay = today
+		a.creditUsed = 0
+	}
+}
+
+// SpendVideoCredits 扣一次视频积分（提交成功后调用）。
+func (p *Pool) SpendVideoCredits(a *Account, credits int) {
+	if a == nil || credits <= 0 {
+		return
+	}
+	p.mu.Lock()
+	p.rollCreditDay(a, time.Now())
+	a.creditUsed += credits
+	p.mu.Unlock()
+	p.save()
+}
+
+// CreditsUsage 返回 (今日已用积分, 每日预算)。预算 0 表示不启用积分模式。
+func (p *Pool) CreditsUsage(a *Account) (used, limit int) {
+	limit = p.cfg.MaxVideoCreditsPerDay
+	if a == nil {
+		return 0, limit
+	}
+	p.mu.Lock()
+	p.rollCreditDay(a, time.Now())
+	used = a.creditUsed
+	p.mu.Unlock()
+	return used, limit
+}
+
+// CanSpendVideoCredits 是否存在**单个**账号的剩余预算够这一次。
+//
+// 注意不能拿 CreditsLeft() >= need 判断：两个号各剩 20 分时总和够 40，
+// 但 30 分的请求谁都不够 —— 那种情况要报"积分不足"，不是"账号不可用"。
+func (p *Pool) CanSpendVideoCredits(need int) bool {
+	limit := p.cfg.MaxVideoCreditsPerDay
+	if limit <= 0 {
+		return true // 未启用积分模式
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	for _, a := range p.accounts {
+		if a.authDead {
+			continue
+		}
+		p.rollCreditDay(a, now)
+		if limit-a.creditUsed >= need {
+			return true
+		}
+	}
+	return false
+}
+
+// CreditsLeft 全池今日剩余视频积分（-1 表示不启用积分模式）。
+func (p *Pool) CreditsLeft() int {
+	limit := p.cfg.MaxVideoCreditsPerDay
+	if limit <= 0 {
+		return -1
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	total := 0
+	for _, a := range p.accounts {
+		if a.authDead {
+			continue
+		}
+		p.rollCreditDay(a, now)
+		if left := limit - a.creditUsed; left > 0 {
+			total += left
+		}
+	}
+	return total
 }
 
 // MarkImageDone 记一张**成功出图**（失败/挂起不计数）。
@@ -369,16 +589,28 @@ func (p *Pool) Snapshot() []View {
 		if a.imageDay == today {
 			imageToday = a.imageCount
 		}
+		videoToday := 0
+		if a.videoDay == today {
+			videoToday = a.videoCount
+		}
+		creditsUsed := 0
+		if a.creditDay == today {
+			creditsUsed = a.creditUsed
+		}
 		v := View{
-			Name:       a.Name,
-			Email:      a.Email,
-			Note:       a.Note,
-			Inflight:   int(atomic.LoadInt32(&a.inflight)),
-			Failures:   a.failures,
-			Served:     a.served,
-			LastError:  a.lastError,
-			ImageToday: imageToday,
-			ImageLimit: p.cfg.MaxImagePerDay,
+			Name:         a.Name,
+			Email:        a.Email,
+			Note:         a.Note,
+			Inflight:     int(atomic.LoadInt32(&a.inflight)),
+			Failures:     a.failures,
+			Served:       a.served,
+			LastError:    a.lastError,
+			ImageToday:   imageToday,
+			ImageLimit:   p.cfg.MaxImagePerDay,
+			VideoToday:   videoToday,
+			VideoLimit:   p.cfg.MaxVideoPerDay,
+			CreditsUsed:  creditsUsed,
+			CreditsLimit: p.cfg.MaxVideoCreditsPerDay,
 		}
 		switch {
 		case a.authDead:
@@ -427,6 +659,12 @@ type persistedAccount struct {
 	// ImageDay/ImageCount 每日出图配额（跨天由 rollImageDay 清零，跨重启保留）。
 	ImageDay   string `json:"image_day,omitempty"`
 	ImageCount int    `json:"image_count,omitempty"`
+	// VideoDay/VideoCount 每日视频配额（同上）。
+	VideoDay   string `json:"video_day,omitempty"`
+	VideoCount int    `json:"video_count,omitempty"`
+	// CreditDay/CreditUsed 每日视频积分消耗（同上）。
+	CreditDay  string `json:"credit_day,omitempty"`
+	CreditUsed int    `json:"credit_used,omitempty"`
 }
 
 func (p *Pool) save() {
@@ -443,6 +681,10 @@ func (p *Pool) save() {
 			LastError:  a.lastError,
 			ImageDay:   a.imageDay,
 			ImageCount: a.imageCount,
+			VideoDay:   a.videoDay,
+			VideoCount: a.videoCount,
+			CreditDay:  a.creditDay,
+			CreditUsed: a.creditUsed,
 		}
 		if !a.cooldownUntil.IsZero() {
 			item.CooldownUntil = a.cooldownUntil.Unix()
@@ -492,6 +734,10 @@ func (p *Pool) restore() {
 		// 配额跨重启保留；若存的是昨天的日期，下次读到时 rollImageDay 会清零。
 		a.imageDay = st.ImageDay
 		a.imageCount = st.ImageCount
+		a.videoDay = st.VideoDay
+		a.videoCount = st.VideoCount
+		a.creditDay = st.CreditDay
+		a.creditUsed = st.CreditUsed
 		// 🔴 authDead 不跨重启恢复：token 可能已经换了（配置文件被改过），
 		// 一启动就全死会让"我明明更新了 token"变成玄学。冷却时间恢复，
 		// 失效标记只在本次进程内有效。

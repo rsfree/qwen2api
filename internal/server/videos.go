@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -144,6 +145,23 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 		model = s.cfg.DefaultModel
 	}
 
+	// 积分：按档位算这一次要扣多少。查不到档位就明确拒绝 ——
+	// 上游只支持 5/10/15 秒，瞎填的时长本该在网关拦掉，不该放过去烧积分。
+	needCredits, ok := s.cfg.Video.VideoCredits(resolution, duration)
+	if !ok {
+		if len(s.cfg.Video.Pricing) == 0 {
+			needCredits = 0 // 未启用积分模式：退回个数口径
+		} else {
+			entry.Status = http.StatusBadRequest
+			entry.Error = "不支持的视频档位"
+			s.log.Add(entry)
+			writeErrorParam(w, http.StatusBadRequest, "invalid_request_error",
+				fmt.Sprintf("不支持的档位 %s/%ds；支持的档位见 config.video.pricing（默认 720P|1080P × 5|10|15s）",
+					resolution, duration), "resolution")
+			return
+		}
+	}
+
 	spec := upstream.VideoSpec(size, resolution, duration, audio, s.cfg.Video.RootModel)
 
 	var (
@@ -152,9 +170,18 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 		lastErr error
 	)
 	for attempt := 0; attempt < s.cfg.Pool.MaxRotate; attempt++ {
-		a, ok := s.pool.Pick()
+		// 视频按积分计费（720P 5s=30、1080P 15s=120），选号必须看"剩余预算够不够这一次"。
+		a, ok := s.pool.PickForVideo(needCredits)
 		if !ok {
 			if lastErr != nil {
+				break
+			}
+			// 先分辨"积分不够"与"账号都不可用"：两者都让 Pick 失败，
+			// 但调用方的处置完全不同（一个该等额度、一个该换号或看冷却）。
+			if !s.pool.CanSpendVideoCredits(needCredits) {
+				lastErr = fmt.Errorf("%w：本次需要 %d 积分，剩余预算不足以承担"+
+					"（预算 %d 分/号/天；720P 5s=30、1080P 15s=120）",
+					errVideoQuotaLocal, needCredits, s.cfg.Pool.MaxVideoCreditsPerDay)
 				break
 			}
 			lastErr = errNoAccount
@@ -180,6 +207,11 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if taskID == "" {
+		// 全池视频额度用尽时给明确信号，而不是笼统的"没有可用账号"。
+		if !s.pool.CanSpendVideoCredits(needCredits) && s.cfg.Pool.MaxVideoCreditsPerDay > 0 {
+			lastErr = fmt.Errorf("%w：全部 %d 个账号今日视频积分都不够这一次（预算 %d 分/号/天，本次需要 %d 分）",
+				errVideoQuotaLocal, s.pool.Len(), s.cfg.Pool.MaxVideoCreditsPerDay, needCredits)
+		}
 		code := httpStatusFor(lastErr)
 		entry.Status = code
 		entry.Error = lastErr.Error()
@@ -187,6 +219,13 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 		s.log.Add(entry)
 		writeError(w, code, errTypeFor(lastErr), lastErr.Error())
 		return
+	}
+
+	// 🔴 计数点在"拿到 task_id"：视频是异步任务，提交即扣上游积分，
+	// 产物要 15 分钟后才知道 —— 等下载成功再计数就漏计了。
+	s.pool.MarkVideoDone(s.pool.Get(acct))
+	if needCredits > 0 {
+		s.pool.SpendVideoCredits(s.pool.Get(acct), needCredits)
 	}
 
 	// 对外 id 用 video_ 前缀，避免客户端把上游 tsk_ 当成我们的资源 id。

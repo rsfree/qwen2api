@@ -19,6 +19,9 @@ import (
 // errNoAccount 池里没有可用账号。
 var errNoAccount = errors.New("当前没有可用账号：全部处于冷却/失效状态，或未配置账号")
 
+// errVideoQuotaLocal 本地每日视频配额用尽。
+var errVideoQuotaLocal = errors.New("本地每日视频配额已用尽")
+
 // errImageQuotaLocal 本地每日出图配额用尽（网关自己的限制，不是上游报错）。
 //
 // 与 upstream.ErrQuota 的区别：那个是**上游**说没额度了；
@@ -446,7 +449,8 @@ func httpStatusFor(err error) int {
 	if errors.Is(err, errNoAccount) {
 		return http.StatusServiceUnavailable
 	}
-	if errors.Is(err, upstream.ErrQuota) || errors.Is(err, errImageQuotaLocal) {
+	if errors.Is(err, upstream.ErrQuota) || errors.Is(err, errImageQuotaLocal) ||
+		errors.Is(err, errVideoQuotaLocal) {
 		// 额度耗尽是"现在不行、等下/升级才行" ⇒ 429 而不是 502。
 		return http.StatusTooManyRequests
 	}
@@ -472,7 +476,7 @@ func errTypeFor(err error) string {
 	if errors.Is(err, upstream.ErrQuota) {
 		return "insufficient_quota"
 	}
-	if errors.Is(err, errImageQuotaLocal) {
+	if errors.Is(err, errImageQuotaLocal) || errors.Is(err, errVideoQuotaLocal) {
 		return "insufficient_quota"
 	}
 	switch upstream.KindOf(err) {

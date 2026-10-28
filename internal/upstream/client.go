@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -197,7 +198,7 @@ func (c *Client) SubmitVideo(ctx context.Context, cred string, body SubmitBody) 
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
 		return "", NewErr(KindUnknown, "视频提交", resp.StatusCode, "",
-			"响应不是预期 JSON: "+truncate(string(data), 200), false)
+			"响应不是预期 JSON: "+truncate(string(data), 300), false)
 	}
 	if out.TaskID != "" {
 		return out.TaskID, nil
@@ -207,8 +208,68 @@ func (c *Client) SubmitVideo(ctx context.Context, cred string, body SubmitBody) 
 			return m.Extra.Wanx.TaskID, nil
 		}
 	}
+	// 🔴 把上游原文带上。2026-10-29 实测：账号积分不足时上游仍回 HTTP 200 +
+	// success:true，只是 messages 里没有 wanx.task_id —— 不带原文就只剩
+	// "没有 task_id"这句废话，分不清是积分不足、模型不支持还是形态又变了。
+	// 原始响应进日志：形态一变，错误信息里能塞的信息总是不够，
+	// 而日志里留着全文就能直接对新形态。2026-10-29 实测踩过这一条。
+	log.Printf("[qwen2api] 视频提交无 task_id，上游原始响应（前 600 字符）: %s",
+		truncate(string(payload), 600))
+	hint := ""
+	// 注意吃的是 data（已剥掉 {success,data} 外壳），不是 payload。
+	if msg := extractMessageText(data); msg != "" {
+		hint = "；上游原文：" + truncate(msg, 200)
+		// 🔴 积分不足也是「伪装成正常回复」下发的（HTTP 200 + success:true，
+		// messages[0].content 里写「Credits 不足 本次生成需要 30 Credits，当前可用 10 Credits」）。
+		// 这与流式图片的 extra.update_member 是同一个套路，只是投递通道不同。
+		// 不识别它 → 报成"响应里没有 task_id"，把「该充值」误导成「上游改形态了」。
+		if isVideoCreditShortage(msg) {
+			return "", NewErr(KindQuota, "视频提交", resp.StatusCode, "", msg, true)
+		}
+	}
 	return "", NewErr(KindUnknown, "视频提交", resp.StatusCode, "",
-		"响应里没有 task_id（期望 data.messages[0].extra.wanx.task_id）", false)
+		"响应里没有 task_id（期望 data.messages[0].extra.wanx.task_id）"+hint, false)
+}
+
+// isVideoCreditShortage 判断上游那条"积分不足"的回复。
+//
+// 实测原文：「Credits 不足\n本次生成需要 30 Credits，当前可用 10 Credits。…」
+// 只认明确措辞，避免把模型正常解释误判。
+func isVideoCreditShortage(msg string) bool {
+	if strings.Contains(msg, "Credits 不足") || strings.Contains(msg, "积分不足") {
+		return true
+	}
+	return strings.Contains(msg, "Credits") && strings.Contains(msg, "不足")
+}
+
+// extractMessageText 从任务响应里捞出可读文本（错误提示通常塞在 messages[].content）。
+func extractMessageText(payload []byte) string {
+	var v struct {
+		Messages []struct {
+			Content string `json:"content"`
+			Extra   struct {
+				Wanx struct {
+					Error string `json:"error"`
+					Msg   string `json:"message"`
+				} `json:"wanx"`
+			} `json:"extra"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(payload, &v) != nil {
+		return ""
+	}
+	for _, m := range v.Messages {
+		if m.Extra.Wanx.Error != "" {
+			return m.Extra.Wanx.Error
+		}
+		if m.Extra.Wanx.Msg != "" {
+			return m.Extra.Wanx.Msg
+		}
+		if s := strings.TrimSpace(m.Content); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // TaskStatus `GET /api/v2/task/status/<task_id>` —— 视频任务查询。

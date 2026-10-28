@@ -66,6 +66,43 @@ type Video struct {
 	RootModel string `json:"root_model"`
 	// Size 默认画幅。
 	Size string `json:"size"`
+	// Pricing 积分单价表：resolution → 秒数 → 积分。
+	//
+	// 例如 {"720P":{"5":40,"10":80,"15":120}, "1080P":{"5":70}}。
+	// 空表 ⇒ 不启用积分模式，退回 MaxVideoPerDay 的个数口径。
+	// 表里查不到的组合按"最贵档"保守估计，宁可少发也不透支。
+	Pricing map[string]map[string]int `json:"pricing"`
+}
+
+// VideoCredits 查一次视频的积分单价。
+//
+// 查不到时返回 ok=false —— 调用方要么按"最贵档"保守处理，要么直接拒绝。
+// 绝不默认 0：那等于放任免费生成。
+func (v Video) VideoCredits(resolution string, durationS int) (int, bool) {
+	if len(v.Pricing) == 0 {
+		return 0, false
+	}
+	durs, ok := v.Pricing[resolution]
+	if !ok {
+		return 0, false
+	}
+	if c, ok := durs[strconv.Itoa(durationS)]; ok {
+		return c, true
+	}
+	return 0, false
+}
+
+// MaxVideoCredits 价格表里最贵的单价（用于查不到时的保守兜底）。
+func (v Video) MaxVideoCredits() int {
+	max := 0
+	for _, durs := range v.Pricing {
+		for _, c := range durs {
+			if c > max {
+				max = c
+			}
+		}
+	}
+	return max
 }
 
 // Pool 账号池策略。
@@ -78,6 +115,15 @@ type Pool struct {
 	CooldownAuthS int `json:"cooldown_auth_s"`
 	// MaxInflightPerAccount 单账号并发在途上限，默认 2。
 	MaxInflightPerAccount int `json:"max_inflight_per_account"`
+	// MaxVideoPerDay 单账号**每日视频任务**个数上限，0 = 不限，默认 1。
+	// 这是**兜底口径**：上游真正的计费单位是积分（见 Video.Pricing）。
+	// 拿到价格表后改用 MaxVideoCreditsPerDay，这条就退化成"最多几个"的硬上限。
+	MaxVideoPerDay int `json:"max_video_per_day"`
+	// MaxVideoCreditsPerDay 单账号**每日视频积分预算**，0 = 不启用积分模式。
+	//
+	// 🔴 视频按积分计费，不是一个价：720P 5s 与 1080P 15s 差好几倍。
+	// 只有同时给了 Video.Pricing（单价表）才生效；否则退回 MaxVideoPerDay 的个数口径。
+	MaxVideoCreditsPerDay int `json:"max_video_credits_per_day"`
 	// MaxImagePerDay 单账号**每日成功出图**张数上限，0 = 不限，默认 6。
 	//
 	// 为什么设 6 而不是上游实测的 9：留 3 张缓冲。打到硬限后上游不给明确错误，
@@ -120,6 +166,14 @@ func Default() Config {
 		StateFile:       "./data/state.json",
 		ImageModel:      "qwen-image-3.0",
 		Video: Video{
+			// 积分单价：来自用量页真实扣费记录（2026-10-29）。
+			//   720P 5s = -30、1080P 15s = -120（后者正好是 5s 的 3 倍 ⇒ 按秒线性）。
+			//   1080P 5s 未直接观测到，按同一条线性关系推得 40。
+			// 🔴 别用「个数」想象视频成本：720P 5s 与 1080P 15s 差 4 倍。
+			Pricing: map[string]map[string]int{
+				"720P":  {"5": 30, "10": 60, "15": 90},
+				"1080P": {"5": 40, "10": 80, "15": 120},
+			},
 			Resolution: "720P",
 			Duration:   5,
 			Audio:      true,
@@ -141,6 +195,9 @@ func Default() Config {
 			CooldownAuthS:         1800,
 			MaxInflightPerAccount: 2,
 			MaxImagePerDay:        6,
+			MaxVideoPerDay:        1,
+			// 普号每天送 40 积分（用户确认 + 用量页 `已授予每日免费积分 +40` 实测）。
+			MaxVideoCreditsPerDay: 40,
 		},
 	}
 }
