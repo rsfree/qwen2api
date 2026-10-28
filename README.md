@@ -68,6 +68,31 @@ curl -s localhost:8400/v1/chat/completions \
 
 控制台：<http://localhost:8400/panel/>（若配置了 `api_keys`，在右上角填入）。
 
+### 容器部署（镜像）
+
+```bash
+docker run -d --name qwen2api -p 8400:8400 \
+  -v $PWD/data:/app/data \
+  -e QWEN2API_CONFIG=/app/data/config.json \
+  ghcr.io/rsfree/qwen2api:latest
+```
+
+配置有两条路，任选：
+
+| 方式 | 做法 | 适用 |
+|---|---|---|
+| 挂配置文件 | `-v $PWD/data:/app/data` + `QWEN2API_CONFIG=/app/data/config.json`（或 `-config` 参数） | 账号多、要用 `pool` 这类结构化配置 |
+| 纯环境变量 | 只给 `QWEN2API_ACCOUNTS` / `QWEN2API_API_KEYS`，不挂任何文件 | 平台托管、配置即密文 |
+
+三个容易踩的点：
+
+- **配置路径必须显式给**。镜像里既没有 cwd 的 `config.json`、也不该把配置塞进 `/usr/local/bin` 旁边。
+  不给的话服务会**正常启动但 0 账号**（不是启动失败，更难发现）——
+  所以启动日志第一行就是「配置来源：…」，先看它。
+- **容器内是 `uid 10001` 的非 root**。挂载目录要可写（`chmod 777` 或 `chown 10001`），
+  否则 `state_file` 写不进去、配额计数重启就丢。
+- **配置挂载用 `:ro` 可以，但 `data/` 不行**——`state_file` 要写。
+
 ### 凭据怎么拿（两种，任选）
 
 **A. 账号密码（最省事，推荐）**

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -47,9 +48,17 @@ func main() {
 		cfg.Listen = *listen
 	}
 
+	// 配置来源必须打出来。没有这一行时，"--config 没传对 / 环境变量没生效"
+	// 的表现是：服务正常启动、但账号列表和 api_keys 都是空的（静默用默认值），
+	// 排查时只能靠猜。2026-10-29 容器部署实测踩过。
+	if *cfgPath == "" {
+		log.Printf("[qwen2api] 配置来源：无配置文件，仅使用环境变量 QWEN2API_*")
+	} else {
+		log.Printf("[qwen2api] 配置来源：%s", *cfgPath)
+	}
 	if len(cfg.Accounts) == 0 {
 		log.Printf("[qwen2api] ⚠️ 未配置任何账号（config.accounts / QWEN2API_ACCOUNTS）—— " +
-			"服务会启动，但所有生成请求将返回 503")
+			"服务会启动，但所有生成请求将返回 503（用 -config 或 QWEN2API_CONFIG 指路）")
 	}
 	if len(cfg.APIKeys) == 0 {
 		log.Printf("[qwen2api] ⚠️ 未配置 api_keys —— 前门不鉴权，请只在可信网络内暴露")
@@ -137,7 +146,16 @@ func bootstrapAccounts(cfg config.Config, p *pool.Pool, up *upstream.Client) {
 }
 
 // defaultConfigPath 优先 ./config.json，其次可执行文件同目录。
+// defaultConfigPath 配置文件的默认位置，按"显式 > 环境变量 > 约定"三级回落。
+//
+// 🔴 QWEN2API_CONFIG 这一级是容器部署的必需品：镜像里既没有 cwd 的 config.json、
+// 也不该把配置塞进 /usr/local/bin 旁边，只能靠环境变量指路。
+// （2026-10-29 实测：只给 QWEN2API_CONFIG 时服务以"0 账号 + 不鉴权"启动 ——
+// 它没报错，只是静默用默认值跑，比启动失败更难发现。）
 func defaultConfigPath() string {
+	if v := strings.TrimSpace(os.Getenv("QWEN2API_CONFIG")); v != "" {
+		return v
+	}
 	if _, err := os.Stat("config.json"); err == nil {
 		return "config.json"
 	}

@@ -21,6 +21,12 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata \
     && adduser -D -u 10001 -h /app app
+
+# 🔴 时区必须显式设。容器默认 UTC，而"每日生图配额"按**本地日期**清零 ——
+# 不设的话重置时刻会落在北京时间早上 8 点，而不是午夜，用户看到的额度会"莫名其妙"多出 8 小时。
+# 上游那句「今日生图额度已用完」的口径未验证；国内服务按北京时间对齐最稳。
+# 需要别的时区用 `docker run -e TZ=Asia/Tokyo` 覆盖。
+ENV TZ=Asia/Shanghai
 WORKDIR /app
 COPY --from=build /out/qwen2api /usr/local/bin/qwen2api
 
