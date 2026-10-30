@@ -3,6 +3,7 @@ package server
 import (
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,6 +26,9 @@ type ChatPool struct {
 	per int           // 每号每类型最多缓存几个（0 = 关闭预建）
 	ttl time.Duration // 超过这个年龄的会话丢弃
 	now func() time.Time
+	// hit / miss 命中率观测。命中=省掉一次 2.4s 的 chats/new；
+	// 如果 miss 很高，说明预热覆盖的号与实际选号错位（要看 warmTarget/HotNames）。
+	hit, miss int64
 }
 
 type chatEntry struct {
@@ -69,6 +73,8 @@ func (p *ChatPool) Take(account, chatType string) (string, bool) {
 
 	byType := p.m[account]
 	if byType == nil {
+		// 这个号压根没预热过 —— 也算 miss（否则命中率会虚高）。
+		atomic.AddInt64(&p.miss, 1)
 		return "", false
 	}
 	list := byType[chatType]
@@ -84,6 +90,7 @@ func (p *ChatPool) Take(account, chatType string) (string, bool) {
 		} else {
 			byType[chatType] = list
 		}
+		atomic.AddInt64(&p.hit, 1)
 		return e.id, true
 	}
 	if len(list) == 0 {
@@ -91,6 +98,7 @@ func (p *ChatPool) Take(account, chatType string) (string, bool) {
 	} else {
 		byType[chatType] = list
 	}
+	atomic.AddInt64(&p.miss, 1)
 	return "", false
 }
 
@@ -182,9 +190,12 @@ func (p *ChatPool) Trim() int {
 
 // ChatPoolStat 观测口径（/stats 与面板用）。
 type ChatPoolStat struct {
-	Per    int            `json:"per"`    // 每号每类型目标数
-	TTLS   int            `json:"ttl_s"`  // 缓存上限（秒）
-	Ready  int            `json:"ready"`  // 当前可用的会话总数
+	Per    int            `json:"per"`     // 每号每类型目标数
+	TTLS   int            `json:"ttl_s"`   // 缓存上限（秒）
+	Ready  int            `json:"ready"`   // 当前可用的会话总数
+	Hit    int64          `json:"hit"`     // 命中次数（每次省 2~2.8s）
+	Miss   int64          `json:"miss"`    // 未命中次数（只能现建）
+	HitPct float64        `json:"hit_pct"` // 命中率（%）
 	ByName map[string]int `json:"by_type"` // 按会话类型分布
 }
 
@@ -198,6 +209,11 @@ func (p *ChatPool) Stat() ChatPoolStat {
 	defer p.mu.Unlock()
 	out.Per = p.per
 	out.TTLS = int(p.ttl.Seconds())
+	out.Hit = atomic.LoadInt64(&p.hit)
+	out.Miss = atomic.LoadInt64(&p.miss)
+	if total := out.Hit + out.Miss; total > 0 {
+		out.HitPct = float64(out.Hit) * 100 / float64(total)
+	}
 	for _, byType := range p.m {
 		for typ, list := range byType {
 			out.Ready += len(list)

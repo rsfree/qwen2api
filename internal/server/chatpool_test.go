@@ -151,3 +151,24 @@ func TestImageStillWorksWithoutChatPool(t *testing.T) {
 	var resp map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 }
+
+// 命中率观测：命中=省掉一次 2.4s 的 chats/new。miss 偏高说明预热覆盖的号
+// 与实际选号错位（warmTarget 太小或 HotNames 排序不一致）。
+func TestChatPoolHitRateStat(t *testing.T) {
+	p := NewChatPool(1, time.Minute)
+	p.Put("a0", "t2t", "c1")
+	p.Take("a0", "t2t")   // 命中
+	p.Take("a0", "t2t")   // 未命中（取出即删）
+	p.Take("a1", "t2t")   // 未命中（跨号）
+
+	st := p.Stat()
+	if st.Hit != 1 || st.Miss != 2 {
+		t.Fatalf("hit/miss 统计不对: hit=%d miss=%d", st.Hit, st.Miss)
+	}
+	if st.HitPct < 33 || st.HitPct > 34 {
+		t.Fatalf("命中率应约 33.3%%，得到 %.1f", st.HitPct)
+	}
+	if st.Ready != 0 {
+		t.Fatalf("取完应剩 0，得到 %d", st.Ready)
+	}
+}

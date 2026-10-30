@@ -176,10 +176,11 @@ func (s *Server) warmOnce(ctx context.Context) bool {
 	target := s.warmTarget()
 	batch := warmBatch(target)
 	names := s.pool.WarmCandidates(target, keepAliveWindow, batch)
+	// 即使候选为空也要记：否则 /stats 的 warm.target 永远停在 0（观测失真）。
+	s.noteWarm(target, batch, len(names))
 	if len(names) == 0 {
 		return false
 	}
-	s.noteWarm(target, batch, len(names))
 	sem := make(chan struct{}, keepAliveParallel)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
