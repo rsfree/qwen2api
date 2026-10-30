@@ -145,6 +145,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	spec.ImageRefs = imgRefs
 	sd, err := s.openUpstreamSpec(r.Context(), s.blobBase(r), model, gear, prompt, spec)
 	if err != nil {
+		entry.Account = accountOfErr(err)
 		entry.Status = httpStatusFor(err)
 		entry.Error = err.Error()
 		entry.DurationMS = time.Since(start).Milliseconds()
@@ -179,14 +180,15 @@ func (s *Server) openUpstream(ctx context.Context, blobBase, model, gear, prompt
 func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear, prompt string,
 	spec upstream.ChatSpec) (*opened, error) {
 	var lastErr error
+	lastAcct := ""
 	for attempt := 0; attempt < s.cfg.Pool.MaxRotate; attempt++ {
 		acct, ok := s.pool.Pick()
 		if !ok {
-			if lastErr != nil {
-				return nil, lastErr
-			}
-			return nil, errNoAccount
+			// 🔴 这里也要带上"最后尝试的号"：只有 1 个号时，第二轮 Pick 就失败，
+			// 走这条分支返回的裸 lastErr 会让流水 acct= 空（2026-10-30 抓到）。
+			return nil, openFail(lastAcct, lastErr)
 		}
+		lastAcct = acct.Name
 		// 凭据从池里取实时值（可能刚被自动续期改过），不要缓存 acct.Token。
 		cred := s.pool.Credential(acct.Name)
 		// 出口跟着账号走：带上账号标记，代理路由据此选固定 IP。
@@ -222,10 +224,18 @@ func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear, pr
 			break
 		}
 	}
-	if lastErr == nil {
-		lastErr = errNoAccount
+	return nil, openFail(lastAcct, lastErr)
+}
+
+// openFail 统一包装"选号/开流失败"，带上最后尝试的账号名。
+//
+// 为什么要包：失败分支的流水必须能回答"是哪个号、从哪个出口"——
+// acct= 空的 502 等于没有线索（2026-10-30 线上踩到两次）。
+func openFail(lastAcct string, err error) error {
+	if err == nil {
+		return errNoAccount
 	}
-	return nil, lastErr
+	return &errWithAccount{acct: lastAcct, err: err}
 }
 
 // openOnce 用指定账号跑一轮：上传图片（若有）→ 建会话 → 提交 → 开流。
@@ -701,6 +711,10 @@ func httpStatusFor(err error) int {
 	if errors.Is(err, errUpstreamTimeout) || errors.Is(err, context.DeadlineExceeded) {
 		return http.StatusGatewayTimeout
 	}
+	// 账号不能用（未激活/封禁）：是"容量不足"，不是"你的凭据错了" ⇒ 503。
+	if isAccountNotReady(err) {
+		return http.StatusServiceUnavailable
+	}
 	if errors.Is(err, upstream.ErrQuota) || errors.Is(err, errImageQuotaLocal) ||
 		errors.Is(err, errVideoQuotaLocal) || errors.Is(err, errCreditsShort) {
 		// 额度耗尽是"现在不行、等下/升级才行" ⇒ 429 而不是 502。
@@ -735,6 +749,9 @@ func errTypeFor(err error) string {
 	if errors.Is(err, errUpstreamTimeout) || errors.Is(err, context.DeadlineExceeded) {
 		return "upstream_timeout"
 	}
+	if isAccountNotReady(err) {
+		return "service_unavailable"
+	}
 	switch upstream.KindOf(err) {
 	case upstream.KindAuth:
 		return "upstream_auth_error"
@@ -746,6 +763,33 @@ func errTypeFor(err error) string {
 		return "invalid_request_error"
 	}
 	return "upstream_error"
+}
+
+// isAccountNotReady 上游明说"这个号还不能用"（见 upstream.CodeAccountNotReady）。
+func isAccountNotReady(err error) bool {
+	var ue *upstream.Error
+	return errors.As(err, &ue) && ue.Code == upstream.CodeAccountNotReady
+}
+
+// errWithAccount 给错误挂上"最后尝试的账号名"。
+//
+// 为什么不用字符串拼：流水要的是**结构化字段**（acct= 空就查不到号，
+// 也带不出出口 IP）。保留 Unwrap，所以 KindOf / errors.Is 全部照旧。
+type errWithAccount struct {
+	acct string
+	err  error
+}
+
+func (e *errWithAccount) Error() string { return e.err.Error() }
+func (e *errWithAccount) Unwrap() error { return e.err }
+
+// accountOfErr 取出错误里挂的账号名（没有则空）。
+func accountOfErr(err error) string {
+	var e *errWithAccount
+	if errors.As(err, &e) {
+		return e.acct
+	}
+	return ""
 }
 
 func truncateUA(ua string) string {

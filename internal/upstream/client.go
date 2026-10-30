@@ -565,6 +565,13 @@ func classifyHTTP(actual, status int, op string, raw []byte) error {
 	case actual == 429 || status == 429:
 		return NewErr(KindRateLimit, op, actual, "RateLimited", detail, true)
 	case actual == 400 || status == 400:
+		// 400 里也可能藏着"这个号不能用"（未激活 / 被封 / 待验证）。
+		// 归到账号维度才能换号重试 + 冷处理；否则调用方会收到 400 +
+		// 上游英文原话（"account is currently pending activation"），
+		// 既看不懂也不该由它来管我们的账号状态（2026-10-30 线上实测）。
+		if accountStateProblem(strings.ToLower(detail)) {
+			return NewErr(KindAuth, op, actual, CodeAccountNotReady, detail, true)
+		}
 		return NewErr(KindBadInput, op, actual, "Bad_Request", detail, false)
 	case actual == 404 || status == 404:
 		return NewErr(KindUnknown, op, actual, "Not_Found", detail, false)
@@ -574,6 +581,29 @@ func classifyHTTP(actual, status int, op string, raw []byte) error {
 	return NewErr(KindUnknown, op, actual, "", detail, false)
 }
 
+// CodeAccountNotReady 上游明确说"这个账号还不能用"（未激活/封禁/待验证）。
+//
+// 单独一个 code 是为了让上层能把它和"真的凭据失效"区分开：
+// 前者换号没错、但重启登录也没用；后者续期可能救回来。
+const CodeAccountNotReady = "AccountNotReady"
+
+// accountStateProblem 响应体里其实在说"账号状态不对"。
+//
+// 上游把这些塞进 HTTP 400 + code=Bad_Request 里，很容易被当成"调用方参数错"，
+// 结果就是：好号没被停用、客户端拿到一条看不懂的英文。
+func accountStateProblem(low string) bool {
+	for _, kw := range []string{
+		"pending activation", "not activated", "activate your account",
+		"account is currently", "account suspended", "account has been",
+		"account is banned", "account is disabled",
+	} {
+		if strings.Contains(low, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 // classifyBusiness 按业务码归类。
 func classifyBusiness(op string, actual int, code, details string) error {
 	low := strings.ToLower(code + " " + details)
@@ -581,6 +611,8 @@ func classifyBusiness(op string, actual int, code, details string) error {
 	case strings.Contains(code, "Unauthorized") || strings.Contains(low, "token has expired") ||
 		strings.Contains(low, "please log in"):
 		return NewErr(KindAuth, op, actual, code, details, true)
+	case accountStateProblem(low):
+		return NewErr(KindAuth, op, actual, CodeAccountNotReady, details, true)
 	case strings.Contains(code, "Bad_Request") || strings.Contains(details, "Bad_Request"),
 		strings.Contains(low, "requestvalidationerror"):
 		return NewErr(KindBadInput, op, actual, code, details, false)

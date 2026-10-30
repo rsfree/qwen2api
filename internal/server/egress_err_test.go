@@ -217,3 +217,42 @@ func TestRequestLogRecordsRefImageCount(t *testing.T) {
 		t.Fatalf("账号应记 a0，得到 %q", rows[0].Account)
 	}
 }
+
+// "账号不能用"（未激活/封禁）不能落成 4xx 甩给调用方：换号 + 停用该号，最终 503。
+func TestAccountNotReadyMapsTo503(t *testing.T) {
+	err := upstream.NewErr(upstream.KindAuth, "chats/new", 400, upstream.CodeAccountNotReady,
+		"Your account is currently pending activation.", true)
+	if got := httpStatusFor(err); got != http.StatusServiceUnavailable {
+		t.Fatalf("状态码应 503，得到 %d", got)
+	}
+	if got := errTypeFor(err); got != "service_unavailable" {
+		t.Fatalf("type 应 service_unavailable，得到 %s", got)
+	}
+	typ, msg := clientError(httpStatusFor(err), errTypeFor(err), err.Error())
+	if typ != "service_unavailable" || msg != "no available upstream account, please retry later" {
+		t.Fatalf("文案不对: (%s, %q)", typ, msg)
+	}
+}
+
+// 聊天失败也要记账号（否则 acct= 空，连带出口 IP 一起丢）。
+func TestChatFailureRecordsAccount(t *testing.T) {
+	up := newFakeUpstream(t, 9) // 全部 401，且没有 refresh_token
+	s := newTestServerWithServer(t, up, 1)
+	s.pool.SetEgressIP("a0", "198.51.100.9")
+	h := s.Handler()
+
+	body := `{"model":"qwen3.7-plus","messages":[{"role":"user","content":"hi"}]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+
+	rows := s.log.Recent(1)
+	if len(rows) != 1 {
+		t.Fatalf("流水条数 %d", len(rows))
+	}
+	if rows[0].Account != "a0" {
+		t.Fatalf("失败也要记账号，得到 %q", rows[0].Account)
+	}
+	if rows[0].EgressIP != "198.51.100.9" {
+		t.Fatalf("失败也要带出口 IP，得到 %q", rows[0].EgressIP)
+	}
+}
