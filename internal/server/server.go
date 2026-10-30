@@ -292,6 +292,11 @@ func writeErrorParam(w http.ResponseWriter, code int, typ, msg, param string) {
 // 容器日志（reqlog.Entry.Error），面板「日志」页照常看得到 —— 不丢信息，只是不外泄。
 func clientError(code int, typ, msg string) (string, string) {
 	if code < 500 {
+		// 429 分两种：额度不足（"还差多少积分"对调用方有用，保留中文）
+		// 与风控/限流（"上游 x5sec 风控"这种原文对客户端毫无意义 ⇒ 英文短句）。
+		if code == http.StatusTooManyRequests && typ == "rate_limit_error" {
+			return typ, "upstream rate limited, please retry later"
+		}
 		return typ, msg
 	}
 	switch typ {

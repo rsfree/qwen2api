@@ -385,3 +385,17 @@ func TestImageRetriesFastFailure(t *testing.T) {
 		t.Fatalf("应记换号后的账号 a1，实际 %+v", rows)
 	}
 }
+
+// 429 分两种：风控/限流给英文短句（"上游 x5sec 风控"对调用方没意义），
+// 额度不足保留中文（"还差多少积分"有用）。
+func TestClientError429Split(t *testing.T) {
+	typ, msg := clientError(http.StatusTooManyRequests, "rate_limit_error", "上游 x5sec 风控")
+	if typ != "rate_limit_error" || msg != "upstream rate limited, please retry later" {
+		t.Fatalf("风控 429 应给英文短句，得到 (%s, %q)", typ, msg)
+	}
+	raw := "上游额度已用完：本次需要 30 Credits，当前可用 10 Credits"
+	typ, msg = clientError(http.StatusTooManyRequests, "insufficient_quota", raw)
+	if msg != raw {
+		t.Fatalf("额度 429 应保留中文原文，得到 (%s, %q)", typ, msg)
+	}
+}
