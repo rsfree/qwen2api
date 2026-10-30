@@ -204,6 +204,7 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		attemptStart := time.Now()
 		cred := s.pool.Credential(a.Name)
 		actx := upstream.WithAccount(r.Context(), a.Name)
 		chatID, err := s.up.NewChatTyped(actx, cred, chatModel, spec.ChatType)
@@ -220,7 +221,9 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 		s.pool.Release(a)
 		s.noteFailure(a, err)
 		lastErr = err
-		if !upstream.RetrySafe(err) {
+		// 与聊天/生图同口径：语义未受理 或 **快速失败**（提交本身就几百毫秒，
+		// 几秒就挂说明没建任务）都换号；慢失败不重试（提交可能已扣积分）。
+		if !upstream.RetrySafe(err) && !fastRetryable(err, time.Since(attemptStart)) {
 			break
 		}
 	}
