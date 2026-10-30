@@ -193,6 +193,12 @@ type Pool struct {
 	MaxImagePerDay int `json:"max_image_per_day"`
 }
 
+// DefaultImageTimeoutS 生图单次尝试的默认预算（秒）。
+//
+// 300 的依据：实测 1 张 47.8s / 2 张 69.9s / 3 张 83.4s，历史最慢双参考图 136.7s；
+// 2026-10-31 真跑 t2i 出图落在 60.0s。留一倍余量，让"慢但会成功"的请求等到产物。
+const DefaultImageTimeoutS = 300
+
 // Config 顶层配置。
 type Config struct {
 	Listen       string   `json:"listen"`        // ":8400"
@@ -219,7 +225,16 @@ type Config struct {
 	// ImageModel 文生图用的**图片模型名**（写进 extra.meta.model）。
 	// 🔴 不传它时上游只是"聊图"，不保证出图（2026-10-28 实测）。
 	ImageModel string `json:"image_model"`
-	Video      Video  `json:"video"`
+	// ImageTimeoutS 单次生图**尝试**的时间预算（秒），默认 300。
+	//
+	// 🔴 为什么要可配（2026-10-31）：早先硬编码 150s（多图上限 240s）。真跑实测
+	// 出图落在第 60.0s，而线上那条 502 断在 25.8s —— 图快出来时被预算掐断，
+	// 之后只能靠会话历史补捞，而补捞有落库延迟（补不到就白花钱重画）。
+	//
+	// ⚠️ 代价：零产物超时会**换号再试一次**，最坏用户等 2×预算（默认 10 分钟）。
+	// 调小可以，但别低于实测最慢的 137s（双参考图）。
+	ImageTimeoutS int   `json:"image_timeout_s"`
+	Video         Video `json:"video"`
 
 	Upstream Upstream  `json:"upstream"`
 	Pool     Pool      `json:"pool"`
@@ -304,6 +319,7 @@ func Default() Config {
 		DefaultThinking: "auto",
 		StateFile:       "./data/state.json",
 		ImageModel:      "qwen-image-3.0",
+		ImageTimeoutS:   DefaultImageTimeoutS,
 		Video: Video{
 			// 积分单价：来自官方计价接口 `GET /api/v2/credits/pricing`（2026-10-29 实测）。
 			//
@@ -457,6 +473,9 @@ func (c *Config) normalize() error {
 	}
 	if c.ImageModel == "" {
 		c.ImageModel = "qwen-image-3.0"
+	}
+	if c.ImageTimeoutS <= 0 {
+		c.ImageTimeoutS = DefaultImageTimeoutS
 	}
 	if c.Video.Resolution == "" {
 		c.Video.Resolution = "720P"

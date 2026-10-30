@@ -40,6 +40,8 @@ var Fields = []Field{
 		Hint: "把上游的思考摘要放进响应，OpenAI SDK 可直接读"},
 	{Key: "image_model", Label: "图片内核模型", Type: "string", Hot: true,
 		Hint: "写进 extra.meta.model；空 = 上游默认"},
+	{Key: "image_timeout_s", Label: "生图单次超时（秒）", Type: "int", Min: 30, Max: 900, Hot: true,
+		Hint: "单次上游尝试的预算。实测出图 60s、最慢 137s；超时会换号再试一次（最坏 2×）"},
 	{Key: "blob_base_url", Label: "图片托管公网基址", Type: "string", Hot: true,
 		Hint: "data URI/base64 图片会落到 {它}/v1/blobs/<id> 由上游来拉；必须是公网域名"},
 

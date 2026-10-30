@@ -506,6 +506,7 @@ data/accounts.json   面板托管（导入/删除写这里；**存在即完全�
 |---|---|---|
 | 全部 pool 参数 | `max_rotate` / `cooldown_*` / `max_inflight_per_account` / `max_image_per_day` / `max_video_*` / `warm_chats_per_account` / `chat_pool_ttl_s` | **立即** |
 | 模型与开关 | `default_model` / `default_thinking` / `expose_reasoning` / `image_model` / `blob_base_url` | **立即** |
+| 生图预算 | `image_timeout_s`（单次尝试，默认 300s） | **立即** |
 | 视频 | `root_model` / `resolution` / `duration` / `size` | **立即** |
 | 出口探测 | `upstream.egress_ip_url` | **立即** |
 | 上游超时 | `upstream.timeout_s` | 需重启（HTTP 客户端启动时建好） |
@@ -516,6 +517,16 @@ data/accounts.json   面板托管（导入/删除写这里；**存在即完全�
 
 > 没给 `-config`（纯环境变量部署）时，表单只读，保存返回 400 并说明原因。
 > 配置文件里的 `// 说明` 键会被原样保留（读进 `map[string]any` 再写回）。
+
+**部署要求（否则面板保存会失败）**：
+
+| 现象 | 原因 | 处置 |
+|---|---|---|
+| `read-only file system` | compose 里挂了 `./config.json:/app/config.json:ro` | 去掉 `:ro`（想保留只读就别用面板改配置） |
+| `rename ... device or resource busy` | 单文件 bind mount 换不了 inode | 网关会自动降级成"备份 + 覆盖写"，日志会写一行 |
+
+> 单文件挂载走覆盖写时**不是原子的**：写之前会先落一份 `config.json.bak`，
+> 真写坏了就用它恢复（`cp config.json.bak config.json` 后重启）。目录挂载仍走 tmp+rename。
 
 ### 选号策略：优先"token 还活着"的号
 
@@ -635,7 +646,7 @@ internal/reqlog/     请求流水（环形缓冲 + stdout 一行）
 | **`n=2`** | ✅ 2 张，165.7s（串行两次上游调用，约 83s/张） |
 | **额度耗尽** | ✅ 429 + `insufficient_quota` + 上游原话（识别 `extra.update_member`） |
 | **每日额度（免费号）** | ✅ 全程压测：**9 张**后耗尽；中途 2 次「静默挂起」但自愈（非额度） |
-| **挂起保护** | ✅ 图片单次预算 **150s + 20s×垫图数**（上限 240s）；超时 → 该号冷却 10 分钟 + **换号再试一次** → 仍失败才回 **504 + `upstream_timeout`**（英文短句）。"额度将尽 / 临时故障"的判断只写流水 |
+| **挂起保护** | ✅ 图片单次预算 = `image_timeout_s`（默认 **300s**，真跑实测出图 60s、最慢双垫图 137s）；超时 → 该号冷却 10 分钟 + **换号再试一次** → 仍失败才回 **504 + `upstream_timeout`**（英文短句）。"额度将尽 / 临时故障"的判断只写流水 |
 | **本地每日配额** | ✅ 限额设 1 实测：第 1 张 69.9s 出图，第 2 张 **0.003s 直接 429**（未打上游） |
 | **图生图 b64** `response_format:"b64_json"` | ✅ 53.9s，9.95MB base64 → 7.46MB PNG（`89 50 4E 47` 校验） |
 | **`/v1/images/edits`**（multipart） | ✅ 51.7s，`-F image=@ref.png` 直接出图 |

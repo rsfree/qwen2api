@@ -31,6 +31,8 @@ type eofUpstream struct {
 	history []string
 	// historyCalls 历史端点被调用次数（用来断言"该不该补捞"）。
 	historyCalls int
+	// emptyFirst=true：第一次查历史返回空，第二次才给图 —— 模拟"断点早于落库"。
+	emptyFirst bool
 }
 
 func newEOFUpstream(t *testing.T, partial bool, history ...string) *eofUpstream {
@@ -64,9 +66,16 @@ func newEOFUpstream(t *testing.T, partial bool, history ...string) *eofUpstream 
 			f.historyCalls++
 			f.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
+			f.mu.Lock()
+			n := f.historyCalls
+			emptyFirst := f.emptyFirst
+			f.mu.Unlock()
 			items := make([]string, 0, len(f.history))
-			for _, u := range f.history {
-				items = append(items, `{"content":"`+u+`","phase":"image_gen","status":"finished"}`)
+			// 首查为空：此刻上游还没把图写进会话历史（断流早于落库，实测会发生）。
+			if !(emptyFirst && n == 1) {
+				for _, u := range f.history {
+					items = append(items, `{"content":"`+u+`","phase":"image_gen","status":"finished"}`)
+				}
 			}
 			_, _ = w.Write([]byte(`{"success":true,"data":{"chat":{"history":{"messages":{` +
 				`"m1":{"role":"assistant","timestamp":1,"content_list":[` + strings.Join(items, ",") + `]}` +
@@ -160,5 +169,28 @@ func TestImageStreamFailsWhenHistoryHasNoImage(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "error") {
 		t.Fatalf("应返回错误体，实际: %s", rec.Body.String())
+	}
+}
+
+// 断点早于落库 ⇒ 首查为空、几秒后再查才有。这条来自真跑实测：
+// 图片帧在第 60.0s 才出现在流里，而线上 502 是 25.8s 断的 —— 只查一次会全军覆没。
+func TestImageStreamRecoversOnSecondHistoryLookup(t *testing.T) {
+	up := newEOFUpstream(t, false, "https://cdn.example/late.png?key=k3")
+	up.emptyFirst = true
+	h := newImageServerFor(t, up)
+
+	rec := postImage(t, h)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("第二次补捞命中应返回 200，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp ImageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Data) != 1 || resp.Data[0].URL != "https://cdn.example/late.png?key=k3" {
+		t.Fatalf("应从第二次补捞拿到图，得到 %+v", resp.Data)
+	}
+	if n := up.calls(); n != 2 {
+		t.Fatalf("应恰好查两次历史，实际 %d 次", n)
 	}
 }

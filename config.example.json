@@ -9,6 +9,8 @@
   "default_thinking": "auto",
   "// image_model": "图片内核：写进 extra.meta.model。它也会作为 media=image 的模型出现在 /v1/models（endpoint=/v1/images/generations）。上游模型表里没有这个 id，别把它当 chat 模型发给 chats/new —— 网关会替你翻译",
   "blob_base_url": "https://qwen2api.example.com",
+  "// image_timeout_s": "单次生图尝试的时间预算（秒），默认 300。真跑实测出图在 60s、历史最慢双参考图 137s；早先硬编码 150s 会把“快好了”的请求掐断。注意零产物超时会换号再试一次，最坏等 2×该值",
+  "image_timeout_s": 300,
   "image_model": "qwen-image-3.0",
   "// video": "文生视频默认参数，写进 extra.meta.biz_data（字符串化 JSON）",
   "video": {

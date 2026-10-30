@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yuanjie-ai/qwen2api/internal/config"
 	"github.com/yuanjie-ai/qwen2api/internal/pool"
 	"github.com/yuanjie-ai/qwen2api/internal/reqlog"
 	"github.com/yuanjie-ai/qwen2api/internal/upstream"
@@ -329,21 +330,24 @@ const maxInputImages = 20
 // "额度将尽 or 上游抖动"这种判断只对运维有意义，对调用方只剩"过会儿再来"。
 var errUpstreamTimeout = errors.New("上游在时间预算内没有任何产物（只发心跳）")
 
-// imageTimeout 单次**尝试**的时间预算（按参考图数量放宽）。
+// imageBudget 单次**尝试**的时间预算（配置 image_timeout_s，默认 300s）。
 //
-// 依据（2026-10-30 生产实测）：1 张 47.8s / 2 张 69.9s / 3 张 83.4s，
-// 历史上最慢一次双参考图 136.7s。基线 150s 留足余量；每多一张加 20s，
-// 上限 240s。之所以不再给到 180s+：超时会**换号重试一次**，
-// 单次预算太大等于让用户干等 6 分钟（见 maxImageAttempts）。
-func imageTimeout(refs int) time.Duration {
-	d := 150 * time.Second
-	if refs > 1 {
-		d += time.Duration(refs-1) * 20 * time.Second
+// 依据（2026-10-30/31 实测）：1 张 47.8s / 2 张 69.9s / 3 张 83.4s，
+// 历史最慢双参考图 136.7s；真跑 t2i 出图落在第 60.0s。
+//
+// 🔴 为什么不再按参考图数量算、也不再封 240s：早先 150s 的基线会在"图快好了"
+// 的时候把请求掐掉（线上那条 502 断在 25.8s，而实测出图在 60.0s）。掐断之后
+// 只能靠会话历史补捞，而补捞有落库延迟、也可能扑空 —— 让预算覆盖到产物尾部，
+// 比事后补救便宜。多图本来就慢，统一用一个可配上限，语义更好解释。
+//
+// ⚠️ 零产物超时会**换号再试一次**（见 imageAccountRotations 的闸），
+// 所以最坏等待是 2×预算。觉得太久的把它调小即可。
+func (s *Server) imageBudget() time.Duration {
+	sec := s.conf().ImageTimeoutS
+	if sec <= 0 {
+		sec = config.DefaultImageTimeoutS
 	}
-	if d > 240*time.Second {
-		d = 240 * time.Second
-	}
-	return d
+	return time.Duration(sec) * time.Second
 }
 
 // imageAccountRotations 生图最多试几个账号。
@@ -390,7 +394,7 @@ func (s *Server) coolAfterImageTimeout(a *pool.Account) {
 func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking, prompt string,
 	refs []string, ratio, blobBase string) (imgs []string, revised, acct, chatID string, err error) {
 
-	budget := imageTimeout(len(refs))
+	budget := s.imageBudget()
 	timeoutRetried := false
 
 	for attempt := 0; attempt < imageAccountRotations; attempt++ {
@@ -577,12 +581,33 @@ func (s *Server) recoverImages(ctx context.Context, cred, chatID string) []strin
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 25*time.Second)
 	defer cancel()
 
-	found, err := s.up.LatestChatImages(rctx, cred, chatID)
-	if err != nil {
-		log.Printf("[qwen2api] 会话历史补捞失败（chat=%s）: %v", chatID, err)
-		return nil
+	// 🔴 查两次，间隔 3s —— 实测依据（2026-10-31 真跑）：
+	//   图片帧在**第 60.0 秒**才出现在流里，而线上那条 502 是在 **25.8s** 断的。
+	//   断点完全可能早于"落库"：此刻查历史会是空的，几秒后就有了。
+	//   代价只有 ~3s（查询本身 0.2s），比让调用方重画一张（60s + 一次额度）便宜得多。
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(3 * time.Second):
+			case <-rctx.Done():
+				return nil
+			}
+		}
+		found, err := s.up.LatestChatImages(rctx, cred, chatID)
+		if err != nil {
+			// 读失败不值得再等：下一轮多半还是同样的错（凭据/风控/形态）。
+			log.Printf("[qwen2api] 会话历史补捞失败（chat=%s）: %v", chatID, err)
+			return nil
+		}
+		if len(found) > 0 {
+			if attempt > 0 {
+				log.Printf("[qwen2api] 会话历史第 %d 次补捞命中（首查为空，%d 张）",
+					attempt+1, len(found))
+			}
+			return found
+		}
 	}
-	return found
+	return nil
 }
 
 // downloadAsBase64 把直链图片转成 base64（b64_json 用）。

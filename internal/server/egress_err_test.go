@@ -180,19 +180,25 @@ func TestImageFailureStillRecordsAccount(t *testing.T) {
 	}
 }
 
-// 出图预算随垫图数量放宽（实测每多一张约 +18s，180s 基线对 3 张偏紧）。
-func TestImageTimeoutScalesWithRefs(t *testing.T) {
-	cases := []struct {
-		refs int
-		want time.Duration
-	}{
-		{0, 150 * time.Second}, {1, 150 * time.Second}, {2, 170 * time.Second},
-		{3, 190 * time.Second}, {6, 240 * time.Second}, {20, 240 * time.Second},
+// 出图预算来自配置 image_timeout_s（默认 300s），不再随垫图数量变化。
+//
+// 早先是"150s 基线 + 每多一张 +20s、封顶 240s"。2026-10-31 真跑发现：图在第 60.0s
+// 才出来，而线上那条 502 断在 25.8s —— 预算卡太紧会把"快好了"的请求掐死，
+// 掐断后只能靠会话历史补捞（有落库延迟，可能扑空）。所以改成可配、默认 300s。
+func TestImageBudgetFromConfig(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	s := newTestServerWithServer(t, up, 1)
+
+	if got := s.imageBudget(); got != config.DefaultImageTimeoutS*time.Second {
+		t.Fatalf("默认预算应为 %ds，得到 %s", config.DefaultImageTimeoutS, got)
 	}
-	for _, c := range cases {
-		if got := imageTimeout(c.refs); got != c.want {
-			t.Fatalf("imageTimeout(%d) = %s，期望 %s", c.refs, got, c.want)
-		}
+
+	// Hot 字段：面板改完即生效，不需要重启
+	cfg := s.conf()
+	cfg.ImageTimeoutS = 90
+	s.ApplyConfig(cfg)
+	if got := s.imageBudget(); got != 90*time.Second {
+		t.Fatalf("改了配置预算没跟着变：%s", got)
 	}
 }
 
