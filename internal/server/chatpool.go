@@ -56,6 +56,23 @@ func NewChatPool(per int, ttl time.Duration) *ChatPool {
 	}
 }
 
+// SetLimits 热更新每号每类型的目标数与 TTL（面板保存后调用）。
+//
+// per 变 0 就是关掉预建：已缓存的会话会留在池里自然过期（Trim 清），
+// 不影响在途请求；新的请求不再命中（Take 里 Enabled() 为 false 直接返回 miss）。
+func (p *ChatPool) SetLimits(per int, ttl time.Duration) {
+	if p == nil {
+		return
+	}
+	if ttl <= 0 {
+		ttl = 15 * time.Minute
+	}
+	p.mu.Lock()
+	p.per = per
+	p.ttl = ttl
+	p.mu.Unlock()
+}
+
 // Enabled 是否启用预建。
 func (p *ChatPool) Enabled() bool { return p != nil && p.per > 0 }
 

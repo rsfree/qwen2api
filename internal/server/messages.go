@@ -73,7 +73,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
-		model = s.cfg.DefaultModel
+		model = s.conf().DefaultModel
 	}
 
 	// 图片：content 里的 image 块 → 上游 files[]（vision）。坏引用一律 400。
@@ -89,7 +89,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	spec := upstream.TextSpec()
 	spec.ImageRefs = imgRefs
-	sd, err := s.openUpstream(r.Context(), s.blobBase(r), model, s.cfg.DefaultThinking, flat.Prompt, spec)
+	sd, err := s.openUpstream(r.Context(), s.blobBase(r), model, s.conf().DefaultThinking, flat.Prompt, spec)
 	if err != nil {
 		writeError(w, httpStatusFor(err), errTypeFor(err), err.Error())
 		return

@@ -31,6 +31,10 @@ type Backend interface {
 	Log() *reqlog.Log
 	Upstream() *upstream.Client
 	Config() config.Config
+	// ConfigPath 配置文件路径（空 = 面板只能看不能改）。
+	ConfigPath() string
+	// UpdateConfig 合并表单改动并热更新，返回已生效与"需重启才生效"的键。
+	UpdateConfig(patch map[string]any) (applied, needRestart []string, err error)
 	Version() string
 	UptimeSeconds() int
 
@@ -121,6 +125,10 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.handleAccounts(w, r)
+	case r.URL.Path == "/panel/api/config" && r.Method == http.MethodGet:
+		p.mustAuth(w, r, p.handleConfigGet)
+	case r.URL.Path == "/panel/api/config" && r.Method == http.MethodPost:
+		p.mustAuth(w, r, p.handleConfigSave)
 	case r.URL.Path == "/panel/api/models":
 		if !p.authorized(r) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})

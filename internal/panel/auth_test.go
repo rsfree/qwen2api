@@ -24,6 +24,10 @@ import (
 
 // stubBackend 只满足接口，测试不碰真实池/上游。
 type stubBackend struct {
+	// cfgPath / lastPatch 给「配置」页测试用（写文件走真 Server，这里只验接口）。
+	cfgPath   string
+	lastPatch map[string]any
+
 	cfg  config.Config
 	pool *pool.Pool
 	log  *reqlog.Log
@@ -44,7 +48,16 @@ func newStub(cfg config.Config) *stubBackend {
 func (s *stubBackend) Pool() *pool.Pool           { return s.pool }
 func (s *stubBackend) Log() *reqlog.Log           { return s.log }
 func (s *stubBackend) Upstream() *upstream.Client { return s.up }
-func (s *stubBackend) Config() config.Config      { return s.cfg }
+func (s *stubBackend) Config() config.Config { return s.cfg }
+func (s *stubBackend) ConfigPath() string { return s.cfgPath }
+func (s *stubBackend) UpdateConfig(patch map[string]any) ([]string, []string, error) {
+	s.lastPatch = patch
+	out := make([]string, 0, len(patch))
+	for k := range patch {
+		out = append(out, k)
+	}
+	return out, nil, nil
+}
 func (s *stubBackend) Version() string            { return "test" }
 func (s *stubBackend) UptimeSeconds() int         { return 1 }
 func (s *stubBackend) ImportAccounts(context.Context, []config.Account, bool) ([]pool.AddResult, error) {

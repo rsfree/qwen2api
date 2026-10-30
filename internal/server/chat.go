@@ -123,7 +123,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
-		model = s.cfg.DefaultModel
+		model = s.conf().DefaultModel
 	}
 	// 清单里同时列了图片/视频模型（见 mediaModels）。拿它们调 chat 时给一句
 	// 能指导处置的话 —— 不拦的话模型名会被甩给上游，换回一个 Bad_Request，
@@ -137,7 +137,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("模型 %s 是生成模型，不能用于 chat；请改调 %s", model, ep), "model")
 		return
 	}
-	gear := req.ResolveThinking(s.cfg.DefaultThinking)
+	gear := req.ResolveThinking(s.conf().DefaultThinking)
 	entry.Model = model
 	entry.Stream = req.Stream
 	entry.Degraded = flat.Degraded
@@ -188,7 +188,7 @@ func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear, pr
 	spec upstream.ChatSpec) (*opened, error) {
 	var lastErr error
 	lastAcct := ""
-	for attempt := 0; attempt < s.cfg.Pool.MaxRotate; attempt++ {
+	for attempt := 0; attempt < s.conf().Pool.MaxRotate; attempt++ {
 		acct, ok := s.pool.Pick()
 		if !ok {
 			// 🔴 这里也要带上"最后尝试的号"：只有 1 个号时，第二轮 Pick 就失败，
@@ -589,7 +589,7 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 			sawUnknown = true
 			log.Printf("[qwen2api] 上游出现未处理的 phase=%q（产物可能被丢弃，见 docs/UPSTREAM.md §4）", ev.UnknownPhase)
 		}
-		if ev.Reasoning != "" && s.cfg.ReasoningEnabled() {
+		if ev.Reasoning != "" && s.conf().ReasoningEnabled() {
 			if !firstByte {
 				entry.FirstByteMS = time.Since(start).Milliseconds()
 				firstByte = true
@@ -690,7 +690,7 @@ func (s *Server) serveChatOnce(w http.ResponseWriter, r *http.Request, sd *opene
 			sawUnknown = true
 			log.Printf("[qwen2api] 上游出现未处理的 phase=%q（产物可能被丢弃，见 docs/UPSTREAM.md §4）", ev.UnknownPhase)
 		}
-		if ev.Reasoning != "" && s.cfg.ReasoningEnabled() {
+		if ev.Reasoning != "" && s.conf().ReasoningEnabled() {
 			reasoning.WriteString(ev.Reasoning)
 		}
 		if ev.Text != "" {

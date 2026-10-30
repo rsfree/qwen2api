@@ -210,7 +210,7 @@ func friendlySigninErr(err error) string {
 }
 
 // accountsPath 面板托管账号文件的位置。
-func (s *Server) accountsPath() string { return config.AccountsFile(s.cfg.StateFile) }
+func (s *Server) accountsPath() string { return config.AccountsFile(s.conf().StateFile) }
 
 // saveAccounts 把池内账号写成 accounts.json。
 func (s *Server) saveAccounts() error {

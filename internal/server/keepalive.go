@@ -248,7 +248,7 @@ func (s *Server) prewarmChats(ctx context.Context) {
 			if cred == "" {
 				return
 			}
-			s.prewarmChat(ctx, name, cred, s.cfg.DefaultModel, "t2t")
+			s.prewarmChat(ctx, name, cred, s.conf().DefaultModel, "t2t")
 			mu.Lock()
 			defer mu.Unlock()
 		}(n)

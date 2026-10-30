@@ -532,6 +532,15 @@ button.xs { white-space:nowrap; }
         </div>
       </div>
       <div class="box">
+        <header>
+          <h3>可热更新配置</h3>
+          <span class="hint" id="cfgFormHint">改完点保存立即生效（标「需重启」的除外）</span>
+          <span class="grow"></span>
+          <button class="xs primary" id="btnCfgSave">保存</button>
+        </header>
+        <div class="pad" id="cfgForm"><div class="hint">加载中…</div></div>
+      </div>
+      <div class="box">
         <header><h3>服务</h3><span class="grow"></span><span class="note" id="cfgVer"></span></header>
         <div class="pad" style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))" id="cfgService"></div>
       </div>
@@ -1103,8 +1112,123 @@ async function renderModels() {
 
 /* ═══════════════ 配置 ═══════════════ */
 function kv(k, v) { return `<div><div class="hint">${k}</div><div class="mono" style="font-size:13px">${v}</div></div>`; }
+/* ═══════════════ 可热更新配置（表单） ═══════════════
+   字段清单由后端 config.Fields 下发（白名单）：面板只能改这里登记过的项。
+   保存走 POST /panel/api/config → 写回 config.json 并**立即替换运行时快照**，
+   所以账号池限额/冷却这类改完当场生效，不用重启。 */
+const CFG = { fields: [], values: {}, writable: false, loaded: false };
+
+function cfgGroupOf(key) {
+  if (key.indexOf('pool.') === 0) return 'pool';
+  if (key.indexOf('video.') === 0) return 'video';
+  if (key.indexOf('upstream.') === 0) return 'upstream';
+  return 'base';
+}
+const CFG_GROUPS = [['base', '基础'], ['pool', '账号池与限额'], ['video', '视频'], ['upstream', '上游']];
+
+function cfgInput(f, v) {
+  const attrs = 'data-key="' + f.key + '"';
+  if (f.type === 'bool') {
+    return '<select ' + attrs + '><option value="true"' + (v ? ' selected' : '') + '>开</option>'
+      + '<option value="false"' + (!v ? ' selected' : '') + '>关</option></select>';
+  }
+  if (f.type === 'enum') {
+    return '<select ' + attrs + '>' + (f.enum || []).map(e =>
+      '<option value="' + esc(e) + '"' + (String(v) === e ? ' selected' : '') + '>'
+      + esc(e) + '</option>').join('') + '</select>';
+  }
+  if (f.type === 'int') {
+    return '<input ' + attrs + ' type="number" min="' + (f.min || 0) + '" max="' + (f.max || 0)
+      + '" value="' + (v == null ? '' : v) + '">';
+  }
+  return '<input ' + attrs + ' type="text" value="' + esc(v == null ? '' : String(v)) + '">';
+}
+
+function renderConfigForm() {
+  const box = $('#cfgForm');
+  if (!CFG.loaded) { box.innerHTML = '<div class="hint">加载中…</div>'; return; }
+  if (!CFG.fields.length) { box.innerHTML = '<div class="hint">没有可编辑项</div>'; return; }
+  const dis = CFG.writable ? '' : ' disabled';
+  box.innerHTML = CFG_GROUPS.map(function (g) {
+    const fs = CFG.fields.filter(f => cfgGroupOf(f.key) === g[0]);
+    if (!fs.length) return '';
+    return '<div style="margin-bottom:14px">'
+      + '<div class="hint" style="margin:0 0 8px;font-weight:600">' + g[1] + '</div>'
+      + '<div style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">'
+      + fs.map(f => '<div class="field"><label>' + esc(f.label)
+        + (f.hot ? '' : ' <span class="tag warn">需重启</span>')
+        + '</label>'
+        // 把 disabled 插到标签名的第一个 '>' 前：对 input/select 都成立
+        + cfgInput(f, CFG.values[f.key]).replace('>', dis + '>')
+        + '<div class="hint">' + esc(f.hint || f.key) + '</div></div>').join('')
+      + '</div></div>';
+  }).join('');
+  $('#btnCfgSave').disabled = !CFG.writable;
+  $('#cfgFormHint').textContent = CFG.writable
+    ? '改完点保存立即生效（标「需重启」的除外）'
+    : '启动时没指定 -config，只能查看';
+}
+
+async function loadConfigForm(force) {
+  if (CFG.loaded && !force) { renderConfigForm(); return; }
+  try {
+    const r = await fetch('/panel/api/config', { credentials: 'same-origin' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    CFG.fields = d.fields || [];
+    CFG.values = d.values || {};
+    CFG.writable = !!d.writable;
+    CFG.loaded = true;
+  } catch (e) {
+    $('#cfgForm').innerHTML = '<div class="state err">读取失败：' + esc(e.message) + '</div>';
+    return;
+  }
+  renderConfigForm();
+}
+
+// saveConfigForm 只提交**改动过**的字段：没碰的项不动，避免把别处的旧值写回文件。
+async function saveConfigForm() {
+  const patch = {};
+  $$('#cfgForm [data-key]').forEach(el => {
+    const k = el.dataset.key;
+    const f = CFG.fields.find(x => x.key === k);
+    if (!f) return;
+    let v;
+    if (f.type === 'int') v = Number(el.value);
+    else if (f.type === 'bool') v = el.value === 'true';
+    else v = el.value;
+    const old = CFG.values[k];
+    const same = f.type === 'int' ? Number(old) === v
+      : f.type === 'bool' ? Boolean(old) === v
+      : String(old == null ? '' : old) === String(v);
+    if (!same) patch[k] = v;
+  });
+  if (!Object.keys(patch).length) { toast('没有改动', 'ok'); return; }
+
+  const btn = $('#btnCfgSave');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/panel/api/config', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ patch: patch }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(d.error || ('保存失败 HTTP ' + r.status), 'err'); return; }
+    const nr = d.need_restart || [];
+    if (nr.length) toast('已保存 ' + (d.applied || []).length + ' 项；' + nr.length + ' 项需重启才生效', 'err');
+    else toast('已保存 ' + (d.applied || []).length + ' 项，立即生效', 'ok');
+    CFG.values = d.values || CFG.values;
+    renderConfigForm();
+  } finally {
+    btn.disabled = !CFG.writable;
+  }
+}
+
 function renderConfig() {
   const c = S.ov.config || {};
+  loadConfigForm(false).catch(() => {});
   $('#cfgVer').textContent = 'v' + (S.ov.version || '-') + ' · uptime ' + fmtUp(S.ov.uptime_s);
   $('#cfgService').innerHTML = [
     kv('监听', esc(c.listen || '-')),
@@ -1972,6 +2096,7 @@ function bind() {
     }
   });
 
+  $('#btnCfgSave').addEventListener('click', () => { saveConfigForm().catch(e => toast(e.message, 'err')); });
   $('#btnRefreshCredits').addEventListener('click', async () => {
     const btn = $('#btnRefreshCredits');
     btn.disabled = true; btn.textContent = '读取中…';

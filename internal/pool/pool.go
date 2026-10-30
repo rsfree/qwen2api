@@ -117,14 +117,25 @@ type View struct {
 type Pool struct {
 	mu       sync.RWMutex
 	accounts []*Account
-	cfg      config.Pool
-	state    string
-	rr       int
+	// cfg 用原子快照：面板热更只替换这一个值，读侧（选号/冷却）永远看到一致配置。
+	cfg   atomic.Value // config.Pool
+	state string
+	rr    int
+}
+
+// SetConfig 热更新池参数（限额 / 冷却 / 轮换）。已在途的请求不受影响。
+func (p *Pool) SetConfig(cfg config.Pool) { p.cfg.Store(cfg) }
+
+// conf 当前池配置快照。
+func (p *Pool) conf() config.Pool {
+	v, _ := p.cfg.Load().(config.Pool)
+	return v
 }
 
 // New 构造池并尝试恢复上次的冷却状态。
 func New(cfg config.Pool, accounts []config.Account, stateFile string) *Pool {
-	p := &Pool{cfg: cfg, state: stateFile}
+	p := &Pool{state: stateFile}
+	p.cfg.Store(cfg)
 	for _, a := range accounts {
 		acc := &Account{
 			Name:         a.Name,
@@ -193,18 +204,18 @@ func (p *Pool) pickVideo(needCredits int) (*Account, bool) {
 		if a.authDead || now.Before(a.cooldownUntil) {
 			continue
 		}
-		if int(atomic.LoadInt32(&a.inflight)) >= p.cfg.MaxInflightPerAccount {
+		if int(atomic.LoadInt32(&a.inflight)) >= p.conf().MaxInflightPerAccount {
 			continue
 		}
-		if p.cfg.MaxVideoPerDay > 0 {
+		if p.conf().MaxVideoPerDay > 0 {
 			p.rollVideoDay(a, now)
-			if a.videoCount >= p.cfg.MaxVideoPerDay {
+			if a.videoCount >= p.conf().MaxVideoPerDay {
 				continue
 			}
 		}
-		if p.cfg.MaxVideoCreditsPerDay > 0 {
+		if p.conf().MaxVideoCreditsPerDay > 0 {
 			p.rollCreditDay(a, now)
-			if a.creditUsed+needCredits > p.cfg.MaxVideoCreditsPerDay {
+			if a.creditUsed+needCredits > p.conf().MaxVideoCreditsPerDay {
 				continue
 			}
 		}
@@ -283,18 +294,18 @@ func (p *Pool) pick(need pickKind) (*Account, bool) {
 		if now.Before(a.cooldownUntil) {
 			continue
 		}
-		if int(atomic.LoadInt32(&a.inflight)) >= p.cfg.MaxInflightPerAccount {
+		if int(atomic.LoadInt32(&a.inflight)) >= p.conf().MaxInflightPerAccount {
 			continue
 		}
-		if need == kindImage && p.cfg.MaxImagePerDay > 0 {
+		if need == kindImage && p.conf().MaxImagePerDay > 0 {
 			p.rollImageDay(a, now)
-			if a.imageCount >= p.cfg.MaxImagePerDay {
+			if a.imageCount >= p.conf().MaxImagePerDay {
 				continue
 			}
 		}
-		if need == kindVideo && p.cfg.MaxVideoPerDay > 0 {
+		if need == kindVideo && p.conf().MaxVideoPerDay > 0 {
 			p.rollVideoDay(a, now)
-			if a.videoCount >= p.cfg.MaxVideoPerDay {
+			if a.videoCount >= p.conf().MaxVideoPerDay {
 				continue
 			}
 		}
@@ -356,18 +367,18 @@ func (p *Pool) MarkVideoDone(a *Account) {
 // VideoUsage 返回该号今日已提交视频数与上限（limit=0 表示不限）。
 func (p *Pool) VideoUsage(a *Account) (used, limit int) {
 	if a == nil {
-		return 0, p.cfg.MaxVideoPerDay
+		return 0, p.conf().MaxVideoPerDay
 	}
 	p.mu.Lock()
 	p.rollVideoDay(a, time.Now())
 	used = a.videoCount
 	p.mu.Unlock()
-	return used, p.cfg.MaxVideoPerDay
+	return used, p.conf().MaxVideoPerDay
 }
 
 // VideoQuotaLeft 全池今日剩余视频额度（0 且 limit>0 ⇒ 用尽；-1 ⇒ 不限）。
 func (p *Pool) VideoQuotaLeft() int {
-	limit := p.cfg.MaxVideoPerDay
+	limit := p.conf().MaxVideoPerDay
 	if limit <= 0 {
 		return -1
 	}
@@ -552,7 +563,7 @@ func (p *Pool) SpendVideoCredits(a *Account, credits int) {
 
 // CreditsUsage 返回 (今日已用积分, 每日预算)。预算 0 表示不启用积分模式。
 func (p *Pool) CreditsUsage(a *Account) (used, limit int) {
-	limit = p.cfg.MaxVideoCreditsPerDay
+	limit = p.conf().MaxVideoCreditsPerDay
 	if a == nil {
 		return 0, limit
 	}
@@ -568,7 +579,7 @@ func (p *Pool) CreditsUsage(a *Account) (used, limit int) {
 // 注意不能拿 CreditsLeft() >= need 判断：两个号各剩 20 分时总和够 40，
 // 但 30 分的请求谁都不够 —— 那种情况要报"积分不足"，不是"账号不可用"。
 func (p *Pool) CanSpendVideoCredits(need int) bool {
-	limit := p.cfg.MaxVideoCreditsPerDay
+	limit := p.conf().MaxVideoCreditsPerDay
 	if limit <= 0 {
 		return true // 未启用积分模式
 	}
@@ -589,7 +600,7 @@ func (p *Pool) CanSpendVideoCredits(need int) bool {
 
 // CreditsLeft 全池今日剩余视频积分（-1 表示不启用积分模式）。
 func (p *Pool) CreditsLeft() int {
-	limit := p.cfg.MaxVideoCreditsPerDay
+	limit := p.conf().MaxVideoCreditsPerDay
 	if limit <= 0 {
 		return -1
 	}
@@ -627,18 +638,18 @@ func (p *Pool) MarkImageDone(a *Account) {
 // ImageUsage 返回该号今日已出图数与本地上限（limit=0 表示不限）。
 func (p *Pool) ImageUsage(a *Account) (used, limit int) {
 	if a == nil {
-		return 0, p.cfg.MaxImagePerDay
+		return 0, p.conf().MaxImagePerDay
 	}
 	p.mu.Lock()
 	p.rollImageDay(a, time.Now())
 	used = a.imageCount
 	p.mu.Unlock()
-	return used, p.cfg.MaxImagePerDay
+	return used, p.conf().MaxImagePerDay
 }
 
 // ImageQuotaLeft 所有账号今日剩余出图额度之和（0 且 limit>0 ⇒ 全池配额用尽）。
 func (p *Pool) ImageQuotaLeft() int {
-	limit := p.cfg.MaxImagePerDay
+	limit := p.conf().MaxImagePerDay
 	if limit <= 0 {
 		return -1 // 不限
 	}
@@ -689,7 +700,7 @@ func (p *Pool) MarkAuth(a *Account, reason string) {
 	a.authDead = true
 	a.failures++
 	a.lastError = "auth: " + reason
-	a.cooldownUntil = time.Now().Add(time.Duration(p.cfg.CooldownAuthS) * time.Second)
+	a.cooldownUntil = time.Now().Add(time.Duration(p.conf().CooldownAuthS) * time.Second)
 	p.mu.Unlock()
 	p.save()
 }
@@ -712,7 +723,7 @@ func (p *Pool) cooldown(a *Account, reason string, retryAfter int) {
 	p.mu.Lock()
 	a.failures++
 	a.lastError = reason
-	base := time.Duration(p.cfg.CooldownSoftS) * time.Second
+	base := time.Duration(p.conf().CooldownSoftS) * time.Second
 	if retryAfter > 0 {
 		base = time.Duration(retryAfter) * time.Second
 	}
@@ -840,11 +851,11 @@ func (p *Pool) Snapshot() []View {
 			Served:        a.served,
 			LastError:     a.lastError,
 			ImageToday:    imageToday,
-			ImageLimit:    p.cfg.MaxImagePerDay,
+			ImageLimit:    p.conf().MaxImagePerDay,
 			VideoToday:    videoToday,
-			VideoLimit:    p.cfg.MaxVideoPerDay,
+			VideoLimit:    p.conf().MaxVideoPerDay,
 			CreditsUsed:   creditsUsed,
-			CreditsLimit:  p.cfg.MaxVideoCreditsPerDay,
+			CreditsLimit:  p.conf().MaxVideoCreditsPerDay,
 			CreditBalance: a.creditBalance,
 			CreditKnown:   a.creditKnown,
 		CreditDailyAt: dailyAt(a),

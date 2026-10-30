@@ -124,6 +124,8 @@ func main() {
 	reqLog.Out = io.MultiWriter(os.Stdout, runLog)
 
 	srv := server.New(cfg, pool, up, reqLog, version)
+	// 面板「配置」页要写回配置文件并热更新（不传就一直只读）。
+	srv.SetConfigPath(*cfgPath)
 	srv.SetAPIKeys(activeKeys, keyPath, keysManaged)
 	srv.SetRunLog(runLog)
 	srv.SetPanel(panel.New(srv))

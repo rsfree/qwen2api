@@ -94,7 +94,10 @@ func TestChatHitSkipsNewChatCall(t *testing.T) {
 	s := newTestServerWithServer(t, up, 1)
 	// per=1 ⇒ 预放满之后 Short 为 0，请求命中时不会触发异步补建，
 	// 这样才能断言"上游一次都没被打"。
-	s.cfg.Pool.WarmChatsPerAccount = 1
+	// 用热更接口改配置（conf() 返回的是快照，不能就地赋值）。
+	cfg := s.conf()
+	cfg.Pool.WarmChatsPerAccount = 1
+	s.ApplyConfig(cfg)
 	s.chats = NewChatPool(1, time.Minute)
 	s.chats.Put("a0", "t2t", "chat-pre")
 
@@ -118,7 +121,10 @@ func TestChatHitSkipsNewChatCall(t *testing.T) {
 func TestChatMissFallsBackToNewChat(t *testing.T) {
 	up := newFakeUpstream(t, 0)
 	s := newTestServerWithServer(t, up, 1)
-	s.cfg.Pool.WarmChatsPerAccount = 1
+	// 用热更接口改配置（conf() 返回的是快照，不能就地赋值）。
+	cfg := s.conf()
+	cfg.Pool.WarmChatsPerAccount = 1
+	s.ApplyConfig(cfg)
 	s.chats = NewChatPool(1, time.Minute) // 空池
 
 	body := `{"model":"qwen3.7-plus","messages":[{"role":"user","content":"hi"}]}`

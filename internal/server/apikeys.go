@@ -25,7 +25,7 @@ func (s *Server) SetAPIKeys(keys []config.APIKey, path string, managed bool) {
 	s.keysMu.Lock()
 	defer s.keysMu.Unlock()
 	if path == "" {
-		path = config.APIKeysFile(s.cfg.StateFile)
+		path = config.APIKeysFile(s.conf().StateFile)
 	}
 	s.keys = normalizeKeys(keys)
 	s.keysPath = path
@@ -43,8 +43,8 @@ func (s *Server) APIKeys() []config.APIKey {
 		return out
 	}
 	// 未调用 SetAPIKeys（测试或极简嵌入）时退回配置里的值。
-	out := make([]config.APIKey, 0, len(s.cfg.APIKeys))
-	for _, k := range s.cfg.APIKeys {
+	out := make([]config.APIKey, 0, len(s.conf().APIKeys))
+	for _, k := range s.conf().APIKeys {
 		out = append(out, config.APIKey{Key: k})
 	}
 	return out
@@ -64,7 +64,7 @@ func (s *Server) APIKeysPath() string {
 	if s.keysPath != "" {
 		return s.keysPath
 	}
-	return config.APIKeysFile(s.cfg.StateFile)
+	return config.APIKeysFile(s.conf().StateFile)
 }
 
 // AddAPIKey 生成一把新 key 并落盘。
@@ -136,14 +136,14 @@ func (s *Server) DeleteAPIKey(key string) error {
 // adoptLocked 把当前生效的 key 复制进托管列表（未初始化时）。
 func (s *Server) adoptLocked() {
 	if !s.keysInit {
-		s.keys = make([]config.APIKey, 0, len(s.cfg.APIKeys))
-		for _, k := range s.cfg.APIKeys {
+		s.keys = make([]config.APIKey, 0, len(s.conf().APIKeys))
+		for _, k := range s.conf().APIKeys {
 			s.keys = append(s.keys, config.APIKey{Key: k, Note: "来自配置文件"})
 		}
 		s.keysInit = true
 	}
 	if s.keysPath == "" {
-		s.keysPath = config.APIKeysFile(s.cfg.StateFile)
+		s.keysPath = config.APIKeysFile(s.conf().StateFile)
 	}
 	s.keysManaged = true
 }

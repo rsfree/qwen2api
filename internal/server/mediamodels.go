@@ -27,7 +27,7 @@ const mediaModelCreated = 1761782400 // 2026-10-30 00:00:00 UTC
 func (s *Server) mediaModels() []ModelInfo {
 	out := make([]ModelInfo, 0, 2)
 
-	if id := strings.TrimSpace(s.cfg.ImageModel); id != "" {
+	if id := strings.TrimSpace(s.conf().ImageModel); id != "" {
 		out = append(out, ModelInfo{
 			ID:       id,
 			Object:   "model",
@@ -45,12 +45,12 @@ func (s *Server) mediaModels() []ModelInfo {
 		})
 	}
 
-	if id := strings.TrimSpace(s.cfg.Video.RootModel); id != "" {
+	if id := strings.TrimSpace(s.conf().Video.RootModel); id != "" {
 		params := map[string]any{
 			"sizes": []string{"16:9", "9:16", "1:1"},
 			"audio": []bool{true, false},
 		}
-		if pricing := s.cfg.Video.Pricing; len(pricing) > 0 {
+		if pricing := s.conf().Video.Pricing; len(pricing) > 0 {
 			resolutions := make([]string, 0, len(pricing))
 			durSet := map[int]struct{}{}
 			for res, byDur := range pricing {
@@ -84,7 +84,7 @@ func (s *Server) mediaModels() []ModelInfo {
 			Verified: true,
 			Params:   params,
 			Notes: "更自然稳定。异步任务：提交拿 id，再 GET /v1/videos/generations/{id} 轮询。" +
-				videoPriceNote(s.cfg.Video.Pricing),
+				videoPriceNote(s.conf().Video.Pricing),
 		})
 	}
 
@@ -176,13 +176,13 @@ func (s *Server) modelList(ctx context.Context) []ModelInfo {
 // 🔴 不能把图片模型名当 chat 模型发给上游：`/api/v2/chats/new` 的 models[]
 // 只认 chat 模型，填 qwen-image-3.0 会 Bad_Request —— 上游模型表里根本没这个 id。
 func (s *Server) resolveImageModel(model string) (chatModel, imageModel string) {
-	imageModel = strings.TrimSpace(s.cfg.ImageModel)
+	imageModel = strings.TrimSpace(s.conf().ImageModel)
 	chatModel = strings.TrimSpace(model)
 	if imageModel != "" && sameModelName(chatModel, imageModel) {
 		chatModel = ""
 	}
 	if chatModel == "" {
-		chatModel = s.cfg.DefaultModel
+		chatModel = s.conf().DefaultModel
 	}
 	if imageModel == "" {
 		imageModel = "qwen-image-3.0"
@@ -192,13 +192,13 @@ func (s *Server) resolveImageModel(model string) (chatModel, imageModel string) 
 
 // resolveVideoModel 同上：返回建会话用的 chat 模型与生成内核 rootModel。
 func (s *Server) resolveVideoModel(model string) (chatModel, rootModel string) {
-	rootModel = strings.TrimSpace(s.cfg.Video.RootModel)
+	rootModel = strings.TrimSpace(s.conf().Video.RootModel)
 	chatModel = strings.TrimSpace(model)
 	if rootModel != "" && sameModelName(chatModel, rootModel) {
 		chatModel = ""
 	}
 	if chatModel == "" {
-		chatModel = s.cfg.DefaultModel
+		chatModel = s.conf().DefaultModel
 	}
 	if rootModel == "" {
 		rootModel = "happyhorse11"
@@ -240,10 +240,10 @@ func (s *Server) mediaEndpoint(model string) string {
 	if m == "" {
 		return ""
 	}
-	if id := strings.TrimSpace(s.cfg.ImageModel); id != "" && sameModelName(m, id) {
+	if id := strings.TrimSpace(s.conf().ImageModel); id != "" && sameModelName(m, id) {
 		return "/v1/images/generations"
 	}
-	if id := strings.TrimSpace(s.cfg.Video.RootModel); id != "" && sameModelName(m, id) {
+	if id := strings.TrimSpace(s.conf().Video.RootModel); id != "" && sameModelName(m, id) {
 		return "/v1/videos/generations"
 	}
 	return ""

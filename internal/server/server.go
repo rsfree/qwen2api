@@ -5,13 +5,16 @@ package server
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yuanjie-ai/qwen2api/internal/config"
@@ -23,7 +26,10 @@ import (
 
 // Server HTTP 前门。
 type Server struct {
-	cfg     config.Config
+	// cfg 运行时配置快照（面板可热更）。用 atomic.Value 存**整份** config，
+	// 读取走 s.conf()：改一个字段也是整体替换，读侧永远看到一致的快照
+	// （不会出现"max_rotate 已改、cooldown 还是旧值"的半更新状态）。
+	cfg     atomic.Value // config.Config
 	pool    *pool.Pool
 	up      *upstream.Client
 	models  *ModelCache
@@ -63,12 +69,13 @@ type Server struct {
 	egress   map[string]*egressState
 	// chats 预建的空会话池（按账号 + 会话类型分组，见 chatpool.go）。
 	chats *ChatPool
+	// cfgPath 配置文件路径（面板保存配置时要写回它；空 = 不可写，只读展示）。
+	cfgPath string
 }
 
 // New 构造前门。
 func New(cfg config.Config, p *pool.Pool, up *upstream.Client, log *reqlog.Log, version string) *Server {
 	s := &Server{
-		cfg:     cfg,
 		pool:    p,
 		up:      up,
 		models:  NewModelCache(up, p),
@@ -81,6 +88,7 @@ func New(cfg config.Config, p *pool.Pool, up *upstream.Client, log *reqlog.Log, 
 		egress:  map[string]*egressState{},
 		chats:   NewChatPool(cfg.Pool.WarmChatsPerAccount, time.Duration(cfg.Pool.ChatPoolTTLS)*time.Second),
 	}
+	s.cfg.Store(cfg)
 	// 配置了公网基址就固定下来（服务端到服务端取图时 Host 不是公网域名）。
 	if cfg.BlobBaseURL != "" {
 		s.blobs.SetBase(cfg.BlobBaseURL)
@@ -107,7 +115,99 @@ func (s *Server) RunLog() *runlog.Buffer { return s.runLog }
 func (s *Server) Upstream() *upstream.Client { return s.up }
 
 // Config 配置副本（面板只读展示）。
-func (s *Server) Config() config.Config { return s.cfg }
+// Config 当前配置快照（值拷贝，供面板/统计读）。
+func (s *Server) Config() config.Config { return s.conf() }
+
+// SetConfigPath 告知配置文件在哪（面板保存时写回它）。
+func (s *Server) SetConfigPath(p string) { s.cfgPath = p }
+
+// ConfigPath 配置文件路径（空 = 面板只能看不能改）。
+func (s *Server) ConfigPath() string { return s.cfgPath }
+
+// UpdateConfig 把面板表单的改动合并进配置文件并**热更新**。
+//
+// 流程：读原文件 → 按白名单校验合并（config.Apply）→ 原子写回 → 用新文件重建
+// 配置快照并应用。任何一步失败都不留半改状态：写文件用 tmp + rename。
+//
+// 🔴 只改面板列出的字段（白名单），且 accounts / api_keys / panel 这类
+// "写错就锁死服务"的项根本不在白名单里 —— 它们只能改文件 + 重启。
+func (s *Server) UpdateConfig(patch map[string]any) (applied, needRestart []string, err error) {
+	path := s.cfgPath
+	if path == "" {
+		return nil, nil, errors.New("未指定配置文件（启动时没给 -config），只能查看不能修改")
+	}
+	raw := map[string]any{}
+	b, rerr := os.ReadFile(path)
+	switch {
+	case rerr == nil:
+		if e := json.Unmarshal(b, &raw); e != nil {
+			return nil, nil, fmt.Errorf("现有配置文件不是合法 JSON：%w", e)
+		}
+	case os.IsNotExist(rerr):
+		// 文件不存在（纯环境变量部署）：从当前快照起步，写出一份完整配置。
+		snap, _ := json.Marshal(s.conf())
+		_ = json.Unmarshal(snap, &raw)
+	default:
+		return nil, nil, rerr
+	}
+
+	applied, needRestart, err = config.Apply(raw, patch)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(applied) == 0 {
+		return nil, nil, nil // 没有实际变化
+	}
+
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return nil, nil, err
+	}
+	out = append(out, '\n')
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return nil, nil, fmt.Errorf("写临时文件失败：%w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return nil, nil, fmt.Errorf("替换配置文件失败：%w", err)
+	}
+
+	// 用新文件重建快照：从当前配置拷贝一份再 unmarshal —— 文件里没有的字段
+	// （accounts / 环境变量注入的项）保持原值，不会被抹成零值。
+	nc := s.conf()
+	if err := json.Unmarshal(out, &nc); err != nil {
+		return applied, needRestart, fmt.Errorf("新配置解析失败（已写入文件，重启后生效）：%w", err)
+	}
+	s.ApplyConfig(nc)
+	for _, k := range applied {
+		log.Printf("[qwen2api] 配置热更 %s", k)
+	}
+	return applied, needRestart, nil
+}
+
+// conf 当前运行时配置（指针，只读使用；不要修改返回值）。
+func (s *Server) conf() config.Config {
+	v, _ := s.cfg.Load().(config.Config)
+	return v
+}
+
+// ApplyConfig 热更新配置：整体替换快照 + 同步池与会话池的参数。
+//
+// 只用于**支持热更**的字段（见 panel 的 configFields 白名单）：
+// listen / accounts / api_keys / panel / upstream.base_url 改了必须重启，
+// 面板会明确标出来，不会假装生效。
+func (s *Server) ApplyConfig(nc config.Config) {
+	// accounts 属于"启动期资源"：面板没有账号编辑能力，热更时保留原值，
+	// 避免一次配置保存把整池账号从内存里抹掉。
+	nc.Accounts = s.conf().Accounts
+	s.cfg.Store(nc)
+	// 池参数（限额/冷却/轮换）立即生效 —— 它们只在选号与冷却计算时读。
+	s.pool.SetConfig(nc.Pool)
+	// 会话池的 per/ttl 也随配置变（0 就是关掉预建）。
+	s.chats.SetLimits(nc.Pool.WarmChatsPerAccount,
+		time.Duration(nc.Pool.ChatPoolTTLS)*time.Second)
+}
 
 // Version 版本号（面板展示）。
 func (s *Server) Version() string { return s.version }

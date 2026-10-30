@@ -208,10 +208,10 @@ func (s *Server) creditsShortfall(need int) (error, string, bool) {
 	views := s.pool.Snapshot()
 
 	// ① 本地预算口径（只有显式配置了才管）
-	if s.cfg.Pool.MaxVideoCreditsPerDay > 0 && !s.pool.CanSpendVideoCredits(need) {
+	if s.conf().Pool.MaxVideoCreditsPerDay > 0 && !s.pool.CanSpendVideoCredits(need) {
 		return errVideoQuotaLocal, fmt.Sprintf("全部 %d 个账号今日视频积分预算都不够这一次"+
 			"（预算 %d 分/号/天，本次需要 %d 分）",
-			len(views), s.cfg.Pool.MaxVideoCreditsPerDay, need), true
+			len(views), s.conf().Pool.MaxVideoCreditsPerDay, need), true
 	}
 
 	// ② 真实余额口径：所有活着的号都读到了余额，且都小于本次所需

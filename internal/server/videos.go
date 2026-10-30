@@ -125,20 +125,20 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 			itoa(req.Width) + "x" + itoa(req.Height)))
 	}
 	if size == "" {
-		size = s.cfg.Video.Size
+		size = s.conf().Video.Size
 	}
 	resolution := strings.TrimSpace(req.Resolution)
 	if resolution == "" {
-		resolution = s.cfg.Video.Resolution
+		resolution = s.conf().Video.Resolution
 	}
 	duration := req.Duration
 	if duration <= 0 {
 		duration = req.Seconds
 	}
 	if duration <= 0 {
-		duration = s.cfg.Video.Duration
+		duration = s.conf().Video.Duration
 	}
-	audio := req.Audio || s.cfg.Video.Audio
+	audio := req.Audio || s.conf().Video.Audio
 
 	// model 字段可能填 chat 模型，也可能填视频模型（清单里两者都在）。
 	// chatModel 用于建会话，rootModel 是生成内核；对外的 model 回显请求原值。
@@ -151,9 +151,9 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 
 	// 积分：按档位算这一次要扣多少。查不到档位就明确拒绝 ——
 	// 上游只支持 5/10/15 秒，瞎填的时长本该在网关拦掉，不该放过去烧积分。
-	needCredits, ok := s.cfg.Video.VideoCredits(resolution, duration)
+	needCredits, ok := s.conf().Video.VideoCredits(resolution, duration)
 	if !ok {
-		if len(s.cfg.Video.Pricing) == 0 {
+		if len(s.conf().Video.Pricing) == 0 {
 			needCredits = 0 // 未启用积分模式：退回个数口径
 		} else {
 			entry.Status = http.StatusBadRequest
@@ -173,7 +173,7 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 		taskID  string
 		lastErr error
 	)
-	for attempt := 0; attempt < s.cfg.Pool.MaxRotate; attempt++ {
+	for attempt := 0; attempt < s.conf().Pool.MaxRotate; attempt++ {
 		// 视频按积分计费（720P 5s=30、1080P 15s=120），选号必须看"剩余预算够不够这一次"。
 		a, ok := s.pool.PickForVideo(needCredits)
 		if !ok {
