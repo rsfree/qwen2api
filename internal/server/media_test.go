@@ -343,3 +343,27 @@ func TestFileGetUnknownIs404(t *testing.T) {
 		t.Fatalf("未知 file id 应 404，得到 %d", rec.Code)
 	}
 }
+
+// TestMaskWithoutImage 钉住 mask 的**有图/无图**分野（2026-10-30 实测发现的契约 bug：
+// 老实现无条件 400，把 image+mask 的合法调用也打回，文案却写着"mask 没有 image"）。
+//
+// 语义：没有图 ⇒ 400（无从编辑）；有图 ⇒ 收下但不转发（上游无 inpaint，绝不假装按 mask 重绘）。
+func TestMaskWithoutImage(t *testing.T) {
+	cases := []struct {
+		name string
+		mask string
+		refs []string
+		want bool
+	}{
+		{"无 mask 无图", "", nil, false},
+		{"只有 mask", "https://x/m.png", nil, true},
+		{"mask 是空白", "   ", nil, false},
+		{"mask + 一张图", "https://x/m.png", []string{"https://x/a.png"}, false},
+		{"mask + 两张图", "https://x/m.png", []string{"a", "b"}, false},
+	}
+	for _, c := range cases {
+		if got := maskWithoutImage(c.mask, c.refs); got != c.want {
+			t.Fatalf("%s: maskWithoutImage=%v, want %v", c.name, got, c.want)
+		}
+	}
+}

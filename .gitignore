@@ -15,3 +15,7 @@ dist/
 
 # 工作记忆（含账号邮箱/内部决策记录，绝不入库）
 .workbuddy/
+
+# Python 缓存（scripts/ 下的测试工具）
+__pycache__/
+*.pyc

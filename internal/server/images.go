@@ -85,6 +85,15 @@ func (r ImageRequest) imageRefs() ([]string, error) {
 	return many, nil
 }
 
+// maskWithoutImage 判断 mask 是否"非法地单独出现"。
+//
+// 契约：只有**没有参考图**时带 mask 才是 400；带图时 mask 收下但不转发
+// （上游没有 inpaint 语义）。早先的实现无条件 400，把 image+mask 的正常调用
+// 也一起打回，错误文案还写着"mask 没有 image"—— 与文档自相矛盾。
+func maskWithoutImage(mask string, refs []string) bool {
+	return strings.TrimSpace(mask) != "" && len(refs) == 0
+}
+
 // ImageDatum 单张结果。
 type ImageDatum struct {
 	URL           string `json:"url,omitempty"`
@@ -195,12 +204,17 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("image 最多 %d 张", maxInputImages), "image")
 		return
 	}
-	if req.Mask != "" {
+	if maskWithoutImage(req.Mask, refs) {
 		entry.Status = http.StatusBadRequest
 		entry.Error = "mask 没有 image"
 		s.log.Add(entry)
 		writeErrorParam(w, http.StatusBadRequest, "invalid_request_error", "mask 必须配合 image 使用", "mask")
 		return
+	}
+	// 上游没有 inpaint 语义：带图时 mask 收下但不转发（文档契约）。
+	// 不静默 —— 日志留痕，免得以后有人以为"mask 生效了"。
+	if strings.TrimSpace(req.Mask) != "" {
+		log.Printf("[qwen2api] 图片请求带了 mask，但上游无 inpaint 语义，已忽略")
 	}
 	if strings.TrimSpace(req.Prompt) == "" {
 		entry.Status = http.StatusBadRequest
@@ -509,9 +523,12 @@ func looksLikeMedia(b []byte) bool {
 
 // handleImageEdits `POST /v1/images/edits`。
 //
-// 明确 501 而不是假装成功：图生图要求把参考图上传到 qwen 自有 OSS
-// （getstsToken → V4 签名 PUT，签名 300s），这条链本仓未实现。
-// 硬要"支持"只能是偷偷把图丢掉、当成文生图跑 —— 那是最坏的欺骗。
+// 与 generations 同一条生成链，只是载体是 multipart：`image` / `image[]` 收文件，
+// 也收文本形态的 `image=<URL>`。参考图同样走 getstsToken → OSS V4 签名 PUT 上传，
+// 再以 chat_type=image_edit 提交（上传与生成必须同一个账号）。
+//
+// 没收到参考图时**直接 400**，不退化成文生图 —— "偷偷把图丢掉当 t2i 跑"
+// 是最坏的欺骗：调用方会以为编辑成功。
 func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	entry := reqlog.Entry{
