@@ -296,6 +296,32 @@ Claude Code / Cline 这类客户端把 Base URL 指向本服务即可。按 Anth
 | **模型与调试** | 模型清单（能力标记）+ 在线调试（真打 `/v1/chat/completions`，流式回显） |
 | **配置** | 生效配置只读摘要（服务/上游/配额/视频单价/账号清单来源） |
 
+### 登录（与 API Key 分开）
+
+面板能做导入/删除账号、能看到全部邮箱 —— 只靠一把 API Key 意味着"能调 API 的人
+就能改账号池"。所以面板有自己的登录：
+
+```json
+"panel": {
+  "username": "admin",
+  "password_hash": "pbkdf2$120000$…",
+  "session_hours": 12,
+  "session_secret": "多副本部署时必须配同一个"
+}
+```
+
+- 生成 hash：`qwen2api -passwd '你的密码'`（内置，省得手算迭代次数——算错的表现是
+  "密码永远不对"，极难查）；
+- 也可用明文 `password`，或环境变量 `QWEN2API_PANEL_PASSWORD`（容器部署推荐）；
+- 会话是 **HttpOnly + SameSite=Lax 的签名 cookie**（HMAC-SHA256），JS 读不到，XSS 偷不走；
+  `Secure` 标记按 `X-Forwarded-Proto` 自动加（nginx 终结 TLS 时必须靠它）；
+- 会话与用户名绑定：改用户名/改密码（hash 变了但旧 token 仍带旧用户名无效）即失效；
+- 连续 10 次失败 → 同 IP 锁 10 分钟（面板在公网，没这道闸等于开放爆破）；
+- **不配密码 = 保持老行为**（只认 API Key），升级不会把人锁在门外。
+
+> `/v1/*` 仍然只认 API Key；面板页认"会话 **或** Key"——脚本/CI 用 Key 访问面板接口
+> 不受影响。
+
 ### 导入账号
 
 右上角「导入账号」，三种方式：
@@ -337,6 +363,49 @@ data/accounts.json   面板托管（导入/删除写这里；**存在即完全�
 
 前端 5s 拉一次 `/panel/api/overview`；余额刷新走 **2 分钟 TTL**，所以轮询不会把
 上游积分域名打热。手动点「刷新余额」则无视 TTL。
+
+## 出口代理（每个账号一条固定 IP）
+
+所有账号从同一个 IP 登录/请求时，**一个号被判风控会连带整池**——上游是按出口 IP
+做画像的。所以支持"账号 → 固定出口"的稳定映射（不是随机轮换，轮换反而更容易掉登录态）：
+
+```json
+"upstream": {
+  "proxy": {
+    "enabled": true,
+    "url_template": "socks5h://poolclient-{account}:{password}@pool.livetest.cn:2090",
+    "password": "按需填（或用 QWEN2API_PROXY_PASSWORD）"
+  }
+}
+```
+
+- `{account}` 替换成账号名（`main` → `poolclient-main`），`{password}` 取 Password 字段；
+- **只支持 `socks5` / `socks5h`**：我们要的是"换出口 IP"，HTTP CONNECT 代理常带
+  `X-Forwarded-For`，起不到隔离作用，所以直接拒绝；
+- `socks5h` 语义 = 域名交给代理解析（远端 DNS）。本仓的 SOCKS5 客户端对域名一律用
+  `ATYP=domain`，所以不会出现"本地解析成错区域的 IP、连得上但被风控"这种隐形故障；
+- 每个账号一条 `http.Transport`（连接复用 + 出口稳定），**按账号缓存**，不随 token 变化
+  （换 token 不该换 IP）；
+- 登录（signin / refresh）、上传、生成、余额读取**全部**走该账号的出口 —— 登录 IP 与
+  使用 IP 不一致本身就是风控画像里的可疑信号。
+
+### 没有账号归属的请求怎么办
+
+公共端点（未登录探测）没有账号上下文：
+
+| `direct_when_missing` | 行为 |
+|---|---|
+| `true`（默认） | 直连。适合"代理是可选项"的部署 |
+| `false` | 直接拒绝。适合"绝不允许真实 IP 出现在上游"的部署 |
+
+### 实测（2026-10-30）
+
+同一个代理池、不同账号名 → 不同且稳定的出口：
+
+```
+probe-a → 38.6.213.75   （连两次都一致）
+probe-b → 38.6.213.41
+```
 
 ## 代码地图
 

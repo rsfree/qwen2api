@@ -191,10 +191,11 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		cred := s.pool.Credential(a.Name)
-		chatID, err := s.up.NewChatTyped(r.Context(), cred, model, spec.ChatType)
+		actx := upstream.WithAccount(r.Context(), a.Name)
+		chatID, err := s.up.NewChatTyped(actx, cred, model, spec.ChatType)
 		if err == nil {
 			body := upstream.BuildSubmitSpec(chatID, "", model, req.Prompt, "fast", spec, time.Now())
-			taskID, err = s.up.SubmitVideo(r.Context(), cred, body)
+			taskID, err = s.up.SubmitVideo(actx, cred, body)
 			if err == nil {
 				acct = a.Name
 				s.pool.MarkOK(a)
@@ -272,7 +273,7 @@ func (s *Server) handleVideoGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw, err := s.up.TaskStatus(r.Context(), cred, task.taskID)
+	raw, err := s.up.TaskStatus(upstream.WithAccount(r.Context(), task.account), cred, task.taskID)
 	if err != nil {
 		writeError(w, httpStatusFor(err), errTypeFor(err), err.Error())
 		return
@@ -301,7 +302,7 @@ func (s *Server) handleVideoContent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "upstream_error", "任务所属账号已不在池里")
 		return
 	}
-	raw, err := s.up.TaskStatus(r.Context(), cred, task.taskID)
+	raw, err := s.up.TaskStatus(upstream.WithAccount(r.Context(), task.account), cred, task.taskID)
 	if err != nil {
 		writeError(w, httpStatusFor(err), errTypeFor(err), err.Error())
 		return

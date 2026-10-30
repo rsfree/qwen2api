@@ -53,6 +53,35 @@ type Upstream struct {
 	ConnectS    int    `json:"connect_timeout_s"` // 建连超时，默认 20
 	// InsecureSkipVerify 仅供抓包调试（自签代理），生产别开。
 	InsecureSkipVerify bool `json:"insecure_skip_verify"`
+	// Proxy 出口代理（按账号分流）。
+	Proxy Proxy `json:"proxy"`
+}
+
+// Proxy 出口代理：**每个账号一条固定出口**。
+//
+// 为什么需要：所有账号从同一个 IP 登录/请求时，一个号被判风控会连带整池
+// （上游按 IP 画像）。同理，同一账号的出口若在多个 IP 间跳，登录态也更容易掉。
+// 所以理想形态是"账号 → 固定出口"的**稳定映射**，而不是随机轮换。
+//
+// 用法（运营商提供的按账号分流的 SOCKS5 池）：
+//
+//	"proxy": {
+//	  "enabled": true,
+//	  "url_template": "socks5h://poolclient-{account}:密码@pool.livetest.cn:2090"
+//	}
+//
+// 模板里的 `{account}` 会被账号名替换，`{password}` 会被 Password 字段替换
+// （密码单列的好处：url_template 可以入库/贴 issue，密码走环境变量）。
+type Proxy struct {
+	Enabled bool `json:"enabled"`
+	// URLTemplate 形如 socks5h://user:pass@host:port，支持 {account} / {password}。
+	// socks5h 语义 = 域名交给代理解析（远端 DNS），跨境场景更准。
+	URLTemplate string `json:"url_template"`
+	// Password 供 {password} 占位符（也可用 QWEN2API_PROXY_PASSWORD）。
+	Password string `json:"password"`
+	// DirectWhenMissing 没有账号名（公共端点/探测）时是否直连，默认 true。
+	// 设 false 时这类请求会被拒绝 —— 用于"绝不允许真实 IP 出现在上游"的场景。
+	DirectWhenMissing *bool `json:"direct_when_missing"`
 }
 
 // Video 文生视频默认参数（写进 extra.meta.biz_data）。
@@ -159,7 +188,53 @@ type Config struct {
 
 	Upstream Upstream  `json:"upstream"`
 	Pool     Pool      `json:"pool"`
+	Panel    Panel     `json:"panel"`
 	Accounts []Account `json:"accounts"`
+}
+
+// Panel 管理面板的登录.
+//
+// 为什么要有它：面板能导入/删除账号、能看到全部邮箱与配额 —— 只靠一把 API Key
+// 意味着"能调 API 的人就能改账号池"。分开之后：
+//   - /v1/* 仍然只认 API Key（给 SDK / 脚本）
+//   - /panel/* 认「面板账号密码的会话」或 API Key（给浏览器）
+//
+// 不配密码 = 保持老行为（只认 API Key）；配了就必须先登录才能进面板。
+type Panel struct {
+	// Username 面板用户名，默认 admin。
+	Username string `json:"username"`
+	// Password 明文密码（配置文件 0600；部署时也可用 QWEN2API_PANEL_PASSWORD）。
+	Password string `json:"password"`
+	// PasswordHash PBKDF2 形态，优先于 Password：
+	//   pbkdf2$<iterations>$<salt-hex>$<hash-hex>
+	// 用 `qwen2api -passwd '<密码>'` 生成。
+	PasswordHash string `json:"password_hash"`
+	// SessionHours 会话有效期（小时），默认 12。
+	SessionHours int `json:"session_hours"`
+	// SessionSecret 会话签名密钥；空 = 每次启动随机生成（重启后需重登）。
+	// 多副本部署时必须显式配同一个值，否则 A 副本签的会话在 B 上无效。
+	SessionSecret string `json:"session_secret"`
+}
+
+// AuthEnabled 是否启用了面板账号密码登录。
+func (p Panel) AuthEnabled() bool {
+	return strings.TrimSpace(p.Password) != "" || strings.TrimSpace(p.PasswordHash) != ""
+}
+
+// EffectiveUsername 用户名默认 admin。
+func (p Panel) EffectiveUsername() string {
+	if u := strings.TrimSpace(p.Username); u != "" {
+		return u
+	}
+	return "admin"
+}
+
+// EffectiveSessionHours 会话有效期，默认 12 小时（0 或负数按默认）。
+func (p Panel) EffectiveSessionHours() int {
+	if p.SessionHours > 0 {
+		return p.SessionHours
+	}
+	return 12
 }
 
 // Default 返回一份「开箱能跑」的默认配置。
@@ -192,6 +267,7 @@ func Default() Config {
 			Size:       "16:9",
 		},
 		Upstream: Upstream{
+			Proxy:              Proxy{Enabled: false},
 			BaseURL:            "https://chat.qwen.ai",
 			AuthBaseURL:        "https://auth.qwen.ai",
 			EntitlementBaseURL: "https://sg-entitlement.qwen.com",
@@ -200,6 +276,10 @@ func Default() Config {
 				"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
 			TimeoutS: 180,
 			ConnectS: 20,
+		},
+		Panel: Panel{
+			Username:     "admin",
+			SessionHours: 12,
 		},
 		Pool: Pool{
 			MaxRotate:             3,
@@ -270,6 +350,18 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("QWEN2API_USER_AGENT"); v != "" {
 		cfg.Upstream.UserAgent = v
+	}
+	// 代理密码单列（url_template 可以入库，密码不该跟着进版本库）
+	if v := os.Getenv("QWEN2API_PROXY_PASSWORD"); v != "" {
+		cfg.Upstream.Proxy.Password = v
+	}
+	// 面板登录密码走环境变量（容器部署时别把密码写进挂载的配置文件）。
+	if v := os.Getenv("QWEN2API_PANEL_USERNAME"); v != "" {
+		cfg.Panel.Username = v
+	}
+	if v := os.Getenv("QWEN2API_PANEL_PASSWORD"); v != "" {
+		cfg.Panel.Password = v
+		cfg.Panel.PasswordHash = "" // 环境变量优先，避免配置文件里的旧 hash 覆盖它
 	}
 	if v := os.Getenv("QWEN2API_TIMEOUT_S"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

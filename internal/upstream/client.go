@@ -52,7 +52,8 @@ func New(cfg config.Upstream) *Client {
 		base: strings.TrimRight(cfg.BaseURL, "/"),
 		// 不设 Client.Timeout：流式响应可能持续数分钟，总超时由各调用的
 		// context 控制（connect 超时在 Dialer 上）。
-		http: &http.Client{Transport: transport},
+		// 代理按账号分流：账号身份从 ctx 取，未启用时 router 直接透传给 base。
+		http: &http.Client{Transport: newProxyRouter(transport, cfg.Proxy)},
 	}
 }
 

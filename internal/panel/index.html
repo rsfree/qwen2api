@@ -211,6 +211,7 @@ button.xs { white-space:nowrap; }
     <div class="sig">
       <div class="row"><span class="pulse" id="navPulse"></span><span id="navState">连接中</span></div>
       <div class="row" style="margin-top:5px"><span id="navVer">v-</span> · <span id="navUp">-</span></div>
+      <div class="row" style="margin-top:7px"><a href="#" id="btnLogout" hidden>退出登录</a></div>
     </div>
   </nav>
 
@@ -445,18 +446,25 @@ wang@example.com|密码3|备用号"></textarea>
   </div>
 </div>
 
-<!-- 需要 Key -->
+<!-- 登录面板 / API Key -->
 <div class="veil" id="keyVeil" hidden>
   <div class="dlg" style="width:430px">
-    <header><h3>需要访问密钥</h3></header>
+    <header><h3 id="authTitle">登录面板</h3></header>
     <div class="body">
-      <div class="field">
-        <label>API Key（与 /v1 前门同一把；只存在浏览器本地）</label>
-        <input id="keyInput" type="password" placeholder="sk-..." autocomplete="off">
+      <div id="authPass">
+        <div class="field"><label>用户名</label><input id="loginUser" value="admin" autocomplete="username"></div>
+        <div class="field"><label>密码</label><input id="loginPass" type="password" autocomplete="current-password"></div>
+      </div>
+      <div id="authKey" hidden>
+        <div class="field">
+          <label>API Key（与 /v1 前门同一把；只存在浏览器本地）</label>
+          <input id="keyInput" type="password" placeholder="sk-..." autocomplete="off">
+        </div>
       </div>
       <div class="state err" id="keyErr" hidden></div>
+      <div class="hint" style="margin-top:10px"><a href="#" id="authSwitch">改用 API Key</a></div>
     </div>
-    <footer><span class="grow"></span><button class="primary" id="keyGo">进入</button></footer>
+    <footer><span class="grow"></span><button class="primary" id="keyGo">登录</button></footer>
   </div>
 </div>
 
@@ -487,7 +495,7 @@ async function api(path, opt) {
   const txt = await r.text();
   let data = null;
   try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = { error: txt.slice(0, 200) }; }
-  if (r.status === 401) { askKey(); throw new Error('unauthorized'); }
+  if (r.status === 401) { showAuth(); throw new Error('unauthorized'); }
   if (!r.ok) throw new Error((data && (data.error || data.message)) || ('HTTP ' + r.status));
   return data;
 }
@@ -498,7 +506,66 @@ function toast(msg, kind) {
   $('#toast').appendChild(d);
   setTimeout(() => d.remove(), 3600);
 }
-function askKey() { $('#keyVeil').hidden = false; setTimeout(() => $('#keyInput').focus(), 30); }
+/* 登录框：两种形态 —— 账号密码（默认）/ API Key（兼容脚本与老用户） */
+let authMode = 'pass';
+function showAuth(mode) {
+  if (mode) authMode = mode;
+  const isKey = authMode === 'key';
+  $('#authPass').hidden = isKey;
+  $('#authKey').hidden = !isKey;
+  $('#authTitle').textContent = isKey ? '用 API Key 进入' : '登录面板';
+  $('#authSwitch').textContent = isKey ? '改用账号密码登录' : '改用 API Key';
+  $('#keyGo').textContent = isKey ? '进入' : '登录';
+  $('#keyErr').hidden = true;
+  $('#keyVeil').hidden = false;
+  setTimeout(() => (isKey ? $('#keyInput') : $('#loginPass')).focus(), 30);
+}
+const askKey = () => showAuth('key');
+
+// doAuth 按当前形态提交。两种凭据都落到同一个"通过/未通过"上，
+// 区别只在服务端：密码换 HttpOnly 会话 cookie，Key 每次请求带 Authorization。
+async function doAuth() {
+  const err = $('#keyErr');
+  err.hidden = true;
+  if (authMode === 'key') {
+    const v = $('#keyInput').value.trim();
+    if (!v) return;
+    localStorage.setItem(KEY_STORE, v);
+    try {
+      await loadOverview();
+      $('#keyVeil').hidden = true;
+    } catch (e) {
+      localStorage.removeItem(KEY_STORE);
+      err.textContent = 'Key 无效：' + e.message;
+      err.hidden = false;
+    }
+    return;
+  }
+  const username = $('#loginUser').value.trim();
+  const password = $('#loginPass').value;
+  if (!username || !password) return;
+  const btn = $('#keyGo');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/panel/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { err.textContent = d.error || ('HTTP ' + r.status); err.hidden = false; return; }
+    $('#loginPass').value = '';
+    $('#btnLogout').hidden = false;
+    await loadOverview();
+    $('#keyVeil').hidden = true;
+    toast('已登录', 'ok');
+  } catch (e) {
+    err.textContent = e.message;
+    err.hidden = false;
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 /* ═══════════════ 状态 ═══════════════ */
 const S = {
@@ -1094,21 +1161,25 @@ function bind() {
   ['sName', 'sEmail', 'sPass', 'sNote'].forEach(id => $('#' + id).addEventListener('input', importPreview));
   $('#importGo').addEventListener('click', doImport);
 
-  $('#keyGo').addEventListener('click', async () => {
-    const v = $('#keyInput').value.trim();
-    if (!v) return;
-    localStorage.setItem(KEY_STORE, v);
-    try {
-      await loadOverview();
-      $('#keyVeil').hidden = true;
-      $('#keyErr').hidden = true;
-    } catch (e) {
-      localStorage.removeItem(KEY_STORE);
-      $('#keyErr').textContent = 'Key 无效：' + e.message;
-      $('#keyErr').hidden = false;
-    }
+  $('#keyGo').addEventListener('click', doAuth);
+  $('#authSwitch').addEventListener('click', e => {
+    e.preventDefault();
+    showAuth(authMode === 'key' ? 'pass' : 'key');
   });
-  $('#keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('#keyGo').click(); });
+  ['#loginPass', '#keyInput', '#loginUser'].forEach(sel => {
+    $(sel).addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doAuth(); } });
+  });
+  $('#btnLogout').addEventListener('click', async e => {
+    e.preventDefault();
+    try { await fetch('/panel/api/logout', { method: 'POST' }); } catch (err) { /* 忽略 */ }
+    // Key 也要一起清：否则退出后下一次请求又拿 Key 自动进去了，等于没退
+    localStorage.removeItem(KEY_STORE);
+    S.ov = null;
+    $('#btnLogout').hidden = true;
+    $('#navState').textContent = '已退出';
+    $('#navPulse').className = 'pulse warn';
+    showAuth('pass');
+  });
 
   $('#dbgSend').addEventListener('click', debugSend);
   $('#dbgPrompt').addEventListener('keydown', e => {
@@ -1130,7 +1201,25 @@ function bind() {
     history.replaceState(null, '', location.pathname + location.hash);
   }
   go(location.hash.slice(1) || 'accounts');
-  if (!key()) { askKey(); return; }
+
+  // 先问服务端：需不需要登录、我当前算不算已登录（会话 cookie 或已存的 Key）。
+  let sess = null;
+  try {
+    const r = await fetch('/panel/api/session', { headers: hdrs() });
+    sess = await r.json();
+  } catch (e) { /* 服务端不可达时下面 loadOverview 会报 */ }
+
+  if (sess) {
+    $('#btnLogout').hidden = sess.method !== 'session';
+    if (!sess.authed) {
+      showAuth(sess.need_auth ? 'pass' : 'key');
+      return;
+    }
+  } else if (!key()) {
+    showAuth('pass');
+    return;
+  }
+
   try {
     await loadOverview();
   } catch (e) {

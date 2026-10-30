@@ -32,11 +32,26 @@ func main() {
 		cfgPath = flag.String("config", defaultConfigPath(), "配置文件路径（JSON；也可只用环境变量）")
 		listen  = flag.String("listen", "", "监听地址（覆盖配置文件，如 :8400）")
 		showVer = flag.Bool("version", false, "打印版本后退出")
+		passwd  = flag.String("passwd", "", "生成面板登录密码的 hash 后退出（用法：-passwd '你的密码'）")
 	)
 	flag.Parse()
 
 	if *showVer {
 		fmt.Println(version)
+		return
+	}
+
+	// 小的运维工具：把明文密码换成可直接粘进 config 的 hash。
+	// 之所以内置而不是让用户自己算：算错迭代次数的格式会导致"密码永远不对"，
+	// 而那个错误的表象是"登录失败"，极难查到根因。
+	if *passwd != "" {
+		h, err := config.HashPassword(*passwd)
+		if err != nil {
+			log.Fatalf("[qwen2api] 生成失败: %v", err)
+		}
+		fmt.Printf("把下面这段并入 config.json 的 panel（session_secret 建议另配一个随机串）：\n\n")
+		fmt.Printf("  \"panel\": {\n    \"username\": \"admin\",\n    \"password_hash\": %q,\n    \"session_hours\": 12\n  }\n\n", h)
+		fmt.Println("也可以只用环境变量：QWEN2API_PANEL_PASSWORD=<明文>（容器部署推荐）")
 		return
 	}
 
@@ -132,7 +147,7 @@ func bootstrapAccounts(cfg config.Config, p *pool.Pool, up *upstream.Client) {
 		go func(a config.Account) {
 			defer wg.Done()
 			if a.Token == "" {
-				cred, err := up.SignIn(ctx, a.Email, a.Password)
+				cred, err := up.SignIn(upstream.WithAccount(ctx, a.Name), a.Email, a.Password)
 				if err != nil {
 					log.Printf("[qwen2api] 账号 %s 登录失败: %v", a.Name, err)
 					p.MarkAuth(p.Get(a.Name), err.Error())
@@ -142,7 +157,7 @@ func bootstrapAccounts(cfg config.Config, p *pool.Pool, up *upstream.Client) {
 				log.Printf("[qwen2api] 账号 %s 登录成功（cookie 形态）", a.Name)
 				return
 			}
-			mode, err := up.DetectAuthMode(ctx, a.Token)
+			mode, err := up.DetectAuthMode(upstream.WithAccount(ctx, a.Name), a.Token)
 			if err != nil {
 				log.Printf("[qwen2api] 账号 %s 凭据探测失败: %v", a.Name, err)
 				p.MarkAuth(p.Get(a.Name), err.Error())

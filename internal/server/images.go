@@ -326,6 +326,9 @@ func (s *Server) generateImage(ctx context.Context, model, thinking, prompt stri
 	}
 	defer s.pool.Release(a)
 	cred := s.pool.Credential(a.Name)
+	// 上传与生成必须同一条出口，否则"传的时候一个 IP、画的时候另一个 IP"
+	// 会让上游把文件判成跨账号资源。
+	ctx = upstream.WithAccount(ctx, a.Name)
 
 	var spec upstream.ChatSpec
 	if len(refs) > 0 {

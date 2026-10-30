@@ -149,11 +149,13 @@ func (s *Server) openUpstreamSpec(ctx context.Context, model, gear, prompt strin
 		}
 		// 凭据从池里取实时值（可能刚被自动续期改过），不要缓存 acct.Token。
 		cred := s.pool.Credential(acct.Name)
-		chatID, err := s.up.NewChatTyped(ctx, cred, model, spec.ChatType)
+		// 出口跟着账号走：带上账号标记，代理路由据此选固定 IP。
+		actx := upstream.WithAccount(ctx, acct.Name)
+		chatID, err := s.up.NewChatTyped(actx, cred, model, spec.ChatType)
 		if err == nil {
 			body := upstream.BuildSubmitSpec(chatID, "", model, prompt, gear, spec, time.Now())
 			var st *upstream.Stream
-			st, err = s.up.OpenChat(ctx, cred, body)
+			st, err = s.up.OpenChat(actx, cred, body)
 			if err == nil {
 				return &opened{acct: acct, stream: st, chatID: chatID}, nil
 			}

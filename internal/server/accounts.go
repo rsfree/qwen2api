@@ -16,6 +16,7 @@ import (
 
 	"github.com/yuanjie-ai/qwen2api/internal/config"
 	"github.com/yuanjie-ai/qwen2api/internal/pool"
+	"github.com/yuanjie-ai/qwen2api/internal/upstream"
 )
 
 // ImportAccounts 批量导入：先逐条校验（能登录成功才算数），成功的入池后统一落盘。
@@ -85,7 +86,9 @@ func (s *Server) ImportAccounts(ctx context.Context, in []config.Account, valida
 			if validate {
 				cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				defer cancel()
-				cred, err := s.up.SignIn(cctx, j.acc.Email, j.acc.Password)
+				// 登录也要走该账号的固定出口 —— 登录 IP 与使用 IP 不一致本身
+				// 就是风控画像里的可疑信号。
+				cred, err := s.up.SignIn(upstream.WithAccount(cctx, j.acc.Name), j.acc.Email, j.acc.Password)
 				if err != nil {
 					res.Error = friendlySigninErr(err)
 					mu.Lock()
@@ -162,7 +165,7 @@ func (s *Server) TestAccount(ctx context.Context, name string) error {
 	}
 	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	cred, err := s.up.SignIn(cctx, a.Email, a.Password)
+	cred, err := s.up.SignIn(upstream.WithAccount(cctx, name), a.Email, a.Password)
 	if err != nil {
 		s.pool.MarkAuth(a, err.Error())
 		return fmt.Errorf("登录失败: %w", err)

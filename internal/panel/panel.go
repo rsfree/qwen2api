@@ -6,11 +6,11 @@ package panel
 
 import (
 	"context"
-	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/yuanjie-ai/qwen2api/internal/config"
 	"github.com/yuanjie-ai/qwen2api/internal/pool"
@@ -48,14 +48,27 @@ type Backend interface {
 // Panel 面板 handler。
 type Panel struct {
 	b Backend
+	// secret 会话签名密钥（config.panel.session_secret 或启动时随机）。
+	secret []byte
+	// 登录失败节流（按 IP）。放这里而不是包级变量：多实例测试之间不会互相污染。
+	limMu sync.Mutex
+	fails map[string]*failBucket
 }
 
 // New 构造面板。
-func New(b Backend) *Panel { return &Panel{b: b} }
+func New(b Backend) *Panel {
+	return &Panel{
+		b:      b,
+		secret: newSecret(b.Config().Panel),
+		fails:  map[string]*failBucket{},
+	}
+}
 
 // ServeHTTP 路由：/panel/ 静态页，/panel/api/* JSON。
 func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !p.authorized(r) {
+	// 🔴 登录/登出/会话探测必须排在鉴权闸门**之前** —— 它们本身就是"取得凭据"的动作，
+	// 先要求凭据会形成死锁（登录永远 401，浏览器连登录框都没机会提交）。
+	if !isAuthEndpoint(r.URL.Path) && !p.authorized(r) {
 		if strings.HasPrefix(r.URL.Path, "/panel/api/") {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
@@ -63,6 +76,15 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// 静态页仍然给（页面里会弹登录框），只是拿不到数据。
 	}
 	switch {
+	case r.URL.Path == "/panel/api/login" && r.Method == http.MethodPost:
+		p.handleLogin(w, r)
+		return
+	case r.URL.Path == "/panel/api/logout" && r.Method == http.MethodPost:
+		p.handleLogout(w, r)
+		return
+	case r.URL.Path == "/panel/api/session":
+		p.handleSession(w, r)
+		return
 	case r.URL.Path == "/panel" || r.URL.Path == "/panel/":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -104,6 +126,15 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// isAuthEndpoint 登录相关的三个端点（不需要先有凭据）。
+func isAuthEndpoint(path string) bool {
+	switch path {
+	case "/panel/api/login", "/panel/api/logout", "/panel/api/session":
+		return true
+	}
+	return false
 }
 
 // mustAuth 统一鉴权包装（写操作一律要求同一把 Key）。
@@ -233,32 +264,14 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// authorized 与 server 前门同口径：api_keys 为空则不鉴权。
+// authorized 面板侧的鉴权：API Key 或登录会话，二者任一即可。
+//
+// 三种情形：
+//   - 配了 panel.password（或 hash）⇒ 必须有会话或有效 Key；
+//   - 只配了 api_keys         ⇒ 认 Key（老行为）；
+//   - 两者都没配               ⇒ 不鉴权（仅限本机/内网，README 有警告）。
 func (p *Panel) authorized(r *http.Request) bool {
-	keys := p.b.Config().APIKeys
-	if len(keys) == 0 {
-		return true
-	}
-	token := ""
-	if v := r.Header.Get("Authorization"); v != "" {
-		if len(v) > 7 && strings.EqualFold(v[:7], "bearer ") {
-			token = strings.TrimSpace(v[7:])
-		} else {
-			token = strings.TrimSpace(v)
-		}
-	}
-	if token == "" {
-		token = strings.TrimSpace(r.Header.Get("x-api-key"))
-	}
-	if token == "" {
-		token = strings.TrimSpace(r.URL.Query().Get("key"))
-	}
-	for _, k := range keys {
-		if subtle.ConstantTimeCompare([]byte(k), []byte(token)) == 1 {
-			return true
-		}
-	}
-	return false
+	return p.authMethod(r) != ""
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

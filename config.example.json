@@ -48,7 +48,22 @@
     "bx_umidtoken": "",
     "timeout_s": 180,
     "connect_timeout_s": 20,
-    "insecure_skip_verify": false
+    "insecure_skip_verify": false,
+    "// proxy": "出口代理：**每个账号一条固定出口**。账号名替换 {account}，密码用 {password} 占位（或 QWEN2API_PROXY_PASSWORD）。为什么重要：所有号走同一 IP 时，一个号被判风控会连带整池。只支持 socks5/socks5h；socks5h 的域名交给代理解析",
+    "proxy": {
+      "enabled": false,
+      "url_template": "socks5h://poolclient-{account}:{password}@pool.livetest.cn:2090",
+      "password": "",
+      "direct_when_missing": true
+    }
+  },
+  "// panel": "面板登录（与 /v1 的 API Key 分开）。不配密码 = 保持只认 API Key；配了就必须先登录。password_hash 用 `qwen2api -passwd '<密码>'` 生成，优先于 password；session_secret 留空则每次启动随机（重启需重登），多副本必须配同一个",
+  "panel": {
+    "username": "admin",
+    "password": "",
+    "password_hash": "",
+    "session_hours": 12,
+    "session_secret": ""
   },
   "pool": {
     "max_rotate": 3,

@@ -122,7 +122,8 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cred := s.pool.Credential(a.Name)
-	entry, upErr := s.up.UploadAttachment(r.Context(), cred, fh.Filename, mime, data)
+	// 文件是账号维度资源：上传时用哪个出口，后续生成也得用同一条。
+	entry, upErr := s.up.UploadAttachment(upstream.WithAccount(r.Context(), a.Name), cred, fh.Filename, mime, data)
 	s.pool.Release(a)
 	if upErr != nil {
 		s.noteFailure(a, upErr)

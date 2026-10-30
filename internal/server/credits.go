@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yuanjie-ai/qwen2api/internal/upstream"
 )
 
 const (
@@ -53,7 +55,7 @@ func (s *Server) refreshStaleCredits(ctx context.Context, ttl time.Duration) {
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
-			c, err := s.up.Credits(ctx, s.pool.Credential(name))
+			c, err := s.up.Credits(upstream.WithAccount(ctx, name), s.pool.Credential(name))
 			if err != nil {
 				s.noteCreditErr(name, err)
 				s.pool.SetCreditBalance(name, -1) // 标未知，不拦
