@@ -189,6 +189,7 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 			lastErr = errNoAccount
 			break
 		}
+		s.egressOf(a.Name) // 视频要跑十几分钟，探测早回来了
 		// 余额是这个号"能不能做这一步"的唯一依据。选号之后只刷**它**：
 		// 池子 3000+ 号时全池刷新既慢又没意义（绝大多数号根本不参与这次请求）。
 		// 刷不到就退回不拦，由上游 insufficient_quota 兜底。

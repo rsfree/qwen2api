@@ -360,6 +360,9 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 	// 🔴 用 PickForImage：跳过"今日已出够 max_image_per_day 张"的号。
 	// 上游打到硬限不会报错，只会静默挂起 180s —— 本地配额就是为了不去撞那堵墙。
 	a, ok := s.pool.PickForImage()
+	if ok {
+		s.egressOf(a.Name) // 同 chat：先起探测，出图期间足够探完
+	}
 	if !ok {
 		// 区分"全池配额用尽"与"全部冷却/失效"，否则调用方不知道该等还是该加号。
 		if left := s.pool.ImageQuotaLeft(); left == 0 {

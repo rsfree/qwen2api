@@ -189,6 +189,9 @@ func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear, pr
 			return nil, openFail(lastAcct, lastErr)
 		}
 		lastAcct = acct.Name
+		// 选号即触发出口探测（异步）：一个聊天请求要 5~15s、出图 60s+，
+		// 等流水落库时探测早回来了 —— 这样"第一条请求"也能看到出口 IP。
+		s.egressOf(acct.Name)
 		// 凭据从池里取实时值（可能刚被自动续期改过），不要缓存 acct.Token。
 		cred := s.pool.Credential(acct.Name)
 		// 出口跟着账号走：带上账号标记，代理路由据此选固定 IP。
