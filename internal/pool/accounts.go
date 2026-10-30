@@ -44,11 +44,15 @@ func (p *Pool) Add(a config.Account) (*Account, bool) {
 		return nil, false
 	}
 	acc := &Account{
-		Name:     name,
-		Token:    a.Token,
-		Email:    strings.TrimSpace(a.Email),
-		Password: a.Password,
-		Note:     a.Note,
+		Name:         name,
+		Token:        a.Token,
+		Email:        strings.TrimSpace(a.Email),
+		Password:     a.Password,
+		RefreshToken: a.RefreshToken,
+		Note:         a.Note,
+	}
+	if exp, ok := expireOf(a.Token); ok {
+		acc.tokenExp = exp
 	}
 	p.accounts = append(p.accounts, acc)
 	p.mu.Unlock()
@@ -93,7 +97,10 @@ func (p *Pool) Export() []config.Account {
 			Token:    a.Token,
 			Email:    a.Email,
 			Password: a.Password,
-			Note:     a.Note,
+			// 🔴 少了这一行，refresh_token 就只在内存里 —— 重启后全丢，
+			// 整池又要重新 signin 一遍（2026-10-30 实测踩到）。
+			RefreshToken: a.RefreshToken,
+			Note:         a.Note,
 		})
 	}
 	return out

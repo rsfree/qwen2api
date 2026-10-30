@@ -145,3 +145,20 @@ func fakeJWT(t *testing.T, exp int64) string {
 	}
 	return "eyJhbGciOiJIUzI1NiJ9." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }
+
+func TestExportKeepsRefreshToken(t *testing.T) {
+	// refresh_token 必须进 accounts.json，否则重启后整池重新登录。
+	p := New(config.Default().Pool, []config.Account{
+		{Name: "a", Token: "bearer:t", RefreshToken: "rt-1", Email: "a@b.c", Password: "pw"},
+	}, "")
+	out := p.Export()
+	if len(out) != 1 || out[0].RefreshToken != "rt-1" {
+		t.Fatalf("Export 丢了 refresh_token: %+v", out)
+	}
+
+	// 重新加载后仍然可用（模拟重启）
+	p2 := New(config.Default().Pool, out, "")
+	if p2.RefreshToken("a") != "rt-1" {
+		t.Fatal("重启后应保留 refresh_token")
+	}
+}
