@@ -43,6 +43,9 @@ type opened struct {
 	acct   *pool.Account
 	stream *upstream.Stream
 	chatID string
+	// chatHit / chatMS 建会话的来源与耗时（流水观测：命中省掉一次 chats/new）。
+	chatHit bool
+	chatMS  int64
 }
 
 // handleChat `POST /v1/chat/completions`。
@@ -144,6 +147,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	spec.Files = files
 	spec.ImageRefs = imgRefs
 	sd, err := s.openUpstreamSpec(r.Context(), s.blobBase(r), model, gear, prompt, spec)
+	if sd != nil {
+		entry.ChatHit = sd.chatHit
+		entry.ChatMS = sd.chatMS
+	}
 	if err != nil {
 		entry.Account = accountOfErr(err)
 		entry.Status = httpStatusFor(err)
@@ -256,7 +263,8 @@ func openFail(lastAcct string, err error) error {
 //
 // 🔴 只能给同一个账号用：跨号提交会 CHAT_NOT_FOUND（"此对话已删除"）。
 // 所以 acctName 是必传的，且池子按 (账号, 会话类型) 分组。
-func (s *Server) takeChat(ctx context.Context, acctName, cred, model, chatType string) (string, error) {
+// 返回 (id, 是否命中预建池, 现建耗时, err)。耗时只用于流水观测。
+func (s *Server) takeChat(ctx context.Context, acctName, cred, model, chatType string) (string, bool, int64, error) {
 	// 只有 t2t 值得维护池子（占请求绝大多数）；t2i / image_edit / t2v 一次
 	// 就要 50~90 秒，建会话那 2.4s 占比可以忽略，补了纯属白花上游调用。
 	refill := chatType == "t2t" && s.chats.Short(acctName, chatType) > 0
@@ -265,22 +273,23 @@ func (s *Server) takeChat(ctx context.Context, acctName, cred, model, chatType s
 		if refill {
 			go s.prewarmChat(ctx, acctName, cred, model, chatType)
 		}
-		return id, nil
+		return id, true, 0, nil
 	}
 	// 记下现建的真实耗时：这是"命中能省多少"的唯一可信来源
 	// （独立 curl 测的 2.4s 含 TLS 握手，网关是长连接）。
 	t0 := time.Now()
 	id, err := s.up.NewChatTyped(ctx, cred, model, chatType)
+	took := time.Since(t0)
 	if err == nil {
-		s.chats.RecordBuild(time.Since(t0))
+		s.chats.RecordBuild(took)
 	}
 	if err != nil {
-		return "", err
+		return "", false, took.Milliseconds(), err
 	}
 	if refill {
 		go s.prewarmChat(ctx, acctName, cred, model, chatType)
 	}
-	return id, nil
+	return id, false, took.Milliseconds(), nil
 }
 
 // prewarmChat 后台建一个空会话放进池子。
@@ -321,7 +330,7 @@ func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model,
 		attempt.Files = mergeAttachments(spec.Files, files)
 	}
 
-	chatID, err := s.takeChat(actx, acct.Name, cred, model, attempt.ChatType)
+	chatID, hit, chatMS, err := s.takeChat(actx, acct.Name, cred, model, attempt.ChatType)
 	if err != nil {
 		return nil, err
 	}
@@ -330,7 +339,7 @@ func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model,
 	if err != nil {
 		return nil, err
 	}
-	return &opened{stream: st, chatID: chatID}, nil
+	return &opened{stream: st, chatID: chatID, chatHit: hit, chatMS: chatMS}, nil
 }
 
 // visionFiles 把图片引用转成上游 files[] 条目。

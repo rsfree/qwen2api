@@ -31,6 +31,11 @@ type Entry struct {
 	Degraded     string    `json:"degraded,omitempty"`
 	ClientIP string `json:"client_ip,omitempty"`
 	UserAgent string `json:"user_agent,omitempty"`
+	// ChatHit 本次是否命中了预建会话（命中省掉一次 chats/new）。
+	ChatHit bool `json:"chat_hit,omitempty"`
+	// ChatMS 建会话耗时（毫秒）：命中为 0，未命中为真实值。
+	// 与 ChatHit 一起就能算"命中到底省了多少"。
+	ChatMS int64 `json:"chat_ms,omitempty"`
 	// RefImages 本次带的参考图（垫图）张数 —— 排查"变慢/超时"时第一个要看的东西：
 	// 多一张图上游确实更慢（实测每张约 +18s）。
 	RefImages int `json:"ref_images,omitempty"`
@@ -128,6 +133,11 @@ func (l *Log) Add(e Entry) {
 			e.PromptTokens, e.OutputTokens, e.DurationMS)
 		if e.EgressIP != "" {
 			line += " egress=" + e.EgressIP
+		}
+		if e.ChatHit {
+			line += " chat=cached"
+		} else if e.ChatMS > 0 {
+			line += fmt.Sprintf(" chat=%dms", e.ChatMS)
 		}
 		if e.Error != "" {
 			line += " err=" + e.Error
