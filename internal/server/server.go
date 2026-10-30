@@ -39,6 +39,8 @@ type Server struct {
 	creditErrAt time.Time
 	// accountsMu 串行化 accounts.json 的写入（面板导入/删除）。
 	accountsMu sync.Mutex
+	// creditCursor 余额刷新轮转游标（受 creditRefreshMu 保护）。
+	creditCursor int
 }
 
 // New 构造前门。

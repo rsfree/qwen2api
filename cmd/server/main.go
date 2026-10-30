@@ -141,11 +141,16 @@ func bootstrapAccounts(cfg config.Config, p *pool.Pool, up *upstream.Client) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	// 并发上限：账号从 10 个涨到 3000 个后，"每个号一个 goroutine"会在启动瞬间
+	// 打出几千个出站连接（每个还要过一条代理），本机 fd 与代理池都扛不住。
+	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 	for _, a := range cfg.Accounts {
 		wg.Add(1)
 		go func(a config.Account) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			if a.Token == "" {
 				cred, err := up.SignIn(upstream.WithAccount(ctx, a.Name), a.Email, a.Password)
 				if err != nil {
@@ -155,6 +160,13 @@ func bootstrapAccounts(cfg config.Config, p *pool.Pool, up *upstream.Client) {
 				}
 				p.SetToken(a.Name, cred)
 				log.Printf("[qwen2api] 账号 %s 登录成功（cookie 形态）", a.Name)
+				return
+			}
+			// 凭据自带形态前缀（cookie:/bearer:）⇒ 形态已知，**不必再探**。
+			// 🔴 这一条是"启动打两次上游/号"与"零请求"的分界：面板导入的 3000+
+			// 账号全部是 signin 产出的 bearer:xxx，重启时不该因此打 6000 次上游。
+			if m, _ := upstream.SplitCredential(a.Token); m != "" {
+				p.SetAuthMode(a.Name, m)
 				return
 			}
 			mode, err := up.DetectAuthMode(upstream.WithAccount(ctx, a.Name), a.Token)

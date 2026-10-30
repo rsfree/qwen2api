@@ -25,6 +25,14 @@ const (
 	// creditTTLStats /stats（面板）用的更长 TTL：人看数据不需要 60s 级实时，
 	// 但它会定时轮询，别让轮询把三方域名打热。
 	creditTTLStats = 2 * time.Minute
+
+	// maxCreditRefreshesPerRound 单轮最多刷多少个账号的余额。
+	//
+	// 🔴 大池子必须有这道闸：3000+ 账号时"把过期的全刷一遍"= 每 2 分钟打上游
+	// 3000 次（每个号还要过一条代理）。一轮只刷 32 个、游标轮转，几小时内覆盖全池，
+	// 单个号的余额最多"旧几轮"，而余额只在视频计费时才用来拦截 —— 由上游
+	// insufficient_quota 兜底，不会误放行花钱动作。
+	maxCreditRefreshesPerRound = 32
 )
 
 // creditRefreshMu 保证同一时刻只有一轮刷新在跑。
@@ -46,6 +54,14 @@ func (s *Server) refreshStaleCredits(ctx context.Context, ttl time.Duration) {
 	}
 	defer creditRefreshMu.Unlock()
 
+	// 大池子限流 + 轮转：不加这一步，3000 个账号会让面板轮询每 2 分钟
+	// 触发 3000 次上游调用（实测首次导入后就是这样起风暴的）。
+	if len(names) > maxCreditRefreshesPerRound {
+		var next int
+		names, next = rotateWindow(names, s.creditCursor, maxCreditRefreshesPerRound)
+		s.creditCursor = next
+	}
+
 	// 整体加个上限：这是辅助动作，不该拖慢主请求。
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -65,6 +81,31 @@ func (s *Server) refreshStaleCredits(ctx context.Context, ttl time.Duration) {
 		}(n)
 	}
 	wg.Wait()
+}
+
+// rotateWindow 从 names 里取 [cursor, cursor+n) 的窗口（越界环绕），
+// 并返回下一次的 cursor。
+//
+// 单独抽出来是因为"轮转"最容易写错且不好从外部观察：直接对 3000 个名字
+// 取前 32 个，会让后面 2900 个**永远**轮不到，余额永远显示"未知"。
+func rotateWindow(names []string, cursor, n int) ([]string, int) {
+	if n <= 0 || len(names) == 0 {
+		return nil, cursor
+	}
+	if n >= len(names) {
+		out := make([]string, len(names))
+		copy(out, names)
+		return out, 0
+	}
+	start := cursor % len(names)
+	if start < 0 {
+		start += len(names)
+	}
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, names[(start+i)%len(names)])
+	}
+	return out, (start + n) % len(names)
 }
 
 // RefreshCredits 给面板用的余额刷新。
