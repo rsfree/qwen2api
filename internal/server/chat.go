@@ -197,7 +197,11 @@ func (s *Server) relogin(ctx context.Context, acct *pool.Account) bool {
 	if acct.Email == "" || acct.Password == "" {
 		return false
 	}
-	cred, err := s.up.SignIn(ctx, acct.Email, acct.Password)
+	// 🔴 必须带账号上下文：登录要走**这个号的固定出口**。
+	// 不带的话 SignIn 会从服务器真实 IP 直连上游 —— 与它平时的出口不一致，
+	// 既容易吃 WAF（实测：3128 个号批量登录后，直连登录全被挑战页拦下），
+	// 也正是风控画像里"账号登录地突变"的信号。
+	cred, err := s.up.SignIn(upstream.WithAccount(ctx, acct.Name), acct.Email, acct.Password)
 	if err != nil {
 		log.Printf("[qwen2api] 账号 %s 自动重登失败: %v", acct.Name, err)
 		return false

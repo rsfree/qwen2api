@@ -20,6 +20,13 @@ import (
 	"github.com/yuanjie-ai/qwen2api/internal/config"
 )
 
+// tokenFresh 凭据的"新鲜期"。
+//
+// 上游 signin 签发的 bearer 会过期（实测 3128 个号批量登录后 20~30 分钟内
+// 陆续失效），所以选号优先挑这个时间窗内的号。它只是**调度启发式**：
+// 猜大了不致命 —— 真过期时请求会 401，路由层自动重登后重试。
+const tokenFresh = 20 * time.Minute
+
 // Account 单个账号的运行时状态。
 type Account struct {
 	Name  string
@@ -31,6 +38,12 @@ type Account struct {
 
 	// authMode 探测到的凭据形态（cookie / bearer）；空 = 尚未探测。
 	authMode string
+	// tokenAt 当前凭据的签发时间（SetToken 时记录）。
+	//
+	// 用途：选号优先挑"凭据还新鲜"的号。3000+ 账号时按 LRU 轮转会让**每个**
+	// 请求都碰到一个冷号（每次都要重登一次，+3s 且多一次 WAF 暴露面），
+	// 而热池大小应当随流量自动伸缩 —— 冷号只在实际需要时才登录。
+	tokenAt time.Time
 
 	inflight int32
 	// imageDay / imageCount 是"本地每日出图配额"：跨天自动清零。
@@ -203,7 +216,7 @@ func (p *Pool) pick(need pickKind) (*Account, bool) {
 	defer p.mu.Unlock()
 
 	now := time.Now()
-	var candidates []*Account
+	var candidates, fresh []*Account
 	for _, a := range p.accounts {
 		if a.authDead {
 			continue
@@ -228,9 +241,20 @@ func (p *Pool) pick(need pickKind) (*Account, bool) {
 		}
 		_ = need
 		candidates = append(candidates, a)
+		// tokenAt 为零 = 年龄未知（重启后从文件加载的旧凭据）。
+		// 🔴 不把"未知"当成"新鲜"：否则重启后 3000 个号全都算热号，
+		// 按 LRU 又会把每个冷号轮流碰一遍（每个请求重登一次）。
+		// 未知的号先用一轮、成功后由 MarkOK 标成热号。
+		if !a.tokenAt.IsZero() && now.Sub(a.tokenAt) < tokenFresh {
+			fresh = append(fresh, a)
+		}
 	}
 	if len(candidates) == 0 {
 		return nil, false
+	}
+	// 有热号就只在热号里轮转；一个热号都没有才动冷号（并因此触发一次重登）。
+	if len(fresh) > 0 {
+		candidates = fresh
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		ci, cj := atomic.LoadInt32(&candidates[i].inflight), atomic.LoadInt32(&candidates[j].inflight)
@@ -557,6 +581,11 @@ func (p *Pool) MarkOK(a *Account) {
 	a.failures = 0
 	a.lastError = ""
 	a.served++
+	// 这次请求用这张凭据成功了 ⇒ 它此刻有效，记进"热池"。
+	// 冷号被用到时靠这一步转热，热池大小因此随流量自然增长。
+	if a.Token != "" {
+		a.tokenAt = time.Now()
+	}
 	p.mu.Unlock()
 }
 
@@ -618,6 +647,7 @@ func (p *Pool) SetToken(name, cred string) bool {
 	for _, a := range p.accounts {
 		if a.Name == name {
 			a.Token = cred
+			a.tokenAt = time.Now()
 			a.authMode = ""
 			a.authDead = false
 			a.failures = 0
