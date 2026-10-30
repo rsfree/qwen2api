@@ -258,22 +258,28 @@ func TestChatFailureRecordsAccount(t *testing.T) {
 	}
 }
 
-// 只有"零产物超时"才换号重试（其它错误可能已受理，重试=赌重复扣费）。
-func TestShouldRetryImage(t *testing.T) {
-	if !shouldRetryImage(errUpstreamTimeout, false) {
-		t.Fatal("零产物超时应重试")
+// 换号判据：只有"上游没受理"的失败才重试（零产物超时 / RetrySafe），
+// 其它可能已受理，重试=赌重复扣费。
+func TestRetryableImageErr(t *testing.T) {
+	if !retryableImageErr(errUpstreamTimeout) {
+		t.Fatal("零产物超时应换号")
 	}
-	if !shouldRetryImage(fmt.Errorf("%w（预算 150s）", errUpstreamTimeout), false) {
-		t.Fatal("包装后的超时也应重试")
+	if !retryableImageErr(fmt.Errorf("%w（预算 150s）", errUpstreamTimeout)) {
+		t.Fatal("包装后的超时也应换号")
 	}
-	if shouldRetryImage(errUpstreamTimeout, true) {
-		t.Fatal("客户端已断开不该重试")
+	// 账号级失败（401 / 额度）语义是"未受理" ⇒ 换号安全。
+	if !retryableImageErr(upstream.NewErr(upstream.KindAuth, "chats/new", 401, "Unauthorized", "x", true)) {
+		t.Fatal("401 应换号")
 	}
-	if shouldRetryImage(errors.New("upstream error"), false) {
-		t.Fatal("普通上游错误不该重试（可能已受理）")
+	if !retryableImageErr(upstream.NewErr(upstream.KindQuota, "chat", 429, "RateLimited", "quota", true)) {
+		t.Fatal("额度类应换号")
 	}
-	if shouldRetryImage(nil, false) {
-		t.Fatal("没有错误当然不重试")
+	// 可能已受理的失败不换。
+	if retryableImageErr(upstream.NewErr(upstream.KindServer, "chat", 500, "", "internal_error", false)) {
+		t.Fatal("5xx 可能已受理，不该换号")
+	}
+	if retryableImageErr(errors.New("random")) || retryableImageErr(nil) {
+		t.Fatal("其它错误不换号")
 	}
 }
 
@@ -286,7 +292,7 @@ func TestImageTimeoutCoolsAccount(t *testing.T) {
 	s := New(cfg, p, upstream.New(cfg.Upstream), reqlog.New(5), "test")
 
 	a := p.Get("a0")
-	s.retryImageAfterTimeout(a, 0)
+	s.coolAfterImageTimeout(a)
 
 	state := ""
 	for _, v := range p.Snapshot() {
@@ -296,5 +302,27 @@ func TestImageTimeoutCoolsAccount(t *testing.T) {
 	}
 	if state == "ready" {
 		t.Fatalf("超时的号应进入冷却，实际状态 %q", state)
+	}
+}
+
+// 生图遇到**账号级**失败要换号（原来一个坏号就把请求判死：503）。
+func TestImageRotatesOnAccountLevelFailure(t *testing.T) {
+	up := newFakeUpstream(t, 1) // 第一次调用 401，之后正常（假上游只回文本帧 ⇒ 最终无图）
+	s := newTestServerWithServer(t, up, 2)
+	h := s.Handler()
+
+	body := `{"model":"qwen-image-3.0","prompt":"画一只猫"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(body)))
+
+	if up.calls < 2 {
+		t.Fatalf("应在第一个号 401 后换号重试，实际只调了 %d 次上游", up.calls)
+	}
+	rows := s.log.Recent(1)
+	if len(rows) != 1 {
+		t.Fatalf("流水条数 %d", len(rows))
+	}
+	if rows[0].Account != "a1" {
+		t.Fatalf("换号后应记第二个号 a1，得到 %q", rows[0].Account)
 	}
 }

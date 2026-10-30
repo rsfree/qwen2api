@@ -265,26 +265,11 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		usedAcct string
 	)
 	for i := 0; i < req.N; i++ {
-		var (
-			imgs    []string
-			revised string
-			acct    string
-			err     error
-		)
-		for attempt := 0; attempt < maxImageAttempts; attempt++ {
-			imgs, revised, acct, err = s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, ratio, s.blobBase(r))
-			// 🔴 失败也要记账号：否则流水里 acct= 空，既定位不到号、也带不出出口 IP
-			// （2026-10-30 线上出现过一条 acct= 空的 502，白查了一轮）。
-			usedAcct = acct
-			if err == nil {
-				break
-			}
-			if !shouldRetryImage(err, r.Context().Err() != nil) {
-				break
-			}
-			s.retryImageAfterTimeout(s.pool.Get(acct), attempt)
-			entry.Degraded = joinDegraded(entry.Degraded, "零产物超时，已换号重试")
-		}
+		// 换号重试在 generateImage 内部（按"是否受理"判定），这里只管 n 张的串行。
+		imgs, revised, acct, err := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, ratio, s.blobBase(r))
+		// 🔴 失败也要记账号：否则流水里 acct= 空，既定位不到号、也带不出出口 IP
+		// （2026-10-30 线上出现过一条 acct= 空的 502，白查了一轮）。
+		usedAcct = acct
 		if err != nil {
 			lastErr = err
 			break
@@ -357,75 +342,114 @@ func imageTimeout(refs int) time.Duration {
 	return d
 }
 
-// maxImageAttempts 生图最多试几个账号。
+// imageAccountRotations 生图最多试几个账号。
 //
-// 🔴 只有"零产物超时"才重试：上游只发心跳说明它**没受理**（没计费），
-// 换号是安全的；而 internal_error / 400 这类可能已受理，重试等于赌重复扣费
-// （文档里"计费动作不重试"说的是那类）。实测这条超时里 100% 的表现是
-// "额度将尽/被限的号"，换一个号通常 50~80s 就出图。
-const maxImageAttempts = 2
+// 与聊天不同，图片一直是"选一个号跑到底"：一个坏号（未激活 / 额度将尽 / 只发心跳）
+// 就把请求判死 —— 2026-10-30 线上就是 503 + AccountNotReady（那个号还没激活）。
+// 换号是安全的：这些都发生在**产物之前**，上游没受理也就没计费。
+// 3 个的依据：账号级失败都是毫秒级返回，多换两个几乎不增加等待；真正慢的
+// "零产物超时"另有"只重试一次"的闸（否则连试三个等于让用户等 8 分钟）。
+const imageAccountRotations = 3
 
-// shouldRetryImage 这次失败是否值得**换号再试**。
+// retryableImageErr 这次失败是否值得换号（= 上游没受理）。
 //
-// 只有"零产物超时"算：上游只发心跳说明请求没被受理（没计费），换号安全；
-// internal_error / 400 这类可能已受理，重试等于赌重复扣费。
-// 客户端已断开也别再浪费一个号（重试出来的图没人收）。
-func shouldRetryImage(err error, clientGone bool) bool {
-	return err != nil && !clientGone && errors.Is(err, errUpstreamTimeout)
+// 只认两类：
+//   - 零产物超时（只发心跳 ⇒ 没开始画 ⇒ 没计费）；
+//   - upstream.RetrySafe（401/403/额度/429/风控，语义都是"未受理"）。
+//
+// internal_error / 5xx / 400 这类**可能已受理**，重试等于赌重复扣费，一律不换。
+func retryableImageErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errUpstreamTimeout) {
+		return true
+	}
+	return upstream.RetrySafe(err)
 }
 
-// retryImageAfterTimeout 记录一次"超时换号"，并给这个号一段软冷却。
+// coolAfterImageTimeout 把"零产物超时"的号软冷却 10 分钟。
 //
-// 冷却的意义：这类号再被选中大概率还是只发心跳，白等 2.5 分钟。
-// 600s 后放出来（额度是按天恢复的，太短会反复踩）。
-func (s *Server) retryImageAfterTimeout(a *pool.Account, attempt int) {
+// 这类号再被选中大概率还是只发心跳，白等一轮 2.5 分钟；
+// 额度是按天恢复的，冷却太短会反复踩。
+func (s *Server) coolAfterImageTimeout(a *pool.Account) {
 	if a == nil {
 		return
 	}
 	s.pool.MarkRateLimit(a, "image: 只发心跳、零产物（疑似额度将尽/被限）", 600)
-	log.Printf("[qwen2api] 生图超时（%s 零产物），已冷却 10 分钟并换号重试（第 %d 次）",
-		a.Name, attempt+1)
 }
 
-// generateImage 跑一次图片生成：选号 → （有参考图时）上传 → 建会话 → 提交 → 读流。
+// generateImage 选号 → 跑一次 → 失败按"是否受理"换号重试。
 //
-// 🔴 上传与生成**必须同一个账号**：file_id 是账号维度的资源，
-// 用 A 号传的图让 B 号去生成，上游会当成"无权访问该文件"。
 // imageModel 是"图片内核"（extra.meta.model），与建会话用的 chat 模型分开：
 // 上游模型表里没有图片模型 id，把它当 chat 模型发会 Bad_Request。
 func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking, prompt string,
 	refs []string, ratio, blobBase string) (imgs []string, revised, acct string, err error) {
 
-	// 🔴 上游额度用尽后不会报错，而是**只发 keep_alive 心跳、永不产出**（2026-10-28 实测：
-	// 第 4 张起 240s 无产物帧）。所以必须由网关自己设上限，否则调用方只能干等到客户端超时。
-	// 预算按垫图数量放宽：多一张参考图上游确实更慢（实测 1 张 47.8s / 2 张 69.9s /
-	// 3 张 83.4s，≈ 每张 +18s），而原来"180s 含上传"的推导已经过时 —— 上传现在是本地
-	// 内存写 blob，真正的耗时全在生成。
 	budget := imageTimeout(len(refs))
-	ctx, cancel := context.WithTimeout(ctx, budget)
-	defer cancel()
+	timeoutRetried := false
 
-	// 🔴 用 PickForImage：跳过"今日已出够 max_image_per_day 张"的号。
-	// 上游打到硬限不会报错，只会静默挂起 180s —— 本地配额就是为了不去撞那堵墙。
-	a, ok := s.pool.PickForImage()
-	if ok {
-		s.egressOf(a.Name) // 同 chat：先起探测，出图期间足够探完
-	}
-	if !ok {
-		// 区分"全池配额用尽"与"全部冷却/失效"，否则调用方不知道该等还是该加号。
-		if left := s.pool.ImageQuotaLeft(); left == 0 {
-			used, limit := s.pool.ImageUsage(nil)
-			_ = used
-			return nil, "", "", fmt.Errorf("%w：全部 %d 个账号今日出图额度已用尽（本地限额 %d 张/号/天）",
-				errImageQuotaLocal, s.pool.Len(), limit)
+	for attempt := 0; attempt < imageAccountRotations; attempt++ {
+		// 🔴 用 PickForImage：跳过"今日已出够 max_image_per_day 张"的号。
+		// 上游打到硬限不会报错，只会静默挂起 —— 本地配额就是为了不去撞那堵墙。
+		a, ok := s.pool.PickForImage()
+		if !ok {
+			if err == nil {
+				// 区分"全池配额用尽"与"全部冷却/失效"，调用方处置完全不同。
+				if left := s.pool.ImageQuotaLeft(); left == 0 {
+					_, limit := s.pool.ImageUsage(nil)
+					err = fmt.Errorf("%w：全部 %d 个账号今日出图额度已用尽（本地限额 %d 张/号/天）",
+						errImageQuotaLocal, s.pool.Len(), limit)
+				} else {
+					err = errNoAccount
+				}
+			}
+			return nil, "", acct, err
 		}
-		return nil, "", "", errNoAccount
+		// 选号即起出口探测：出图要 50~90s，落库时足够探完。
+		s.egressOf(a.Name)
+
+		// 上传与生成必须同一条出口，否则"传的时候一个 IP、画的时候另一个 IP"
+		// 会让上游把文件判成跨账号资源。
+		actx, cancel := context.WithTimeout(ctx, budget)
+		actx = upstream.WithAccount(actx, a.Name)
+		imgs, revised, err = s.generateOnAccount(actx, a, model, imageModel, thinking,
+			prompt, refs, ratio, blobBase, budget)
+		cancel()
+		s.pool.Release(a)
+		acct = a.Name
+
+		if err == nil {
+			return imgs, revised, acct, nil
+		}
+		s.noteFailure(a, err)
+		// 客户端断开就别再浪费账号了（画出来也没人收）。
+		if !retryableImageErr(err) || ctx.Err() != nil {
+			break
+		}
+		if errors.Is(err, errUpstreamTimeout) {
+			if timeoutRetried {
+				break
+			}
+			timeoutRetried = true
+			s.coolAfterImageTimeout(a)
+			log.Printf("[qwen2api] 生图超时（%s 零产物），冷却 10 分钟后换号重试", a.Name)
+		} else {
+			log.Printf("[qwen2api] 生图账号级失败（%s: %v），换号重试", a.Name, err)
+		}
 	}
-	defer s.pool.Release(a)
+	return nil, "", acct, err
+}
+
+// generateOnAccount 在指定账号上跑完整一轮：转图 → 建会话 → 提交 → 读流。
+//
+// 🔴 上传与生成必须同一个账号：file_id 是账号维度资源，用 A 号传的图让 B 号提交，
+// 上游会判"无权访问该文件"（而且是静默的坏结果）。
+func (s *Server) generateOnAccount(ctx context.Context, a *pool.Account,
+	model, imageModel, thinking, prompt string, refs []string, ratio, blobBase string,
+	budget time.Duration) (imgs []string, revised string, err error) {
+
 	cred := s.pool.Credential(a.Name)
-	// 上传与生成必须同一条出口，否则"传的时候一个 IP、画的时候另一个 IP"
-	// 会让上游把文件判成跨账号资源。
-	ctx = upstream.WithAccount(ctx, a.Name)
 
 	var spec upstream.ChatSpec
 	if len(refs) > 0 {
@@ -436,8 +460,7 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 		// 蓝底黑字 HELLO42（宽高比与原图一致，证明是真编辑不是 t2i 重画）。
 		files, upErr := s.visionFiles(ctx, blobBase, refs)
 		if upErr != nil {
-			s.noteFailure(a, upErr)
-			return nil, "", a.Name, upErr
+			return nil, "", upErr
 		}
 		spec = upstream.ImageEditSpec(files)
 	} else {
@@ -447,34 +470,30 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 
 	chatID, err := s.up.NewChatTyped(ctx, cred, model, spec.ChatType)
 	if err != nil {
-		s.noteFailure(a, err)
-		return nil, "", a.Name, err
+		return nil, "", err
 	}
 	body := upstream.BuildSubmitSpec(chatID, "", model, prompt, thinking, spec, time.Now())
 	st, err := s.up.OpenChat(ctx, cred, body)
 	if err != nil {
-		s.noteFailure(a, err)
-		return nil, "", a.Name, err
+		return nil, "", err
 	}
 	defer st.Close()
 
 	for {
 		ev, more, err := st.Next()
 		if err != nil {
-			s.noteFailure(a, err)
 			if ctx.Err() == context.DeadlineExceeded {
 				// ⚠️ 挂起是**双义**的（2026-10-28 实测两种都遇到）：
 				//   · 额度将尽的前兆 —— 再发一次会拿到明确的 insufficient_quota；
-				//   · 上游临时故障 —— 等几分钟同一账号又能出图（本号在第 4、5 次挂起后恢复）。
+				//   · 上游临时故障 —— 等几分钟同一账号又能出图。
 				// 所以文案不能断言"额度用完"，只能说"两种可能 + 怎么区分"。
-				// 🔴 这段中文只进流水/容器日志；客户端拿到的是 504 + "upstream timeout"
-				// （见 clientError）—— 排查指南不该出现在 API 响应里。
-				return nil, "", a.Name, fmt.Errorf("%w（预算 %s，垫图 %d 张）。两种可能："+
+				// 🔴 这段中文只进流水/容器日志；客户端拿到的是 504 + "upstream timeout"。
+				return nil, "", fmt.Errorf("%w（预算 %s，垫图 %d 张）。两种可能："+
 					"①该账号今日生图额度将尽（再发一次通常返回 insufficient_quota 确认）；"+
 					"②上游临时故障（等几分钟重试往往恢复，多垫图时更慢）。建议换号或稍后重试",
 					errUpstreamTimeout, budget, len(refs))
 			}
-			return nil, "", a.Name, err
+			return nil, "", err
 		}
 		if !more {
 			break
@@ -487,7 +506,7 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 				msg = "上游额度已用完（未给出具体文案）"
 			}
 			s.pool.MarkOK(a)
-			return nil, "", a.Name, fmt.Errorf("%w：%s", upstream.ErrQuota, msg)
+			return nil, "", fmt.Errorf("%w：%s", upstream.ErrQuota, msg)
 		}
 		if ev.ImagePrompt != "" {
 			revised = ev.ImagePrompt
@@ -505,7 +524,7 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 		// 只记成功张数：挂起/失败不占额度（实测挂起不扣上游配额）。
 		s.pool.MarkImageDone(a)
 	}
-	return imgs, revised, a.Name, nil
+	return imgs, revised, nil
 }
 
 // downloadAsBase64 把直链图片转成 base64（b64_json 用）。
@@ -639,20 +658,7 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entry.RefImages = len(refs)
-	var (
-		imgs    []string
-		revised string
-		acct    string
-		genErr  error
-	)
-	for attempt := 0; attempt < maxImageAttempts; attempt++ {
-		imgs, revised, acct, genErr = s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, "", s.blobBase(r))
-		if !shouldRetryImage(genErr, r.Context().Err() != nil) {
-			break
-		}
-		s.retryImageAfterTimeout(s.pool.Get(acct), attempt)
-		entry.Degraded = joinDegraded(entry.Degraded, "零产物超时，已换号重试")
-	}
+	imgs, revised, acct, genErr := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, "", s.blobBase(r))
 	if genErr != nil {
 		code := httpStatusFor(genErr)
 		entry.Account = acct
