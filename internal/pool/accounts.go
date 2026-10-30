@@ -161,9 +161,10 @@ func (p *Pool) TokenExpiry(name string) (time.Time, bool) {
 
 // WarmCandidates 返回"接下来会被用到、且凭据快过期"的账号名。
 //
-// 为什么要按 served 排序：选号也是按 served 升序取的，所以这里取前 target 个
-// 正好就是**下一步要用的那批**。提前把它们的 token 换新，请求路径上就不用
-// 停下来等 refresh（这就是"预热预取、不影响性能"）。
+// 排序与 pick **同源**（都按"token 活着优先 → served 升序"），但活着的那批
+// 内部按**过期时间升序**：它们正在服务，越快过期越该先续，否则热号会在流量上
+// 过期，续期就落到了请求路径（正是预热要避免的事）。
+// 活着的不足 target 时，用 served 升序的过期号补齐 —— 那正是 pick 接下来要用的。
 //
 // target 由调用方按当前流量估算；window 是"多快过期算快过期"；
 // limit 是单轮上限（防止一次刷太多把上游打热）。
@@ -177,9 +178,11 @@ func (p *Pool) WarmCandidates(target int, window time.Duration, limit int) []str
 		inflight int32
 		lastUsed time.Time
 		exp      time.Time
+		alive    bool
 	}
 	p.mu.RLock()
 	rows := make([]row, 0, len(p.accounts))
+	now := time.Now()
 	for _, a := range p.accounts {
 		if a.authDead || a.RefreshToken == "" {
 			continue
@@ -187,14 +190,21 @@ func (p *Pool) WarmCandidates(target int, window time.Duration, limit int) []str
 		rows = append(rows, row{
 			name: a.Name, served: a.served, exp: a.tokenExp,
 			inflight: atomic.LoadInt32(&a.inflight), lastUsed: a.lastUsed,
+			alive: tokenAlive(a, now),
 		})
 	}
 	p.mu.RUnlock()
 
-	// 🔴 必须与 pick 用**完全一样的排序**，否则预热到的不是下一步要用的那批
+	// 🔴 必须与 pick 同序，否则预热到的不是下一步要用的那批
 	// （踩过：这里按名字排、选号按插入顺序排，结果热号和冷号完全错位）。
-	// SliceStable + 只按 served/inflight/lastUsed ⇒ 同分时保持插入顺序，与 pick 一致。
 	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].alive != rows[j].alive {
+			return rows[i].alive
+		}
+		// 都活着：越快过期越先续（它们正在服务）。
+		if rows[i].alive && !rows[i].exp.Equal(rows[j].exp) {
+			return rows[i].exp.Before(rows[j].exp)
+		}
 		if rows[i].served != rows[j].served {
 			return rows[i].served < rows[j].served
 		}
@@ -206,7 +216,6 @@ func (p *Pool) WarmCandidates(target int, window time.Duration, limit int) []str
 	if target > len(rows) {
 		target = len(rows)
 	}
-	now := time.Now()
 	out := make([]string, 0, limit)
 	for _, r := range rows[:target] {
 		// exp 为零 = 未知（配置里手写的长期凭据），不去动它。

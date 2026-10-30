@@ -219,16 +219,47 @@ func (p *Pool) pickVideo(needCredits int) (*Account, bool) {
 		return nil, false
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
-		ci, cj := atomic.LoadInt32(&candidates[i].inflight), atomic.LoadInt32(&candidates[j].inflight)
-		if ci != cj {
-			return ci < cj
-		}
-		return candidates[i].lastUsed.Before(candidates[j].lastUsed)
+		return lessPick(candidates[i], candidates[j], now)
 	})
 	chosen := candidates[0]
 	atomic.AddInt32(&chosen.inflight, 1)
 	chosen.lastUsed = now
 	return chosen, true
+}
+
+// pickTokenMargin 选号时要求 access token 至少还剩这么久，才算"活着"。
+//
+// 2 分钟的理由：小于它等于"发出去就可能在中途过期"，续期还是要发生；
+// 大于它会浪费掉一批本来够用的号。续期本身要走 auth 域 + 代理，几百毫秒。
+const pickTokenMargin = 2 * time.Minute
+
+// tokenAlive access token 是否还活着（未知过期时间算"不活"）。
+func tokenAlive(a *Account, now time.Time) bool {
+	return !a.tokenExp.IsZero() && a.tokenExp.Sub(now) > pickTokenMargin
+}
+
+// lessPick 选号排序：**token 活着的优先**，其次用得最少的，再其次在途最少、
+// 最久没用。
+//
+// 为什么把 token 放第一位（2026-10-30 用户要求 + 实测）：
+//   - 池里 3135 个号，access TTL 只有 15 分钟，保活只热最前面的一小批
+//     ⇒ 绝大多数号的 token 长期是过期的；按 served 轮询等于"每个请求都挑一个
+//     过期号"，要么多一次 refresh、要么吃一次 401 再续期，白白多几百毫秒；
+//   - 优先活着的号后，普通请求基本落在保活维护的那批上，首字节更稳。
+//   - 只剩过期号时也不会卡死：排序只是"优先"，不是"过滤"。
+func lessPick(a, b *Account, now time.Time) bool {
+	ai, bi := tokenAlive(a, now), tokenAlive(b, now)
+	if ai != bi {
+		return ai
+	}
+	if a.served != b.served {
+		return a.served < b.served
+	}
+	ci, cj := atomic.LoadInt32(&a.inflight), atomic.LoadInt32(&b.inflight)
+	if ci != cj {
+		return ci < cj
+	}
+	return a.lastUsed.Before(b.lastUsed)
 }
 
 type pickKind int
@@ -273,21 +304,12 @@ func (p *Pool) pick(need pickKind) (*Account, bool) {
 	if len(candidates) == 0 {
 		return nil, false
 	}
-	// 均匀轮询：**用得最少的先上**，其次谁在途最少，最后用"最久没用"兜底。
-	//
+	// 排序见 lessPick：token 活着的优先，其次用得最少的先上。
 	// 🔴 不能只看 lastUsed：3000 个账号按"最久没用"排，等价于每个请求都换一个
-	// 新号（每个新号都要先续期）；按 served 排序能把负载在整池摊平，同时让
-	// "接下来要用的一批"变得可预测 —— 后台预热就是照这个顺序做的。
+	// 新号（每个新号都要先续期）；按 served 排序能把负载在池内摊平，
+	// 同时让"接下来要用的一批"变得可预测 —— 后台预热就是照这个顺序做的。
 	sort.SliceStable(candidates, func(i, j int) bool {
-		si, sj := candidates[i].served, candidates[j].served
-		if si != sj {
-			return si < sj
-		}
-		ci, cj := atomic.LoadInt32(&candidates[i].inflight), atomic.LoadInt32(&candidates[j].inflight)
-		if ci != cj {
-			return ci < cj
-		}
-		return candidates[i].lastUsed.Before(candidates[j].lastUsed)
+		return lessPick(candidates[i], candidates[j], now)
 	})
 	chosen := candidates[0]
 	atomic.AddInt32(&chosen.inflight, 1)
