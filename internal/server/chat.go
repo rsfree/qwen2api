@@ -188,14 +188,14 @@ func (s *Server) openUpstreamSpec(ctx context.Context, model, gear, prompt strin
 		var err error
 		for retried := false; ; retried = true {
 			var o *opened
-			o, err = s.openOnce(actx, cred, model, gear, prompt, spec)
+			o, err = s.openOnce(actx, acct, cred, model, gear, prompt, spec)
 			if err == nil {
 				o.acct = acct
 				return o, nil
 			}
 			// 只在"凭据失效 + 还没重试过 + 有密码或 refresh_token"时续期一次。
 			renewable := acct.Password != "" || s.pool.RefreshToken(acct.Name) != ""
-			if retried || upstream.KindOf(err) != upstream.KindAuth || !renewable {
+			if retried || !renewable || !s.renewableErr(acct, err) {
 				break
 			}
 			if !s.relogin(ctx, acct) {
@@ -222,11 +222,14 @@ func (s *Server) openUpstreamSpec(ctx context.Context, model, gear, prompt strin
 // 🔴 图片上传必须在这里做，不能提到选号之前：file 条目是账号维度资源，
 // 用 A 号传的图让 B 号提交，上游会判"无权访问该文件"（且是静默的坏结果）。
 // 放在这里还有个附带好处：换号重试时会自动用新账号重传一遍。
-func (s *Server) openOnce(actx context.Context, cred, model, gear, prompt string,
+func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model, gear, prompt string,
 	spec upstream.ChatSpec) (*opened, error) {
 
 	attempt := spec
 	if len(spec.ImageRefs) > 0 {
+		// 🔴 上传前必须确保凭据是新鲜的（见 ensureFresh 的注释：过期 Bearer 在
+		// getstsToken 上会伪装成 WAF 挑战页，401 兜底完全失效）。
+		cred = s.ensureFresh(actx, acct, cred)
 		files, err := s.uploadImageRefs(actx, cred, spec.ImageRefs)
 		if err != nil {
 			return nil, err
@@ -244,6 +247,46 @@ func (s *Server) openOnce(actx context.Context, cred, model, gear, prompt string
 		return nil, err
 	}
 	return &opened{stream: st, chatID: chatID}, nil
+}
+
+// ensureFresh 确保账号的 access token 至少还剩 1 分钟寿命，否则先续期。
+//
+// 🔴 为什么上传前必须做（2026-10-30 实测）：`getstsToken` 对**过期的 Bearer
+// 不返回 401**，而是 HTTP 200 + WAF 挑战页。于是：
+//   · "401 才续期" 的兜底在图片上传路径上完全失效；
+//   · 错误被分类成 KindRisk ⇒ 好号被软冷却（实测一次测试误伤 21 个号）。
+// access TTL 只有 900s，而保活只热最前面几个号 ⇒ 池里绝大多数号的 token
+// 长年处于"已过期"状态（实测 2863/3135），所以这不是边角情况而是常态。
+func (s *Server) ensureFresh(ctx context.Context, acct *pool.Account, cred string) string {
+	if s.tokenFresh(acct.Name, time.Minute) {
+		return cred
+	}
+	if s.relogin(ctx, acct) {
+		return s.pool.Credential(acct.Name)
+	}
+	log.Printf("[qwen2api] 账号 %s 上传前续期失败，仍按原凭据尝试（由上游判定）", acct.Name)
+	return cred
+}
+
+// tokenFresh 凭据是否还剩 window 以上寿命（未知算不新鲜）。
+func (s *Server) tokenFresh(name string, window time.Duration) bool {
+	exp, ok := s.pool.TokenExpiry(name)
+	return ok && time.Until(exp) > window
+}
+
+// renewableErr 这个错误是否值得"续期凭据后重试同一个号"。
+//
+// 除明确的 KindAuth 外，还要覆盖一种伪装：上传链（getstsToken）对过期 Bearer
+// 返回 200 + WAF 挑战页 ⇒ 被分类成 KindRisk。若此时 token 确实已过期，
+// 真实原因是凭据而不是风控 —— 不续期就会白白冷却一个好号。
+func (s *Server) renewableErr(acct *pool.Account, err error) bool {
+	switch upstream.KindOf(err) {
+	case upstream.KindAuth:
+		return true
+	case upstream.KindRisk:
+		return !s.tokenFresh(acct.Name, time.Minute)
+	}
+	return false
 }
 
 // mergeAttachments 拼 files[]：已暂存的附件（/v1/files 的 file_id）在前，本轮图片在后。
@@ -306,6 +349,13 @@ func (s *Server) noteFailure(acct *pool.Account, err error) {
 	case upstream.KindQuota:
 		s.pool.MarkQuota(acct, err.Error())
 	case upstream.KindRateLimit, upstream.KindRisk:
+		// 过期 Bearer 会被上游伪装成 WAF 页（getstsToken 实测），这类"风控"
+		// 的真实原因是我们的凭据过期 —— 冷却只会白扔一个好号。
+		if !s.tokenFresh(acct.Name, time.Minute) {
+			log.Printf("[qwen2api] 账号 %s 报 %v，但 token 已过期 ⇒ 按凭据问题处理，不冷却",
+				acct.Name, err)
+			return
+		}
 		retry := 0
 		var ue *upstream.Error
 		if errors.As(err, &ue) {

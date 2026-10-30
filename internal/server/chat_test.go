@@ -34,6 +34,10 @@ type fakeUpstream struct {
 	submits []map[string]any
 	// gotSTS 记录 getstsToken 的请求体（图片/文件上传链的第一步）。
 	gotSTS []map[string]any
+	// stsAuth 记录 getstsToken 收到的 Authorization（断言"续期后的新 token 才被用于上传"）。
+	stsAuth []string
+	// gotRefresh 统计 /api/v2/auths/refresh 被调用的次数。
+	gotRefresh int
 }
 
 func newFakeUpstream(t *testing.T, failFirst int) *fakeUpstream {
@@ -49,7 +53,12 @@ func newFakeUpstream(t *testing.T, failFirst int) *fakeUpstream {
 			return
 		}
 		switch {
+		case strings.HasSuffix(r.URL.Path, "/api/v2/auths/refresh"):
+			f.gotRefresh++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"access_token":"fresh-access"}}`))
 		case strings.Contains(r.URL.Path, "/api/v2/files/getstsToken"):
+			f.stsAuth = append(f.stsAuth, r.Header.Get("Authorization"))
 			// 上传链的第一步：这里返回 500，用来断言"图片确实进了上传链"。
 			// （第二步 OSS PUT 的 host 由 STS 决定，httptest 接管不了，见 imageinput_test.go）
 			var body map[string]any

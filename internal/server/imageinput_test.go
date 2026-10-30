@@ -1,12 +1,19 @@
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/yuanjie-ai/qwen2api/internal/config"
+	"github.com/yuanjie-ai/qwen2api/internal/pool"
+	"github.com/yuanjie-ai/qwen2api/internal/reqlog"
+	"github.com/yuanjie-ai/qwen2api/internal/upstream"
 )
 
 // ---------- 图片输入（chat 全形态） ----------
@@ -250,5 +257,95 @@ func TestMergeAttachmentsOrder(t *testing.T) {
 	only := mergeAttachments(nil, uploaded)
 	if len(only) != 2 || only[0]["id"] != "file-img1" {
 		t.Fatalf("纯图片路径不对: %+v", only)
+	}
+}
+
+// 🔴 过期凭据下上传图片：必须先续期（refresh_token），再用新 token 上传。
+//
+// 2026-10-30 实测的坑：getstsToken 对过期 Bearer 返回 200 + WAF 挑战页（不是 401），
+// 所以"401 才续期"的兜底在这条路径上完全失效，还会把好号误冷却。
+func TestChatImageRenewsStaleTokenBeforeUpload(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	cfg := config.Default()
+	cfg.Upstream.BaseURL = up.srv.URL
+	cfg.Upstream.AuthBaseURL = up.srv.URL // refresh 也落到假上游
+	cfg.StateFile = ""
+	// token 不是 JWT ⇒ TokenExpiry 未知 ⇒ 视为不新鲜（正是生产里的常态）。
+	cfg.Accounts = []config.Account{{Name: "a0", Token: "stale-not-a-jwt"}}
+	p := pool.New(cfg.Pool, cfg.Accounts, "")
+	p.SetRefresh("a0", "rt-0")
+	cli := upstream.New(cfg.Upstream)
+	s := New(cfg, p, cli, reqlog.New(10), "test")
+	h := s.Handler()
+
+	body := `{"model":"qwen3.7-plus","messages":[{"role":"user","content":[
+		{"type":"text","text":"看图"},
+		{"type":"image_url","image_url":"data:image/png;base64,` + onePixelPNG + `"}]}]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+
+	if up.gotRefresh == 0 {
+		t.Fatalf("上传前应先续期，refresh 未被调用（状态 %d）: %s", rec.Code, rec.Body.String())
+	}
+	if len(up.stsAuth) == 0 {
+		t.Fatalf("getstsToken 未被调用: %s", rec.Body.String())
+	}
+	if up.stsAuth[0] != "Bearer fresh-access" {
+		t.Fatalf("上传用的不是续期后的新 token: %q", up.stsAuth[0])
+	}
+}
+
+// token 新鲜时不该白白多打一次 refresh。
+func TestChatImageDoesNotRefreshFreshToken(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	cfg := config.Default()
+	cfg.Upstream.BaseURL = up.srv.URL
+	cfg.Upstream.AuthBaseURL = up.srv.URL
+	cfg.StateFile = ""
+	cfg.Accounts = nil
+	p := pool.New(cfg.Pool, cfg.Accounts, "")
+	// 造一个 1 小时后才过期的合法 JWT（只需要 payload.exp 可解析）。
+	exp := time.Now().Add(time.Hour).Unix()
+	payload := base64.RawURLEncoding.EncodeToString([]byte(
+		fmt.Sprintf(`{"exp":%d}`, exp)))
+	jwt := "eyJhbGciOiJub25lIn0." + payload + "."
+	p.Add(config.Account{Name: "a0", Token: "bearer:" + jwt})
+	p.SetRefresh("a0", "rt-0")
+	cli := upstream.New(cfg.Upstream)
+	s := New(cfg, p, cli, reqlog.New(10), "test")
+	h := s.Handler()
+
+	body := `{"model":"qwen3.7-plus","messages":[{"role":"user","content":[
+		{"type":"image_url","image_url":"data:image/png;base64,` + onePixelPNG + `"}]}]}`
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+
+	if up.gotRefresh != 0 {
+		t.Fatalf("token 还新鲜却续期了 %d 次", up.gotRefresh)
+	}
+}
+
+func TestRenewableErrClassifiesDisguisedWAF(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	cfg := config.Default()
+	cfg.Upstream.BaseURL = up.srv.URL
+	cfg.StateFile = ""
+	cfg.Accounts = []config.Account{{Name: "stale", Token: "not-jwt"}}
+	p := pool.New(cfg.Pool, cfg.Accounts, "")
+	s := New(cfg, p, upstream.New(cfg.Upstream), reqlog.New(5), "test")
+	stale := p.Get("stale")
+
+	if !s.renewableErr(stale, upstream.NewErr(upstream.KindAuth, "x", 401, "", "e", true)) {
+		t.Fatal("KindAuth 应可续期")
+	}
+	// 过期 token + 风控类错误 ⇒ 真因是凭据，值得续期。
+	if !s.renewableErr(stale, upstream.NewErr(upstream.KindRisk, "getstsToken", 200, "", "waf", true)) {
+		t.Fatal("过期凭据上的 WAF 报错应可续期")
+	}
+	// 新鲜 token + 风控 ⇒ 真风控，续期没用。
+	p.SetToken("stale", "bearer:eyJhbGciOiJub25lIn0."+base64.RawURLEncoding.EncodeToString([]byte(
+		fmt.Sprintf(`{"exp":%d}`, time.Now().Add(time.Hour).Unix())))+".")
+	if s.renewableErr(stale, upstream.NewErr(upstream.KindRisk, "getstsToken", 200, "", "waf", true)) {
+		t.Fatal("新鲜凭据上的风控不该续期")
 	}
 }
