@@ -355,23 +355,23 @@ func (s *Server) imageBudget() time.Duration {
 // 与聊天不同，图片一直是"选一个号跑到底"：一个坏号（未激活 / 额度将尽 / 只发心跳）
 // 就把请求判死 —— 2026-10-30 线上就是 503 + AccountNotReady（那个号还没激活）。
 // 换号是安全的：这些都发生在**产物之前**，上游没受理也就没计费。
-// 3 个的依据：账号级失败都是毫秒级返回，多换两个几乎不增加等待；真正慢的
-// "零产物超时"另有"只重试一次"的闸（否则连试三个等于让用户等 8 分钟）。
+// 3 个的依据：账号级失败都是毫秒级返回，多换两个几乎不增加等待。
+// ⚠️ 真正慢的"零产物超时"**不走这条轮换**：它直接冷却该号并报错，
+// 不占用这 3 次机会（见 generateImage 里的超时分支）。
 const imageAccountRotations = 3
 
 // retryableImageErr 这次失败是否值得换号（= 上游没受理）。
 //
-// 只认两类：
-//   - 零产物超时（只发心跳 ⇒ 没开始画 ⇒ 没计费）；
-//   - upstream.RetrySafe（401/403/额度/429/风控，语义都是"未受理"）。
+// 只认 upstream.RetrySafe（401/403/额度/429/风控，语义都是"未受理"）。
+//
+// 🔴 **零产物超时不在此列**（2026-10-31 改）：预算已放宽到可配的 300s，
+// 超时后再换号重试等于让调用方干等 2×预算（默认 10 分钟），而换号并不保证更快。
+// 超时只做两件事：冷却该号 + 如实返回 504。
 //
 // internal_error / 5xx / 400 这类**可能已受理**，重试等于赌重复扣费，一律不换。
 func retryableImageErr(err error) bool {
 	if err == nil {
 		return false
-	}
-	if errors.Is(err, errUpstreamTimeout) {
-		return true
 	}
 	return upstream.RetrySafe(err)
 }
@@ -395,7 +395,6 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 	refs []string, ratio, blobBase string) (imgs []string, revised, acct, chatID string, err error) {
 
 	budget := s.imageBudget()
-	timeoutRetried := false
 
 	for attempt := 0; attempt < imageAccountRotations; attempt++ {
 		// 🔴 用 PickForImage：跳过"今日已出够 max_image_per_day 张"的号。
@@ -437,22 +436,21 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 		if ctx.Err() != nil {
 			break
 		}
-		retry := retryableImageErr(err) || fastRetryable(err, took)
-		if !retry {
+		// 🔴 零产物超时**不换号重试**（2026-10-31 明确要求）。
+		// 预算已经是可配的 300s，再等一轮等于把调用方挂 10 分钟；
+		// 而超时本身也不保证下一个号更快。冷却这个号（它大概率额度将尽），如实报超时。
+		if errors.Is(err, errUpstreamTimeout) {
+			s.coolAfterImageTimeout(a)
+			log.Printf("[qwen2api] 生图超时（%s 零产物，%s），冷却 10 分钟、不重试",
+				a.Name, took.Round(time.Second))
 			break
 		}
-		switch {
-		case errors.Is(err, errUpstreamTimeout):
-			// 慢失败：每次 2.5 分钟，只允许再试一次。
-			if timeoutRetried {
-				return nil, "", acct, chatID, err
-			}
-			timeoutRetried = true
-			s.coolAfterImageTimeout(a)
-			log.Printf("[qwen2api] 生图超时（%s 零产物），冷却 10 分钟后换号重试", a.Name)
-		case retryableImageErr(err):
+		if !(retryableImageErr(err) || fastRetryable(err, took)) {
+			break
+		}
+		if retryableImageErr(err) {
 			log.Printf("[qwen2api] 生图账号级失败（%s: %v），换号重试", a.Name, err)
-		default:
+		} else {
 			// 快速失败：几秒内就挂，说明没受理 —— 换号比把它甩给调用方划算。
 			log.Printf("[qwen2api] 生图快速失败（%s，%s）：换号重试", a.Name, took.Round(time.Millisecond))
 		}
@@ -529,7 +527,8 @@ func (s *Server) generateOnAccount(ctx context.Context, a *pool.Account,
 				// 🔴 这段中文只进流水/容器日志；客户端拿到的是 504 + "upstream timeout"。
 				return nil, "", chatID, fmt.Errorf("%w（预算 %s，垫图 %d 张）。两种可能："+
 					"①该账号今日生图额度将尽（再发一次通常返回 insufficient_quota 确认）；"+
-					"②上游临时故障（等几分钟重试往往恢复，多垫图时更慢）。建议换号或稍后重试",
+					"②上游临时故障（等几分钟重试往往恢复，多垫图时更慢）。"+
+					"预算已用尽、网关不会自动换号重试：请稍后再发，或换一个账号发起",
 					errUpstreamTimeout, budget, len(refs))
 			}
 			return nil, "", chatID, err

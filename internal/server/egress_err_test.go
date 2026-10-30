@@ -264,14 +264,16 @@ func TestChatFailureRecordsAccount(t *testing.T) {
 	}
 }
 
-// 换号判据：只有"上游没受理"的失败才重试（零产物超时 / RetrySafe），
-// 其它可能已受理，重试=赌重复扣费。
+// 换号判据：只有"上游没受理"的失败才重试（RetrySafe）。
+//
+// 🔴 零产物超时**不在其中**（2026-10-31 改）：预算已是可配的 300s，
+// 再换号重试等于让调用方干等 2×预算（默认 10 分钟），而换号并不保证更快。
 func TestRetryableImageErr(t *testing.T) {
-	if !retryableImageErr(errUpstreamTimeout) {
-		t.Fatal("零产物超时应换号")
+	if retryableImageErr(errUpstreamTimeout) {
+		t.Fatal("零产物超时不该换号（预算已经很长，重试 = 让用户等 2×）")
 	}
-	if !retryableImageErr(fmt.Errorf("%w（预算 150s）", errUpstreamTimeout)) {
-		t.Fatal("包装后的超时也应换号")
+	if retryableImageErr(fmt.Errorf("%w（预算 300s）", errUpstreamTimeout)) {
+		t.Fatal("包装后的超时同样不该换号")
 	}
 	// 账号级失败（401 / 额度）语义是"未受理" ⇒ 换号安全。
 	if !retryableImageErr(upstream.NewErr(upstream.KindAuth, "chats/new", 401, "Unauthorized", "x", true)) {
