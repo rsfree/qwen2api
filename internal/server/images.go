@@ -479,7 +479,7 @@ func (s *Server) generateOnAccount(ctx context.Context, a *pool.Account,
 		spec = upstream.ImageSpec(imageModel, ratio)
 	}
 
-	chatID, err := s.up.NewChatTyped(ctx, cred, model, spec.ChatType)
+	chatID, err := s.takeChat(ctx, a.Name, cred, model, spec.ChatType)
 	if err != nil {
 		return nil, "", err
 	}

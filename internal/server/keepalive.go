@@ -59,6 +59,7 @@ func (s *Server) KeepAlive(ctx context.Context) {
 
 	changed := s.adoptOnce(ctx)
 	changed = s.warmOnce(ctx) || changed
+	s.prewarmChats(ctx)
 	changed = s.maintainRefresh(ctx) || changed
 	saveIfDue(changed)
 	for {
@@ -72,6 +73,7 @@ func (s *Server) KeepAlive(ctx context.Context) {
 		case <-t.C:
 			changed := s.adoptOnce(ctx)
 			changed = s.warmOnce(ctx) || changed
+			s.prewarmChats(ctx)
 			changed = s.maintainRefresh(ctx) || changed
 			saveIfDue(changed)
 		}
@@ -197,6 +199,60 @@ func (s *Server) warmOnce(ctx context.Context) bool {
 	}
 	wg.Wait()
 	return changed
+}
+
+// prewarmChats 给"马上要被用到的那批号"预建空会话。
+//
+// 覆盖范围与 access token 预热**同源**：都是 warmTarget（按最近 10 分钟流量估算），
+// 单轮数量用 warmBatch 一起缩放。理由也一样 —— 目标数会随并发涨到几百，
+// 固定批量会让"热满"耗时随规模线性增长。
+//
+// 只补 t2t：对话占请求的绝大多数；t2i / image_edit / t2v 一次就要 50~90 秒，
+// 建会话那 2.4s 占比可以忽略，不值得为它们维护池子。
+func (s *Server) prewarmChats(ctx context.Context) {
+	if !s.chats.Enabled() {
+		return
+	}
+	if n := s.chats.Trim(); n > 0 {
+		log.Printf("[qwen2api] 会话池清理过期 %d 个", n)
+	}
+	target := s.warmTarget()
+	names := s.pool.HotNames(target)
+	if len(names) == 0 {
+		return
+	}
+	limit := warmBatch(target)
+	sem := make(chan struct{}, 4) // 建会话 2.4s/个，4 并发约 6 个/秒
+	var wg sync.WaitGroup
+	built := 0
+	var mu sync.Mutex
+	for _, n := range names {
+		if built >= limit {
+			break
+		}
+		if s.chats.Short(n, "t2t") == 0 {
+			continue
+		}
+		// 只用新鲜凭据：过期的号建了也会被上游拒（且白占一次代理往返）。
+		if !s.tokenFresh(n, time.Minute) {
+			continue
+		}
+		wg.Add(1)
+		built++
+		go func(name string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			cred := s.pool.Credential(name)
+			if cred == "" {
+				return
+			}
+			s.prewarmChat(ctx, name, cred, s.cfg.DefaultModel, "t2t")
+			mu.Lock()
+			defer mu.Unlock()
+		}(n)
+	}
+	wg.Wait()
 }
 
 // noteWarm 记录最近一轮预热的参数（/stats 与面板观测用）。

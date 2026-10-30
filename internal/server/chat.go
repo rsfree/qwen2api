@@ -249,6 +249,53 @@ func openFail(lastAcct string, err error) error {
 	return &errWithAccount{acct: lastAcct, err: err}
 }
 
+// takeChat 拿一个会话 id：优先用预建池里的，池空则现建（并顺手补一个备用）。
+//
+// 为什么值得（2026-10-30 实测）：`chats/new` 走住宅代理 2.0~2.8 秒，
+// 而一次对话 5~8 秒 —— 命中缓存等于把这三分之一直接省掉。
+//
+// 🔴 只能给同一个账号用：跨号提交会 CHAT_NOT_FOUND（"此对话已删除"）。
+// 所以 acctName 是必传的，且池子按 (账号, 会话类型) 分组。
+func (s *Server) takeChat(ctx context.Context, acctName, cred, model, chatType string) (string, error) {
+	// 只有 t2t 值得维护池子（占请求绝大多数）；t2i / image_edit / t2v 一次
+	// 就要 50~90 秒，建会话那 2.4s 占比可以忽略，补了纯属白花上游调用。
+	refill := chatType == "t2t" && s.chats.Short(acctName, chatType) > 0
+	if id, ok := s.chats.Take(acctName, chatType); ok {
+		// 取出即删 ⇒ 立刻异步补一个，保持"下一个请求也能命中"。
+		if refill {
+			go s.prewarmChat(ctx, acctName, cred, model, chatType)
+		}
+		return id, nil
+	}
+	id, err := s.up.NewChatTyped(ctx, cred, model, chatType)
+	if err != nil {
+		return "", err
+	}
+	if refill {
+		go s.prewarmChat(ctx, acctName, cred, model, chatType)
+	}
+	return id, nil
+}
+
+// prewarmChat 后台建一个空会话放进池子。
+//
+// 失败静默丢弃：预热是"锦上添花"，任何错误都不该影响请求（真正的错误会在
+// 请求路径上由 takeChat 的现建分支暴露出来）。
+func (s *Server) prewarmChat(ctx context.Context, acctName, cred, model, chatType string) {
+	if !s.chats.Enabled() {
+		return
+	}
+	// 请求结束时 ctx 会取消，预热要活过请求 —— 但不能无界，
+	// 用 WithoutCancel + 30s 上限，避免 goroutine 挂死。
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	id, err := s.up.NewChatTyped(pctx, cred, model, chatType)
+	if err != nil {
+		return
+	}
+	s.chats.Put(acctName, chatType, id)
+}
+
 // openOnce 用指定账号跑一轮：上传图片（若有）→ 建会话 → 提交 → 开流。
 //
 // 🔴 图片上传必须在这里做，不能提到选号之前：file 条目是账号维度资源，
@@ -268,7 +315,7 @@ func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model,
 		attempt.Files = mergeAttachments(spec.Files, files)
 	}
 
-	chatID, err := s.up.NewChatTyped(actx, cred, model, attempt.ChatType)
+	chatID, err := s.takeChat(actx, acct.Name, cred, model, attempt.ChatType)
 	if err != nil {
 		return nil, err
 	}

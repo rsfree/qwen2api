@@ -298,6 +298,8 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 			"cooldown_auth_s":           cfg.Pool.CooldownAuthS,
 			"max_inflight_per_account":  cfg.Pool.MaxInflightPerAccount,
 			"max_image_per_day":         cfg.Pool.MaxImagePerDay,
+			"warm_chats_per_account":    cfg.Pool.WarmChatsPerAccount,
+			"chat_pool_ttl_s":           cfg.Pool.ChatPoolTTLS,
 			"max_video_per_day":         cfg.Pool.MaxVideoPerDay,
 			"max_video_credits_per_day": cfg.Pool.MaxVideoCreditsPerDay,
 		},

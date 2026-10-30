@@ -61,6 +61,8 @@ type Server struct {
 	// egressMu / egress 账号级"出口 IP"缓存（懒探测，见 egress.go）。
 	egressMu sync.Mutex
 	egress   map[string]*egressState
+	// chats 预建的空会话池（按账号 + 会话类型分组，见 chatpool.go）。
+	chats *ChatPool
 }
 
 // New 构造前门。
@@ -77,6 +79,7 @@ func New(cfg config.Config, p *pool.Pool, up *upstream.Client, log *reqlog.Log, 
 		files:   NewFileStore(),
 		blobs:   NewBlobStore(),
 		egress:  map[string]*egressState{},
+		chats:   NewChatPool(cfg.Pool.WarmChatsPerAccount, time.Duration(cfg.Pool.ChatPoolTTLS)*time.Second),
 	}
 	// 配置了公网基址就固定下来（服务端到服务端取图时 Host 不是公网域名）。
 	if cfg.BlobBaseURL != "" {
@@ -252,6 +255,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"keepalive": map[string]any{
 			"warm":        s.WarmSnapshot(),
 			"token_fresh": s.pool.TokenFreshCount(),
+			// chats 预建会话池：ready = 当前可直接用的空会话数。
+			"chats": s.chats.Stat(),
 		},
 	})
 }

@@ -169,6 +169,18 @@ type Pool struct {
 	// 🔴 视频按积分计费，不是一个价：720P 5s 与 1080P 15s 差好几倍。
 	// 只有同时给了 Video.Pricing（单价表）才生效；否则退回 MaxVideoPerDay 的个数口径。
 	MaxVideoCreditsPerDay int `json:"max_video_credits_per_day"`
+	// WarmChatsPerAccount 每个热点账号预建几个**空会话**（默认 1，0 = 关闭）。
+	//
+	// 为什么要它（2026-10-30 实测）：`POST /api/v2/chats/new` 走住宅代理要
+	// 2.0~2.8 秒，而一次对话总共 5~8 秒 —— 建会话占掉约三分之一。
+	// 提前建好，请求路径上只剩"提交 + 读流"。
+	//
+	// 🔴 会话是**账号维度**资源（A 号建的让 B 号提交会 CHAT_NOT_FOUND），
+	// 所以只能"给热号各建一个"，覆盖范围跟着 warmTarget 动态缩放。
+	WarmChatsPerAccount int `json:"warm_chats_per_account"`
+	// ChatPoolTTLS 预建会话的缓存上限（秒，默认 900）。
+	// 上游是否会让空会话过期没有实测依据，保守取与 access token 同量级。
+	ChatPoolTTLS int `json:"chat_pool_ttl_s"`
 	// MaxImagePerDay 单账号**每日成功出图**张数上限，0 = 不限，默认 6。
 	//
 	// 为什么设 6 而不是上游实测的 9：留 3 张缓冲。打到硬限后上游不给明确错误，
@@ -330,6 +342,8 @@ func Default() Config {
 			CooldownAuthS:         1800,
 			MaxInflightPerAccount: 2,
 			MaxImagePerDay:        6,
+			WarmChatsPerAccount:   1,
+			ChatPoolTTLS:          900,
 			MaxVideoPerDay:        1,
 			// 默认 0 = 不启用。理由：现在能读**账号真实余额**了（见 upstream.Credits），
 			// 余额才是唯一真口径；再叠一层「40 分/天」会把会员号的 270 分锁死。

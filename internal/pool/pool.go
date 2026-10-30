@@ -997,6 +997,50 @@ func (p *Pool) restore() {
 	}
 }
 
+// HotNames 返回"当前最可能被选中"的账号名（token 活着 + served 升序）。
+//
+// 给"预建会话"用：会话是账号维度资源，必须提前建在**马上要用的号**上，
+// 建到冷号上等于白花一次上游调用（2.4s）。
+func (p *Pool) HotNames(limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	type row struct {
+		name   string
+		served int64
+		exp    time.Time
+	}
+	p.mu.RLock()
+	now := time.Now()
+	rows := make([]row, 0, len(p.accounts))
+	for _, a := range p.accounts {
+		// 冷却中/凭据坏的号不预建：它们不会被选中，建了纯浪费一次代理往返。
+		if a.authDead || now.Before(a.cooldownUntil) {
+			continue
+		}
+		if !tokenAlive(a, now) {
+			continue
+		}
+		rows = append(rows, row{name: a.Name, served: a.served, exp: a.tokenExp})
+	}
+	p.mu.RUnlock()
+
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].served != rows[j].served {
+			return rows[i].served < rows[j].served
+		}
+		return rows[i].exp.Before(rows[j].exp)
+	})
+	if limit > len(rows) {
+		limit = len(rows)
+	}
+	out := make([]string, 0, limit)
+	for _, r := range rows[:limit] {
+		out = append(out, r.name)
+	}
+	return out
+}
+
 // TokenFreshCount 当前 access token 还没过期的账号数。
 //
 // 保活的自检口径：这个数长期低于 {target} 就说明预热跟不上（batch 太小或

@@ -207,7 +207,7 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 		attemptStart := time.Now()
 		cred := s.pool.Credential(a.Name)
 		actx := upstream.WithAccount(r.Context(), a.Name)
-		chatID, err := s.up.NewChatTyped(actx, cred, chatModel, spec.ChatType)
+		chatID, err := s.takeChat(actx, a.Name, cred, chatModel, spec.ChatType)
 		if err == nil {
 			body := upstream.BuildSubmitSpec(chatID, "", chatModel, req.Prompt, "fast", spec, time.Now())
 			taskID, err = s.up.SubmitVideo(actx, cred, body)
