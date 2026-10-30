@@ -38,6 +38,16 @@ type fakeUpstream struct {
 	stsAuth []string
 	// gotRefresh 统计 /api/v2/auths/refresh 被调用的次数。
 	gotRefresh int
+	// fail500 前 N 次调用直接回 500（模拟"快速失败"的上游抖动）。
+	fail500 int
+}
+
+// newFakeUpstream500 前 n 次调用回 500（"几秒内就挂"的那类上游故障）。
+func newFakeUpstream500(t *testing.T, n int) *fakeUpstream {
+	t.Helper()
+	f := newFakeUpstream(t, 0)
+	f.fail500 = n
+	return f
 }
 
 func newFakeUpstream(t *testing.T, failFirst int) *fakeUpstream {
@@ -45,6 +55,13 @@ func newFakeUpstream(t *testing.T, failFirst int) *fakeUpstream {
 	f := &fakeUpstream{failFirst: failFirst}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.calls++
+		if f.fail500 > 0 {
+			f.fail500--
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"success":false,"data":{"code":"InternalError","details":"boom"}}`))
+			return
+		}
 		if f.failFirst > 0 {
 			f.failFirst--
 			w.Header().Set("Content-Type", "application/json")

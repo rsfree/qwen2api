@@ -326,3 +326,62 @@ func TestImageRotatesOnAccountLevelFailure(t *testing.T) {
 		t.Fatalf("换号后应记第二个号 a1，得到 %q", rows[0].Account)
 	}
 }
+
+// "快速失败"判据：几秒内就挂的上游错误换号再试（连活都没干，重试安全）。
+func TestFastRetryable(t *testing.T) {
+	up5xx := upstream.NewErr(upstream.KindServer, "chats/new", 500, "", "boom", false)
+
+	if !fastRetryable(up5xx, 2*time.Second) {
+		t.Fatal("2 秒就挂的 500 应换号（没受理）")
+	}
+	if fastRetryable(up5xx, 30*time.Second) {
+		t.Fatal("拖了 30 秒的 500 可能已受理，不该换号")
+	}
+	// 本地错误（图片/文件解析）不算：那不是上游的问题，换号也没用。
+	if fastRetryable(errors.New("data URI 解码失败"), time.Second) {
+		t.Fatal("本地解析错误不该换号")
+	}
+	if fastRetryable(nil, time.Second) {
+		t.Fatal("nil 不该换号")
+	}
+}
+
+// 聊天遇到"快速失败的 500"要换号（原来 RetrySafe=false 直接返回给调用方）。
+func TestChatRetriesFastFailure(t *testing.T) {
+	up := newFakeUpstream500(t, 1) // 第一个号回 500，第二个号正常
+	s := newTestServerWithServer(t, up, 2)
+	h := s.Handler()
+
+	body := `{"model":"qwen3.7-plus","messages":[{"role":"user","content":"hi"}]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+
+	if rec.Code != 200 {
+		t.Fatalf("换号后应成功，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	if up.calls < 2 {
+		t.Fatalf("应在 500 后换号重试，实际只调了 %d 次", up.calls)
+	}
+	if rows := s.log.Recent(1); len(rows) == 1 && rows[0].Account == "a0" {
+		t.Fatalf("应记换号后的账号，实际 %q", rows[0].Account)
+	}
+}
+
+// 生图同理：快速失败（500）要换号，而不是直接把错甩给调用方。
+func TestImageRetriesFastFailure(t *testing.T) {
+	up := newFakeUpstream500(t, 1)
+	s := newTestServerWithServer(t, up, 2)
+	h := s.Handler()
+
+	body := `{"model":"qwen-image-3.0","prompt":"画一只猫"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(body)))
+
+	if up.calls < 2 {
+		t.Fatalf("应在 500 后换号重试，实际只调了 %d 次", up.calls)
+	}
+	rows := s.log.Recent(1)
+	if len(rows) != 1 || rows[0].Account != "a1" {
+		t.Fatalf("应记换号后的账号 a1，实际 %+v", rows)
+	}
+}

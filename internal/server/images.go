@@ -413,8 +413,10 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 		// 会让上游把文件判成跨账号资源。
 		actx, cancel := context.WithTimeout(ctx, budget)
 		actx = upstream.WithAccount(actx, a.Name)
+		attemptStart := time.Now()
 		imgs, revised, err = s.generateOnAccount(actx, a, model, imageModel, thinking,
 			prompt, refs, ratio, blobBase, budget)
+		took := time.Since(attemptStart)
 		cancel()
 		s.pool.Release(a)
 		acct = a.Name
@@ -424,18 +426,27 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 		}
 		s.noteFailure(a, err)
 		// 客户端断开就别再浪费账号了（画出来也没人收）。
-		if !retryableImageErr(err) || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			break
 		}
-		if errors.Is(err, errUpstreamTimeout) {
+		retry := retryableImageErr(err) || fastRetryable(err, took)
+		if !retry {
+			break
+		}
+		switch {
+		case errors.Is(err, errUpstreamTimeout):
+			// 慢失败：每次 2.5 分钟，只允许再试一次。
 			if timeoutRetried {
-				break
+				return nil, "", acct, err
 			}
 			timeoutRetried = true
 			s.coolAfterImageTimeout(a)
 			log.Printf("[qwen2api] 生图超时（%s 零产物），冷却 10 分钟后换号重试", a.Name)
-		} else {
+		case retryableImageErr(err):
 			log.Printf("[qwen2api] 生图账号级失败（%s: %v），换号重试", a.Name, err)
+		default:
+			// 快速失败：几秒内就挂，说明没受理 —— 换号比把它甩给调用方划算。
+			log.Printf("[qwen2api] 生图快速失败（%s，%s）：换号重试", a.Name, took.Round(time.Millisecond))
 		}
 	}
 	return nil, "", acct, err

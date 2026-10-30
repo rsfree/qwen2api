@@ -189,6 +189,7 @@ func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear, pr
 			return nil, openFail(lastAcct, lastErr)
 		}
 		lastAcct = acct.Name
+		attemptStart := time.Now()
 		// 选号即触发出口探测（异步）：一个聊天请求要 5~15s、出图 60s+，
 		// 等流水落库时探测早回来了 —— 这样"第一条请求"也能看到出口 IP。
 		s.egressOf(acct.Name)
@@ -223,8 +224,15 @@ func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear, pr
 		s.pool.Release(acct)
 		s.noteFailure(acct, err)
 		lastErr = err
-		if !upstream.RetrySafe(err) {
+		took := time.Since(attemptStart)
+		retrySafe := upstream.RetrySafe(err)
+		// 「可证明未受理」的两类都换号：语义上安全的（401/额度/429/风控），
+		// 以及**快速失败**（几秒内就挂掉的上游错误 —— 连活都没干）。
+		if !retrySafe && !fastRetryable(err, took) {
 			break
+		}
+		if !retrySafe {
+			log.Printf("[qwen2api] 快速失败（%s，%s）：换号重试", acct.Name, took.Round(time.Millisecond))
 		}
 	}
 	return nil, openFail(lastAcct, lastErr)
@@ -706,6 +714,26 @@ func toUsage(u *upstream.Usage) *Usage {
 }
 
 // httpStatusFor 上游错误 → 对外 HTTP 状态码。
+// fastFailWindow 一次尝试"多快失败"才说明上游没受理（快于它 ⇒ 换号安全）。
+//
+// 为什么按**时间**而不是只按错误类型：错误类型只能说明"哪种错"，说明不了
+// "有没有受理"。一个 2 秒返回的 500/400 显然连活都没干；同样一个错拖到 78 秒
+// 才回，就很可能已经受理并计费了 —— 那种要谨慎（超时另有"只试一次"的闸）。
+const fastFailWindow = 10 * time.Second
+
+// fastRetryable 快速失败的上游错误值得换号再试。
+//
+// 只看两条：是**上游错误**（*upstream.Error，排掉本地图片/文件解析错误）、
+// 且用时 < fastFailWindow。实测这类"2~3 秒就挂"的 400/500 换个号立刻就好，
+// 不重试等于把一次上游抖动直接甩给调用方。
+func fastRetryable(err error, took time.Duration) bool {
+	if err == nil || took >= fastFailWindow {
+		return false
+	}
+	var ue *upstream.Error
+	return errors.As(err, &ue)
+}
+
 func httpStatusFor(err error) int {
 	if errors.Is(err, errNoAccount) {
 		return http.StatusServiceUnavailable
