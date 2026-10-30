@@ -653,6 +653,31 @@ GET https://sg-entitlement.qwen.com/api/entitlement/credits/credits/history
 - `usageList[]` 是流水：`amount` 正数入账、`state:"-"` 表示扣费；`title` 里带模型与档位；
 - `biz_id` 少了会 404；`pageSize=1` 只取余额时返回体很小，适合高频轮询（本仓 60s 一次）。
 
+### 4.10.2.1 每日赠送的时间点（✅ 2026-10-30 实测）
+
+响应里**没有**"下次重置时间"字段，只有流水。每日赠送在 `usageList` 里表现为：
+
+```json
+{"title": "credits.init.title.daily", "amount": 40, "state": "+", "date": 1793324947000}
+```
+
+实测 6 个账号（main / a1~a5）的这条记录时间戳：
+
+```
+main  10-30 09:49:18  (+40)
+a1    10-30 09:49:07  (+40)
+a2~a5 10-30 09:49:17  (+40)
+```
+
+⇒ **平台统一批处理发放**（11 秒内发完），不是按账号注册时刻滚动。
+普号每日 +40；会员（main）另有订阅额度，daily 同样 +40。
+
+网关口径（不做假装精确）：
+- `credits` 请求的 `pageSize` 从 1 改成 10，只为顺带捞出最近一条 daily；
+- `Credits.LastDailyAt`（Unix 秒）由流水推导（`deriveDailyAt`），面板显示
+  「上次入账」，并**按 +24h 估算**「预计下次」，悬停可见；
+- 若上游哪天改成滚动发放，这个推算会失真 —— 那时以面板显示的"上次"为准。
+
 ### 4.10.3 计价表：`GET /api/v2/credits/pricing`（chat 域）
 
 同一个概念在两个域各有一半，**必须两个都读**：

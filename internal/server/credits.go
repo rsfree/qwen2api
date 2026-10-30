@@ -85,6 +85,9 @@ func (s *Server) refreshStaleCredits(ctx context.Context, ttl time.Duration) {
 				return
 			}
 			s.pool.SetCreditBalance(name, c.Total)
+			if c.LastDailyAt > 0 {
+				s.pool.SetCreditDailyAt(name, time.Unix(c.LastDailyAt, 0))
+			}
 		}(n)
 	}
 	wg.Wait()
@@ -167,6 +170,9 @@ func (s *Server) refreshOneCredit(ctx context.Context, name string) bool {
 		return false
 	}
 	s.pool.SetCreditBalance(name, c.Total)
+	if c.LastDailyAt > 0 {
+		s.pool.SetCreditDailyAt(name, time.Unix(c.LastDailyAt, 0))
+	}
 	return true
 }
 

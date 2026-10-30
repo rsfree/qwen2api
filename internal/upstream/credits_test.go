@@ -128,3 +128,22 @@ func TestCreditHistoryKeepsRecords(t *testing.T) {
 		t.Fatalf("流水字段不对: %+v", r)
 	}
 }
+
+// 每日赠送时刻从流水里推：只认 title 含 daily 的，取最大时间；毫秒→秒。
+func TestDeriveDailyAt(t *testing.T) {
+	list := []CreditRecord{
+		{Title: "credits.dec.HappyHorse1.1.720P.5s.video", Amount: 30, Date: 1793400000000, State: "-"},
+		{Title: "credits.init.title.daily", Amount: 40, Date: 1793324947000, State: "+"},
+		{Title: "credits.init.title.daily", Amount: 40, Date: 1793238547000, State: "+"}, // 前一天
+		{Title: "credits.inc.subscription", Amount: 270, Date: 1793500000000, State: "+"},
+	}
+	if got, want := deriveDailyAt(list), int64(1793324947000/1000); got != want {
+		t.Fatalf("daily 时刻不对: got %d want %d", got, want)
+	}
+	if got := deriveDailyAt(nil); got != 0 {
+		t.Fatalf("空流水应为 0，得到 %d", got)
+	}
+	if got := deriveDailyAt([]CreditRecord{{Title: "credits.dec.video", Date: 1}}); got != 0 {
+		t.Fatalf("没有 daily 应为 0，得到 %d", got)
+	}
+}

@@ -335,3 +335,6 @@ func (p *Pool) MissingRefresh() int {
 	}
 	return n
 }
+
+// creditDailyAt 「每日赠送」最近一次入账时刻（零值 = 未知）。
+// 放在 accounts.go 里是因为 Account 定义在这里（Snapshot 在 pool.go 读它）。

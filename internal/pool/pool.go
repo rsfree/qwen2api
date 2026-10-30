@@ -57,6 +57,9 @@ type Account struct {
 	creditBalance int
 	creditKnown   bool
 	creditAt      time.Time
+	// creditDailyAt 最近一次「每日赠送」入账时刻（零值 = 未知）。
+	// 上游没有"下次重置"字段，只能从积分流水里推（见 upstream.creditHistory）。
+	creditDailyAt time.Time
 	cooldownUntil time.Time
 	failures      int
 	lastUsed      time.Time
@@ -90,6 +93,9 @@ type View struct {
 	// （此时不做余额拦截，靠上游 insufficient_quota 兜底）。
 	CreditBalance int  `json:"credit_balance"`
 	CreditKnown   bool `json:"credit_known"`
+	// CreditDailyAt 最近一次「每日赠送」入账时刻（RFC3339，空 = 未知）。
+	// 上游没有"下次重置"字段，面板按它 +24h 推算下一次。
+	CreditDailyAt string `json:"credit_daily_at,omitempty"`
 	// TokenLeftS 当前 access token 还剩多少秒；TokenKnown=false 时无意义。
 	// 面板靠它一眼看出"保活有没有在跑"：整池都不 known 说明还没开始续期。
 	TokenLeftS int  `json:"token_left_s"`
@@ -377,6 +383,27 @@ func (p *Pool) SetCreditBalance(name string, balance int) {
 //
 // 为什么要乐观扣：余额缓存有 60s TTL，一分钟内连发两个 720P 会让第二个
 // 仍看到旧余额。乐观扣减让同分钟内的请求看到正确数字；下次上游刷新会覆盖它。
+// dailyAt 把入账时刻格式化成 RFC3339（零值回空串）。
+func dailyAt(a *Account) string {
+	if a.creditDailyAt.IsZero() {
+		return ""
+	}
+	return a.creditDailyAt.Format(time.RFC3339)
+}
+
+// SetCreditDailyAt 记录「每日赠送」最近一次入账时刻（0 值忽略）。
+func (p *Pool) SetCreditDailyAt(name string, t time.Time) {
+	if t.IsZero() {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if a := p.lookupLocked(name); a != nil {
+		a.creditDailyAt = t
+	}
+}
+
+// DebitCreditBalance 提交成功后**乐观扣减**本地缓存的余额。
 func (p *Pool) DebitCreditBalance(name string, credits int) {
 	if credits <= 0 {
 		return
@@ -765,6 +792,7 @@ func (p *Pool) Snapshot() []View {
 			CreditsLimit:  p.cfg.MaxVideoCreditsPerDay,
 			CreditBalance: a.creditBalance,
 			CreditKnown:   a.creditKnown,
+		CreditDailyAt: dailyAt(a),
 			HasRefresh:    a.RefreshToken != "",
 		}
 		if !a.tokenExp.IsZero() {

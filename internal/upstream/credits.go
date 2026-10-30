@@ -35,6 +35,13 @@ type Credits struct {
 	Subscription int `json:"subscriptionCredits"`
 	// Bonus 奖励额度（每日免费积分等）。
 	Bonus int `json:"bonusCredits"`
+	// LastDailyAt 最近一次「每日赠送」入账时刻（Unix 秒），0 = 未知。
+	//
+	// 🔴 不是上游字段：是从 usageList 里 title 含 `daily` 的流水推出来的
+	// （2026-10-30 实测：6 个账号在同一次批处理里 09:49:07~18 各 +40，
+	// 说明是平台统一任务，不是按账号滚动）。上游没有"下次重置时间"字段，
+	// 所以网关只能给出"上次入账 +24h"这个可观测的推算值。
+	LastDailyAt int64 `json:"-"`
 }
 
 // CreditRecord 一笔积分流水。
@@ -59,7 +66,9 @@ type CreditHistory struct {
 // 请求成本很低（pageSize=1 只取余额字段），但仍然建议调用方做缓存 ——
 // 视频选号不该每次都打一次三方域名。
 func (c *Client) Credits(ctx context.Context, cred string) (*Credits, error) {
-	h, err := c.creditHistory(ctx, cred, 1)
+	// 取 10 条而不是 1 条：要顺带找出最近的「每日赠送」流水来推重置时刻。
+	// 响应体本来就小（一屏流水），多 9 条不构成负担。
+	h, err := c.creditHistory(ctx, cred, 10)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +151,26 @@ func (c *Client) creditHistory(ctx context.Context, cred string, pageSize int) (
 		return nil, NewErr(KindUnknown, "credits", resp.StatusCode, "",
 			"积分接口没有 data（响应形态可能变了）", false)
 	}
+	env.Data.LastDailyAt = deriveDailyAt(env.Data.UsageList)
 	return env.Data, nil
+}
+
+// deriveDailyAt 从流水里推最近一次「每日赠送」入账时刻（Unix 秒，0=没有）。
+//
+// 上游只给流水，不给"下次重置时间"，所以网关自己算：title 形如
+// `credits.init.title.daily`（2026-10-30 实测，6 个账号同批 09:49 各 +40）。
+// 抽成纯函数是为了能单测 —— 日期解析是最容易写错又最难从外部观察的地方。
+func deriveDailyAt(list []CreditRecord) int64 {
+	var best int64
+	for _, r := range list {
+		if r.Date <= 0 || !strings.Contains(strings.ToLower(r.Title), "daily") {
+			continue
+		}
+		if sec := r.Date / 1000; sec > best {
+			best = sec
+		}
+	}
+	return best
 }
 
 // AsiaTimezone 页面用的时区参数值。

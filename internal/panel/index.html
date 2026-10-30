@@ -447,7 +447,7 @@ button.xs { white-space:nowrap; }
         <header><h3>每号余量</h3><span class="hint">出图按本地每日限额；视频按真实余额 ÷ 单价；明细为余额最高的 100 个</span></header>
         <div class="tbl-wrap">
           <table>
-            <thead><tr><th>账号</th><th>今日出图</th><th class="num">剩余张数</th><th class="num">余额</th><th class="num">可做 720P 5s</th><th class="num">可做 1080P 15s</th></tr></thead>
+            <thead><tr><th>账号</th><th>今日出图</th><th class="num">剩余张数</th><th class="num">余额</th><th class="num">每日赠送</th><th class="num">可做 720P 5s</th><th class="num">可做 1080P 15s</th></tr></thead>
             <tbody id="capBody"></tbody>
           </table>
         </div>
@@ -990,10 +990,31 @@ async function renderCapacity() {
       </td>
       <td class="num">${left == null ? '不限' : left}</td>
       <td class="num">${bal == null ? '<span class="hint">未知</span>' : num(bal)}</td>
+      <td class="num" title="${dailyTitle(a)}">${dailyLabel(a)}</td>
       <td class="num">${v == null ? '-' : v}</td>
       <td class="num">${v15 == null ? '-' : v15}</td>
     </tr>`;
-  }).join('') || `<tr><td colspan="6" style="text-align:center;color:var(--ink-3);padding:26px">没有账号</td></tr>`;
+  }).join('') || `<tr><td colspan="7" style="text-align:center;color:var(--ink-3);padding:26px">没有账号</td></tr>`;
+}
+
+/* 每日赠送时间：上游没有"下次重置"字段，只能从积分流水里推最近一次入账，
+   再按 +24h 估算下一次（实测 6 个号在同一次批处理里 09:49 各 +40）。 */
+function fmtDay(d) {
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function dailyLabel(a) {
+  if (!a.credit_daily_at) return '<span class="hint">-</span>';
+  const d = new Date(a.credit_daily_at);
+  if (isNaN(d)) return '<span class="hint">-</span>';
+  return fmtDay(d);
+}
+function dailyTitle(a) {
+  if (!a.credit_daily_at) return '还没读到每日赠送流水（余额刷新后出现）';
+  const d = new Date(a.credit_daily_at);
+  if (isNaN(d)) return '';
+  const next = new Date(d.getTime() + 86400000);
+  return `上次入账 ${fmtDay(d)} · 预计下次 ${fmtDay(next)}（按 +24h 推算）`;
 }
 
 /* ═══════════════ 模型 ═══════════════ */
