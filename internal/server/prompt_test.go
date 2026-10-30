@@ -71,11 +71,16 @@ func TestFlattenAssistantTail(t *testing.T) {
 	}
 }
 
-func TestFlattenRejectsImage(t *testing.T) {
+func TestFlattenIgnoresImageParts(t *testing.T) {
+	// 图片走上游 files[]（file_class=vision），不参与文本拍平；
+	// 文本部分必须原样保留（直出路径不加包装）。
 	raw := json.RawMessage(`[{"type":"text","text":"看图"},{"type":"image_url","image_url":{"url":"https://x/y.png"}}]`)
-	_, err := Flatten([]ChatMessage{{Role: "user", Content: raw}})
-	if err == nil || !strings.Contains(err.Error(), "图片") {
-		t.Fatalf("图片必须明确拒绝，得到 %v", err)
+	res, err := Flatten([]ChatMessage{{Role: "user", Content: raw}})
+	if err != nil {
+		t.Fatalf("图片不该再被拒: %v", err)
+	}
+	if res.Prompt != "看图" {
+		t.Fatalf("文本被图片污染: %q", res.Prompt)
 	}
 }
 

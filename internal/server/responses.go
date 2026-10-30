@@ -227,11 +227,11 @@ func responsesToChat(req responsesRequest) ([]ChatMessage, error) {
 		if role == "" {
 			role = "user"
 		}
-		text, err := anthropicContentText(it.Content)
+		content, err := anthropicContentRaw(it.Content)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, ChatMessage{Role: role, Content: mustJSON(text)})
+		out = append(out, ChatMessage{Role: role, Content: content})
 	}
 	if len(out) == 0 {
 		return nil, errEmptyInput

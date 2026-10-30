@@ -6,12 +6,6 @@ import (
 	"strings"
 )
 
-// ErrImageUnsupported 图片输入：上游要它自己 OSS 的 file 对象（STS 上传链），
-// 外链 URL 会被拒 —— 未实现前必须明确 400，不能静默丢图让模型"看不见"。
-var ErrImageUnsupported = errors.New(
-	"图片输入暂不支持：上游要求先上传到 qwen 自有 OSS（STS 签名链），" +
-		"当前版本只受理纯文本；请先把图片转成文字描述，或等上传链落地（见 docs/UPSTREAM.md §5）")
-
 // errEmptyInput Responses 前门：input 为空。
 var errEmptyInput = errors.New("input 不能为空（支持字符串或 {role, content} 数组）")
 
@@ -44,9 +38,8 @@ func Flatten(msgs []ChatMessage) (FlattenResult, error) {
 	}
 	items := make([]item, 0, len(msgs))
 	for _, m := range msgs {
-		if m.HasImage() {
-			return FlattenResult{}, ErrImageUnsupported
-		}
+		// 图片不参与拍平：它走 collectImageRefs → 上游 files[]（file_class=vision），
+		// 文本只拼文字部分。
 		text, err := m.Text()
 		if err != nil {
 			return FlattenResult{}, err

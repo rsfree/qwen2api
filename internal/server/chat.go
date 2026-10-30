@@ -73,15 +73,31 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	flat, err := Flatten(req.Messages)
 	if err != nil {
-		code := http.StatusBadRequest
-		typ := "invalid_request_error"
-		if errors.Is(err, ErrImageUnsupported) {
-			typ = "unsupported_feature"
-		}
-		entry.Status = code
+		entry.Status = http.StatusBadRequest
 		entry.Error = err.Error()
 		s.log.Add(entry)
-		writeError(w, code, typ, err.Error())
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+
+	// 图片：content part 里的 image_url / input_image / image → 上游 files[]
+	// （file_class=vision，见 docs/UPSTREAM.md §4.7）。
+	// 引用三形态全收：URL / data URI / 裸 base64（与 /v1/images 的 image 字段同一条解链）。
+	// 🔴 这里只解析引用、不下载 —— 上传必须在选号之后（file 是账号维度资源）。
+	imgRefs, imgErr := collectImageRefs(req.Messages)
+	if imgErr != nil {
+		entry.Status = http.StatusBadRequest
+		entry.Error = imgErr.Error()
+		s.log.Add(entry)
+		writeErrorParam(w, http.StatusBadRequest, "invalid_request_error", imgErr.Error(), "image")
+		return
+	}
+	if len(imgRefs) > maxInputImages {
+		entry.Status = http.StatusBadRequest
+		entry.Error = "图片过多"
+		s.log.Add(entry)
+		writeErrorParam(w, http.StatusBadRequest, "invalid_request_error",
+			fmt.Sprintf("图片最多 %d 张（本次 %d 张）", maxInputImages, len(imgRefs)), "image")
 		return
 	}
 
@@ -119,6 +135,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 文件解析仍走 t2t（2026-10-28 实测：t2t + files[] 就能读文件内容）。
 	spec := upstream.TextSpec()
 	spec.Files = files
+	spec.ImageRefs = imgRefs
 	sd, err := s.openUpstreamSpec(r.Context(), model, gear, flat.Prompt, spec)
 	if err != nil {
 		entry.Status = httpStatusFor(err)
@@ -170,16 +187,12 @@ func (s *Server) openUpstreamSpec(ctx context.Context, model, gear, prompt strin
 		// 直接返回 503「没有可用账号」（2026-10-30 实测踩到）。
 		var err error
 		for retried := false; ; retried = true {
-			chatID, cerr := s.up.NewChatTyped(actx, cred, model, spec.ChatType)
-			if cerr == nil {
-				body := upstream.BuildSubmitSpec(chatID, "", model, prompt, gear, spec, time.Now())
-				var st *upstream.Stream
-				st, cerr = s.up.OpenChat(actx, cred, body)
-				if cerr == nil {
-					return &opened{acct: acct, stream: st, chatID: chatID}, nil
-				}
+			var o *opened
+			o, err = s.openOnce(actx, cred, model, gear, prompt, spec)
+			if err == nil {
+				o.acct = acct
+				return o, nil
 			}
-			err = cerr
 			// 只在"凭据失效 + 还没重试过 + 有密码或 refresh_token"时续期一次。
 			renewable := acct.Password != "" || s.pool.RefreshToken(acct.Name) != ""
 			if retried || upstream.KindOf(err) != upstream.KindAuth || !renewable {
@@ -202,6 +215,49 @@ func (s *Server) openUpstreamSpec(ctx context.Context, model, gear, prompt strin
 		lastErr = errNoAccount
 	}
 	return nil, lastErr
+}
+
+// openOnce 用指定账号跑一轮：上传图片（若有）→ 建会话 → 提交 → 开流。
+//
+// 🔴 图片上传必须在这里做，不能提到选号之前：file 条目是账号维度资源，
+// 用 A 号传的图让 B 号提交，上游会判"无权访问该文件"（且是静默的坏结果）。
+// 放在这里还有个附带好处：换号重试时会自动用新账号重传一遍。
+func (s *Server) openOnce(actx context.Context, cred, model, gear, prompt string,
+	spec upstream.ChatSpec) (*opened, error) {
+
+	attempt := spec
+	if len(spec.ImageRefs) > 0 {
+		files, err := s.uploadImageRefs(actx, cred, spec.ImageRefs)
+		if err != nil {
+			return nil, err
+		}
+		attempt.Files = mergeAttachments(spec.Files, files)
+	}
+
+	chatID, err := s.up.NewChatTyped(actx, cred, model, attempt.ChatType)
+	if err != nil {
+		return nil, err
+	}
+	body := upstream.BuildSubmitSpec(chatID, "", model, prompt, gear, attempt, time.Now())
+	st, err := s.up.OpenChat(actx, cred, body)
+	if err != nil {
+		return nil, err
+	}
+	return &opened{stream: st, chatID: chatID}, nil
+}
+
+// mergeAttachments 拼 files[]：已暂存的附件（/v1/files 的 file_id）在前，本轮图片在后。
+//
+// 顺序不是装饰：上游把 files[] 当"用户这一条消息带的附件"，先后会影响模型
+// 对"第几张图"的指代。附件身份（file-…）通常先被提及，所以排在前面。
+func mergeAttachments(stored, uploaded []upstream.FileRef) []upstream.FileRef {
+	if len(stored) == 0 {
+		return uploaded
+	}
+	merged := make([]upstream.FileRef, 0, len(stored)+len(uploaded))
+	merged = append(merged, stored...)
+	merged = append(merged, uploaded...)
+	return merged
 }
 
 // relogin 续期凭据：**优先用 refresh_token 换新 access**，失败才用密码重登。

@@ -150,6 +150,12 @@ type ChatSpec struct {
 	VideoMode   string // t2v：standard
 	// Files 附件（image_edit / 文件解析）。每张一项，必须来自 UploadAttachment。
 	Files []FileRef
+	// ImageRefs 待上传的图片引用（URL / data URI / 裸 base64）。
+	//
+	// 🔴 为什么不直接给 Files：file 条目是**账号维度**资源，上传与提交必须同一个号。
+	// 选号发生在 openUpstreamSpec 内部，所以这里只带引用，由那一层上传后并入 Files；
+	// 换号重试时会用新账号重传一遍（拿旧账号的条目去提交，上游判无权访问）。
+	ImageRefs []string
 }
 
 // TextSpec 文本对话。

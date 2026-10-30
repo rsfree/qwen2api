@@ -745,10 +745,20 @@ GET https://sg-entitlement.qwen.com/api/entitlement/credits/credits/history
 
 ---
 
-## 6. 附件（未实现）
+## 6. 附件（✅ 已实现：图片 / 文件共用一条上传链）
 
 上游 `files[]` 需要它自己 OSS 的 file 对象（`getstsToken` → V4 签名 PUT，签名 300s）。
-外链 URL 会被拒。本仓当前**只受理纯文本**，遇到图片返回明确 400（`docs/UPSTREAM.md` §6 即此条）。
+外链 URL 会被拒 ⇒ 网关先把字节传上去，再带条目提交。
+
+| 入口 | 落地方式 |
+|---|---|
+| `POST /v1/images/generations` 的 `image`（图生图） | `chat_type=image_edit` + `files[]` |
+| `POST /v1/files` → content 里引用 `file_id` | `t2t` + `files[]`（`file_class=document`） |
+| chat / messages / responses 的图片段 | `t2t` + `files[]`（`file_class=vision`） |
+
+chat 的图片段三种写法全收（`image_url` / `input_image` / Anthropic `image.source`），
+引用形态三收（URL / data URI / 裸 base64）。**上传与提交必须同一个账号**，
+所以上传放在选号之后（`openOnce`），换号重试自动重传。
 
 ---
 
@@ -768,7 +778,7 @@ GET https://sg-entitlement.qwen.com/api/entitlement/credits/credits/history
 - **非流式上游**（`stream:false`）：未测。本仓恒走流式、本地聚合，不依赖它。
 - **token 真实寿命**：`auths/refresh` 存在说明会过期，但具体时长未观测；本仓靠 401 被动失效 + 冷却兜底。
 - **多会话并发上限**：未测。
-- **附件上传链**：形态已知（STS 签名），未实现。
+- **附件上传链**：✅ 已实现（STS 签名 PUT），图生图 / 文件 / chat 图片三处共用。
 - **风控阈值**：未观测到 RGV587（本仓按 429 软冷却处理）。
 
 ---

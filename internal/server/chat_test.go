@@ -32,6 +32,8 @@ type fakeUpstream struct {
 	gotSubmit map[string]any
 	// submits 按顺序记录每一次 completions 请求体（n>1 会多次）。
 	submits []map[string]any
+	// gotSTS 记录 getstsToken 的请求体（图片/文件上传链的第一步）。
+	gotSTS []map[string]any
 }
 
 func newFakeUpstream(t *testing.T, failFirst int) *fakeUpstream {
@@ -47,6 +49,15 @@ func newFakeUpstream(t *testing.T, failFirst int) *fakeUpstream {
 			return
 		}
 		switch {
+		case strings.Contains(r.URL.Path, "/api/v2/files/getstsToken"):
+			// 上传链的第一步：这里返回 500，用来断言"图片确实进了上传链"。
+			// （第二步 OSS PUT 的 host 由 STS 决定，httptest 接管不了，见 imageinput_test.go）
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.gotSTS = append(f.gotSTS, body)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"success":false,"data":{"code":"InternalError","details":"test"}}`))
 		case strings.HasSuffix(r.URL.Path, "/api/v2/chats/new"):
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"success":true,"request_id":"r","data":{"id":"chat-1"}}`))
@@ -251,28 +262,6 @@ func TestMessagesStreamEvents(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("Anthropic 事件序列缺 %q:\n%s", want, out)
 		}
-	}
-}
-
-func TestImageUnsupported(t *testing.T) {
-	up := newFakeUpstream(t, 0)
-	h := newTestServer(t, up, 1, nil)
-
-	body := `{"model":"qwen3.7-plus","messages":[{"role":"user","content":[
-		{"type":"text","text":"看图"},{"type":"image_url","image_url":{"url":"https://x/y.png"}}]}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("图片应 400，得到 %d: %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "图片") {
-		t.Fatalf("错误信息应说明图片限制: %s", rec.Body.String())
-	}
-	// 且不该打到上游。
-	if up.calls != 0 {
-		t.Fatalf("图片请求不该触达上游，实际调用 %d 次", up.calls)
 	}
 }
 

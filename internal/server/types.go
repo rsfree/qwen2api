@@ -40,9 +40,27 @@ type ContentPart struct {
 	File   *struct {
 		FileID string `json:"file_id"`
 	} `json:"file"`
-	ImageURL *struct {
-		URL string `json:"url"`
-	} `json:"image_url"`
+	// ImageURL 图片引用，两种写法都收（OpenAI 生态里都出现过）：
+	//
+	//	"image_url": "https://…"            部分 SDK 直发字符串
+	//	"image_url": {"url": "https://…"}   OpenAI 官方形态
+	//
+	// 所以保留原始 JSON 由 imageRef 分流（写成 *struct{URL} 会吃掉前一种）。
+	ImageURL json.RawMessage `json:"image_url"`
+	// Source Anthropic 形态：{"type":"base64","media_type":"image/png","data":"…"}
+	// 也支持 {"type":"url","url":"https://…"}。
+	Source *ImageSource `json:"source"`
+	// Data / MediaType 少数客户端把 base64 平铺在 part 上（不带 image_url / source）。
+	Data      string `json:"data"`
+	MediaType string `json:"media_type"`
+}
+
+// ImageSource Anthropic 图片源。
+type ImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
+	URL       string `json:"url"`
 }
 
 // parts 解析 content 为分段数组（content 是纯字符串时返回 nil）。
@@ -63,9 +81,9 @@ func (m ChatMessage) parts() []ContentPart {
 
 // Text 提取消息文本。
 //
-// file/input_file 段在这里**被忽略**（它们由 collectFiles 单独走上传条目），
-// 图片段仍然返回明确错误 —— 但注意：`/v1/images` 之外的入口用 image_url 时，
-// 本仓会明确拒绝（见 ErrImageUnsupported），不做静默丢弃。
+// file/input_file 段在这里**被忽略**（它们由 collectFiles 单独走上传条目）；
+// 图片段也跳过 —— 图片走 collectImageRefs → 上游 files[]（file_class=vision），
+// 不参与文本拼接。
 func (m ChatMessage) Text() (string, error) {
 	if len(m.Content) == 0 {
 		return "", nil
@@ -86,7 +104,7 @@ func (m ChatMessage) Text() (string, error) {
 		case "file", "input_file":
 			// 由 collectFiles 处理，不参与文本。
 		case "image_url", "input_image", "image":
-			return "", ErrImageUnsupported
+			// 由 collectImageRefs 处理，不参与文本。
 		default:
 			// 未知段类型忽略。
 		}
@@ -97,12 +115,120 @@ func (m ChatMessage) Text() (string, error) {
 // HasImage 消息里是否带图片段。
 func (m ChatMessage) HasImage() bool {
 	for _, p := range m.parts() {
-		switch p.Type {
-		case "image_url", "input_image", "image":
+		if p.isImagePart() {
 			return true
 		}
 	}
 	return false
+}
+
+// ---------- 图片引用 ----------
+
+// 图片段的三个类型名：OpenAI chat（image_url）、OpenAI Responses（input_image）、
+// Anthropic / 部分 SDK（image）。
+func (p ContentPart) isImagePart() bool {
+	switch p.Type {
+	case "image_url", "input_image", "image":
+		return true
+	}
+	return false
+}
+
+// imageRef 取该段指向的图片引用（URL / data URI / 裸 base64 三种形态都放行）。
+//
+// 三条来源按优先级（同一段只应出现一条）：
+//  1. `image_url`：字符串 或 {"url":…} —— OpenAI chat / Responses
+//  2. `source`：Anthropic 形态（base64 + media_type，或 url）
+//  3. 平铺的 `data`：少数 SDK 把 base64 直接放 part 上
+//
+// 🔴 这里**只做形态归一，不下载不解码** —— 三种形态的解码在 resolveImageRef，
+// 与 /v1/images 的 `image` 字段共用同一条链（image-adapter 的既定契约）。
+// 也正因为共用，裸 base64 不必在这里猜 mime：下游按魔数嗅探。
+func (p ContentPart) imageRef() (string, error) {
+	if raw := strings.TrimSpace(string(p.ImageURL)); raw != "" && raw != "null" {
+		var s string
+		if err := json.Unmarshal(p.ImageURL, &s); err == nil {
+			if v := strings.TrimSpace(s); v != "" {
+				return v, nil
+			}
+			return "", fmt.Errorf("%s.image_url 是空字符串", p.Type)
+		}
+		var obj struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(p.ImageURL, &obj); err != nil {
+			return "", fmt.Errorf("%s.image_url 既不是字符串也不是 {\"url\":…}", p.Type)
+		}
+		if v := strings.TrimSpace(obj.URL); v != "" {
+			return v, nil
+		}
+		return "", fmt.Errorf("%s.image_url.url 为空", p.Type)
+	}
+
+	if p.Source != nil {
+		switch strings.ToLower(strings.TrimSpace(p.Source.Type)) {
+		case "base64":
+			data := strings.TrimSpace(p.Source.Data)
+			if data == "" {
+				return "", fmt.Errorf("%s.source.data 为空", p.Type)
+			}
+			// 少数客户端把完整 data URI 塞进 data；原样放行。
+			if strings.HasPrefix(data, "data:") {
+				return data, nil
+			}
+			mime := strings.TrimSpace(p.Source.MediaType)
+			if mime == "" {
+				mime = "image/png"
+			}
+			return "data:" + mime + ";base64," + data, nil
+		case "url":
+			if v := strings.TrimSpace(p.Source.URL); v != "" {
+				return v, nil
+			}
+			return "", fmt.Errorf("%s.source.url 为空", p.Type)
+		default:
+			return "", fmt.Errorf("%s.source.type=%q 不支持（只认 base64 / url）",
+				p.Type, p.Source.Type)
+		}
+	}
+
+	if d := strings.TrimSpace(p.Data); d != "" {
+		// data URI / URL 直通；裸 base64 也直通（mime 由下游魔数嗅探）。
+		return d, nil
+	}
+	return "", fmt.Errorf("%s 段缺少图片引用（需要 image_url / source / data 之一）", p.Type)
+}
+
+// imageRefs 取本条消息里的全部图片引用（按出现顺序）。
+func (m ChatMessage) imageRefs() ([]string, error) {
+	var out []string
+	for i, p := range m.parts() {
+		if !p.isImagePart() {
+			continue
+		}
+		ref, err := p.imageRef()
+		if err != nil {
+			return nil, fmt.Errorf("第 %d 个 content part: %w", i+1, err)
+		}
+		out = append(out, ref)
+	}
+	return out, nil
+}
+
+// collectImageRefs 收集整轮 messages 的图片引用。
+//
+// 🔴 任何一段解析失败都返回错误 —— 绝不能"跳过这张图继续聊"：
+// 那会让模型看不见图却照常作答，调用方以为多模态生效了。
+func collectImageRefs(msgs []ChatMessage) ([]string, error) {
+	var out []string
+	for i, m := range msgs {
+		refs, err := m.imageRefs()
+		if err != nil {
+			return nil, fmt.Errorf("messages[%d]（role=%s）: %w", i, m.Role, err)
+		}
+		out = append(out, refs...)
+	}
+	return out, nil
 }
 
 // ResolveThinking 把请求里的思考意图归一成 auto/thinking/fast。

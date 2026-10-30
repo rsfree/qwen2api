@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -243,11 +244,11 @@ func anthropicToChat(req anthropicRequest) ([]ChatMessage, error) {
 		out = append(out, ChatMessage{Role: "system", Content: mustJSON(sys)})
 	}
 	for _, m := range req.Messages {
-		text, err := anthropicContentText(m.Content)
+		content, err := anthropicContentRaw(m.Content)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, ChatMessage{Role: m.Role, Content: mustJSON(text)})
+		out = append(out, ChatMessage{Role: m.Role, Content: content})
 	}
 	return out, nil
 }
@@ -285,18 +286,63 @@ func anthropicContentText(raw json.RawMessage) (string, error) {
 		Text string `json:"text"`
 	}
 	if err := json.Unmarshal(raw, &parts); err != nil {
-		return "", errImageOrContentErr
+		return "", errContentShape
 	}
 	var sb strings.Builder
 	for _, p := range parts {
 		switch p.Type {
-		case "text":
+		case "text", "input_text":
 			sb.WriteString(p.Text)
-		case "image":
-			return "", ErrImageUnsupported
+		case "image", "image_url", "input_image":
+			// 图片不参与文本（只用于 token 估算）；真正的多模态走 anthropicContentRaw。
 		}
 	}
 	return sb.String(), nil
+}
+
+// errContentShape content 既不是字符串也不是分段数组。
+var errContentShape = errors.New("content 形态不支持（既不是字符串也不是分段数组）")
+
+// errDocumentUnsupported Anthropic document 块。
+var errDocumentUnsupported = errors.New(
+	"document 块暂不支持：上游要它自己 OSS 的附件条目 —— " +
+		"请先用 /v1/files 上传，再在 content 里引用 file_id")
+
+// anthropicContentRaw 把 Anthropic / Responses 的 content 归一成内部形态。
+//
+//   - 字符串 ⇒ 原样（转成 JSON 字符串）
+//   - 分段数组 ⇒ 过滤：文本与图片保留（图片交给 collectImageRefs → 上游 files[]），
+//     工具/文档块明确 400（静默丢块会让客户端以为工具跑过了）
+func anthropicContentRaw(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		return mustJSON(""), nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return mustJSON(s), nil
+	}
+	var parts []json.RawMessage
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return nil, errContentShape
+	}
+	keep := make([]json.RawMessage, 0, len(parts))
+	for _, p := range parts {
+		var head struct {
+			Type string `json:"type"`
+		}
+		_ = json.Unmarshal(p, &head)
+		switch head.Type {
+		case "text", "input_text", "image", "image_url", "input_image":
+			keep = append(keep, p)
+		case "tool_use", "tool_result":
+			return nil, errToolsUnsupported
+		case "document":
+			return nil, errDocumentUnsupported
+		default:
+			// 未知块类型忽略（与 chat 门同口径）。
+		}
+	}
+	return json.Marshal(keep)
 }
 
 func mustJSON(s string) json.RawMessage {
@@ -304,4 +350,3 @@ func mustJSON(s string) json.RawMessage {
 	return raw
 }
 
-var errImageOrContentErr = ErrImageUnsupported

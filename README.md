@@ -37,6 +37,7 @@
 | 💭 **真思考透出** | 上游「深度思考」的分步摘要经 diff 后走 `reasoning_content`，不是编的；`usage.output_tokens_details.reasoning_tokens` 一并透传 |
 | ⚡ **流式 + 非流式** | 出站恒 `stream:true`，非流式由本地聚合（只有一条上游分支，行为可预测）；`stream_options.include_usage` 支持 |
 | 🤝 **三协议前门** | `POST /v1/chat/completions`（OpenAI）· `POST /v1/messages`（Anthropic Messages，Claude Code 可接）· `POST /v1/responses`（Responses 形态） |
+| 🖼️ **图片输入（多模态）** | chat 的 content 段支持图片：URL / data URI / 裸 base64，`image_url` / `input_image` / Anthropic `image` 三种写法全收；走 `getstsToken` → OSS 上传 → `files[]`（`file_class=vision`），上传与提交**同账号** |
 | 🎨 **图片生成/编辑** | `POST /v1/images/generations`（文生图 + **图生图**）与 `POST /v1/images/edits`（multipart 前门）。字段集对齐 image-adapter 规范；`image` 支持 URL / data URI / 裸 base64，**参考图自动走 `getstsToken` → OSS V4 签名 PUT 上传** |
 | 🎬 **视频生成** | `POST /v1/videos/generations` 提交异步任务 + `GET /v1/videos/{id}` 轮询成片。支持 720P/1080P、5/10/15 秒、画幅与音轨开关 |
 | 🖼️ **媒体产物** | 图片返回带签名的 CDN 直链（`cdn.qwenlm.ai`），可选 `b64_json` 内联；视频返回 `tsk_` 任务的产物 URL |
@@ -140,6 +141,36 @@ curl -N localhost:8400/v1/chat/completions \
 
 响应里 `choices[0].message.reasoning_content`（非流式）或 `delta.reasoning_content`（流式）
 就是网页端的「深度思考」摘要。
+
+#### 图片输入（多模态）
+
+`content` 里放图片段即可，三种写法都收：
+
+```bash
+curl -s localhost:8400/v1/chat/completions \
+  -H 'Authorization: Bearer <key>' -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3.7-plus","messages":[{"role":"user","content":[
+      {"type":"text","text":"这张图是什么颜色？只回答颜色名"},
+      {"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo…"}}]}]}'
+```
+
+| 写法 | 形态 | 出处 |
+|---|---|---|
+| `{"type":"image_url","image_url":{"url":"…"}}` | 官方 OpenAI chat；`image_url` 直接是字符串也收 | chat |
+| `{"type":"input_image","image_url":"…"}` | Responses 形态 | `/v1/responses` |
+| `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"…"}}` | Anthropic；`source.type=url` 亦可 | `/v1/messages` |
+
+引用内容三条都收：**URL / data URI / 裸 base64**（与 `/v1/images` 的 `image` 字段同一条解链；
+裸 base64 按魔数嗅探，不信声明）。单次最多 20 张，超了 400 并指向 `param=image`。
+
+上游链路：`POST /api/v2/files/getstsToken` → OSS V4 签名 PUT → `messages[0].files[]`
+（`file_type=image` / `showType=image` / `file_class=vision`），`chat_type` 仍是 **`t2t`**。
+
+> 🔴 **上传与提交必须同一个账号**：file 是账号维度资源，A 号传的图让 B 号提交会被判
+> 无权访问（且是静默的）。所以上传发生在**选号之后**（`openOnce`），换号重试会自动重传。
+>
+> 🔴 任何一段图片引用解析失败都 **400**，绝不"跳过这张图继续聊"——
+> 那会让模型看不见图却照常作答，调用方以为多模态生效了。
 
 ### `POST /v1/images/generations`
 
