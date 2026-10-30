@@ -25,8 +25,6 @@ const (
 	keepAliveTick = 20 * time.Second
 	// keepAliveWindow 剩余寿命小于它就提前换新（要大于 tick 才不会"过期了才换"）。
 	keepAliveWindow = 3 * time.Minute
-	// keepAliveBatch 单轮最多换几个 —— 别把上游打热。
-	keepAliveBatch = 8
 	// keepAliveParallel 单个批次内的并发。
 	keepAliveParallel = 4
 	// keepAliveAdoptBatch 单轮最多补几个"还没 refresh_token"的号。
@@ -152,12 +150,34 @@ func (s *Server) adoptOne(ctx context.Context, name string) bool {
 	return true
 }
 
+// warmBatch 每轮预热多少个 —— 跟着目标数一起缩放。
+//
+// 🔴 为什么要动态（2026-10-30）：目标数按流量估算（8~256），但批量原来是常量 8，
+// 于是一旦并发突然上来（压测、批量导入后、上游恢复瞬间），热满 256 个要
+// 256/8×20s ≈ 10 分钟 —— 这期间请求全在撞过期号，每个多几百毫秒续期。
+//
+// 取 1/8 让"热满耗时"稳定在约 8 轮（≈2.7 分钟），与目标规模无关；
+// 下限 4 保证低流量时不至于太慢，上限 48 避免一轮把上游打太热。
+func warmBatch(target int) int {
+	b := target / 8
+	if b < 4 {
+		b = 4
+	}
+	if b > 48 {
+		b = 48
+	}
+	return b
+}
+
 // warmOnce 跑一轮预热。
 func (s *Server) warmOnce(ctx context.Context) bool {
-	names := s.pool.WarmCandidates(s.warmTarget(), keepAliveWindow, keepAliveBatch)
+	target := s.warmTarget()
+	batch := warmBatch(target)
+	names := s.pool.WarmCandidates(target, keepAliveWindow, batch)
 	if len(names) == 0 {
 		return false
 	}
+	s.noteWarm(target, batch, len(names))
 	sem := make(chan struct{}, keepAliveParallel)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -177,6 +197,30 @@ func (s *Server) warmOnce(ctx context.Context) bool {
 	}
 	wg.Wait()
 	return changed
+}
+
+// noteWarm 记录最近一轮预热的参数（/stats 与面板观测用）。
+func (s *Server) noteWarm(target, batch, actual int) {
+	s.warmMu.Lock()
+	defer s.warmMu.Unlock()
+	s.warmStat = WarmStat{
+		Target: target, Batch: batch, Actual: actual, At: time.Now(),
+	}
+}
+
+// WarmStat 最近一轮预热的参数快照。
+type WarmStat struct {
+	Target int       `json:"target"` // 估算需要保持可用的账号数
+	Batch  int       `json:"batch"`  // 本轮取了几个候选
+	Actual int       `json:"actual"` // 实际取到的（候选不足时会小于 batch）
+	At     time.Time `json:"at"`
+}
+
+// WarmSnapshot 最近一轮预热参数。
+func (s *Server) WarmSnapshot() WarmStat {
+	s.warmMu.Lock()
+	defer s.warmMu.Unlock()
+	return s.warmStat
 }
 
 // warmTarget 估算"要随时保持可用的账号数"。
@@ -199,8 +243,12 @@ func (s *Server) warmTarget() int {
 	if target < 8 {
 		target = 8
 	}
-	if target > 256 {
-		target = 256
+	// 上限不是拍脑袋：热满时间必须 < access TTL，否则刚热完就开始过期。
+	// 每轮 warmBatch(512)=48 个、20s 一轮 ⇒ 144/分钟 ⇒ 512 个约 3.6 分钟热满，
+	// 离 15 分钟的 TTL 还有 11 分钟余量；再往上（1024+）热满要 7~15 分钟，
+	// 边际收益趋零且会把 auth 域打热。
+	if target > 512 {
+		target = 512
 	}
 	return target
 }

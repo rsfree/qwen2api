@@ -55,6 +55,9 @@ type Server struct {
 	keysInit    bool
 	// runLog 运行日志环形缓冲（stdout/stderr 镜像），面板「日志」页读它。
 	runLog *runlog.Buffer
+	// warmMu / warmStat 最近一轮保活预热的参数（target/batch/actual）。
+	warmMu   sync.Mutex
+	warmStat WarmStat
 }
 
 // New 构造前门。
@@ -241,6 +244,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"pool":     s.pool.Snapshot(),
 		"stats":    s.log.Stats(),
 		"models":   s.models.Info(),
+		// keepalive：最近的预热参数 + 当前新鲜凭据数，用来判断"预热跟不跟得上并发"。
+		"keepalive": map[string]any{
+			"warm":        s.WarmSnapshot(),
+			"token_fresh": s.pool.TokenFreshCount(),
+		},
 	})
 }
 

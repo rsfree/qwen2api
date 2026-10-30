@@ -940,3 +940,19 @@ func (p *Pool) restore() {
 		}
 	}
 }
+
+// TokenFreshCount 当前 access token 还没过期的账号数。
+//
+// 保活的自检口径：这个数长期低于 {target} 就说明预热跟不上（batch 太小或
+// tick 太慢），此时请求会撞过期号、每次多几百毫秒续期。
+func (p *Pool) TokenFreshCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, a := range p.accounts {
+		if !a.tokenExp.IsZero() && time.Until(a.tokenExp) > 0 {
+			n++
+		}
+	}
+	return n
+}
