@@ -287,7 +287,7 @@ func TestCollectFilesResolvesStoredEntry(t *testing.T) {
 		{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"读一下"},
 			{"type":"file","file":{"file_id":"file-abc"}}]`)},
 	}
-	files, err := s.collectFiles(msgs)
+	files, _, err := s.collectFiles(msgs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestCollectFilesResolvesStoredEntry(t *testing.T) {
 	}
 
 	// 未知 id 必须报错（而不是静默当成"没附件"）。
-	if _, err := s.collectFiles([]ChatMessage{{Role: "user",
+	if _, _, err := s.collectFiles([]ChatMessage{{Role: "user",
 		Content: json.RawMessage(`[{"type":"file","file":{"file_id":"nope"}}]`)}}); err == nil {
 		t.Fatal("未知 file_id 应报错")
 	}

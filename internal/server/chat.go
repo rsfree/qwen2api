@@ -102,13 +102,20 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 附件：content part 里的 file_id → 上游 files[] 条目（账号绑定的暂存）。
-	files, filesErr := s.collectFiles(req.Messages)
+	// 纯文本附件走另一条：内容直接拼进 prompt（见 appendTextAttachments）。
+	files, textFiles, filesErr := s.collectFiles(req.Messages)
 	if filesErr != nil {
 		entry.Status = http.StatusBadRequest
 		entry.Error = filesErr.Error()
 		s.log.Add(entry)
 		writeErrorParam(w, http.StatusBadRequest, "invalid_request_error", filesErr.Error(), "file_id")
 		return
+	}
+	prompt := flat.Prompt
+	if len(textFiles) > 0 {
+		prompt = appendTextAttachments(prompt, textFiles)
+		flat.Degraded = joinDegraded(flat.Degraded,
+			fmt.Sprintf("%d 个文本附件已内联进 prompt", len(textFiles)))
 	}
 
 	model := strings.TrimSpace(req.Model)
@@ -136,7 +143,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	spec := upstream.TextSpec()
 	spec.Files = files
 	spec.ImageRefs = imgRefs
-	sd, err := s.openUpstreamSpec(r.Context(), s.blobBase(r), model, gear, flat.Prompt, spec)
+	sd, err := s.openUpstreamSpec(r.Context(), s.blobBase(r), model, gear, prompt, spec)
 	if err != nil {
 		entry.Status = httpStatusFor(err)
 		entry.Error = err.Error()

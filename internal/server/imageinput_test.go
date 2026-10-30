@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -443,5 +445,82 @@ func TestImageEditDataURIBecomesBlobURL(t *testing.T) {
 	h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, u.Path, nil))
 	if rec2.Code != 200 {
 		t.Fatalf("blob 取图失败: %d", rec2.Code)
+	}
+}
+
+// ---------- 纯文本附件：内联进 prompt（不碰 getstsToken） ----------
+
+func TestTextFileInlinedIntoPrompt(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	cfg := config.Default()
+	cfg.Upstream.BaseURL = up.srv.URL
+	cfg.StateFile = ""
+	cfg.Accounts = []config.Account{{Name: "a0", Token: "tok-0"}}
+	p := pool.New(cfg.Pool, cfg.Accounts, "")
+	s := New(cfg, p, upstream.New(cfg.Upstream), reqlog.New(10), "test")
+	h := s.Handler()
+
+	// 1) 上传一个 txt（multipart）
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("file", "note.txt")
+	_, _ = fw.Write([]byte("紫色大象 42\n第二行"))
+	_ = mw.WriteField("purpose", "assistants")
+	_ = mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/files", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("文本上传应 200（不走 OSS），得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	var obj FileObject
+	if err := json.Unmarshal(rec.Body.Bytes(), &obj); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if obj.Mode != "text" {
+		t.Fatalf("文本附件应标记 mode=text: %+v", obj)
+	}
+	if len(up.gotSTS) != 0 {
+		t.Fatalf("文本附件不该调 getstsToken: %+v", up.gotSTS)
+	}
+
+	// 2) 提问时内容要拼进 prompt
+	body := `{"model":"qwen3.7-plus","messages":[{"role":"user","content":[
+		{"type":"text","text":"这个文件里写了什么关键词？"},
+		{"type":"file","file":{"file_id":"` + obj.ID + `"}}]}]}`
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	if rec2.Code != 200 {
+		t.Fatalf("提问应成功，得到 %d: %s", rec2.Code, rec2.Body.String())
+	}
+	msg := up.gotSubmit["messages"].([]any)[0].(map[string]any)
+	content, _ := msg["content"].(string)
+	if !strings.Contains(content, "紫色大象 42") {
+		t.Fatalf("文件内容未内联进 prompt: %q", content)
+	}
+	if !strings.Contains(content, "这个文件里写了什么关键词") {
+		t.Fatalf("原问题丢了: %q", content)
+	}
+	// 文本附件不进 files[]
+	if len(submitFiles(t, up.gotSubmit)) != 0 {
+		t.Fatalf("文本附件不该进 files[]")
+	}
+}
+
+// 二进制（图片当 file 传）仍走 OSS 分支，不会当文本内联。
+func TestBinaryFileStillUsesOSS(t *testing.T) {
+	if isTextFile("a.png", "image/png", []byte{0x89, 'P', 'N', 'G', 0, 1, 2, 3}) {
+		t.Fatal("PNG 不该被判成文本")
+	}
+	if isTextFile("a.txt", "text/plain", []byte{0xff, 0xfe, 0x00}) {
+		t.Fatal("非法 UTF-8 不该内联")
+	}
+	if !isTextFile("a.md", "application/octet-stream", []byte("# 标题")) {
+		t.Fatal("按后缀应识别为文本")
+	}
+	if !isTextFile("x.json", "application/json", []byte(`{"a":1}`)) {
+		t.Fatal("json 应识别为文本")
 	}
 }
