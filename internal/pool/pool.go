@@ -20,13 +20,6 @@ import (
 	"github.com/yuanjie-ai/qwen2api/internal/config"
 )
 
-// tokenFresh 凭据的"新鲜期"。
-//
-// 上游 signin 签发的 bearer 会过期（实测 3128 个号批量登录后 20~30 分钟内
-// 陆续失效），所以选号优先挑这个时间窗内的号。它只是**调度启发式**：
-// 猜大了不致命 —— 真过期时请求会 401，路由层自动重登后重试。
-const tokenFresh = 20 * time.Minute
-
 // Account 单个账号的运行时状态。
 type Account struct {
 	Name  string
@@ -38,12 +31,12 @@ type Account struct {
 
 	// authMode 探测到的凭据形态（cookie / bearer）；空 = 尚未探测。
 	authMode string
-	// tokenAt 当前凭据的签发时间（SetToken 时记录）。
-	//
-	// 用途：选号优先挑"凭据还新鲜"的号。3000+ 账号时按 LRU 轮转会让**每个**
-	// 请求都碰到一个冷号（每次都要重登一次，+3s 且多一次 WAF 暴露面），
-	// 而热池大小应当随流量自动伸缩 —— 冷号只在实际需要时才登录。
-	tokenAt time.Time
+	// RefreshToken 上游下发的 refresh_token（**可重复使用**）。
+	// 有它就能在 access 过期时"秒换"新凭据，不必用密码重新登录。
+	RefreshToken string
+	// tokenExp 当前 access token 的过期时刻（从 JWT 的 exp 解出）。
+	// 零值 = 未知（配置里手写的长期凭据）—— 不参与"快过期"判断。
+	tokenExp time.Time
 
 	inflight int32
 	// imageDay / imageCount 是"本地每日出图配额"：跨天自动清零。
@@ -94,6 +87,12 @@ type View struct {
 	// （此时不做余额拦截，靠上游 insufficient_quota 兜底）。
 	CreditBalance int  `json:"credit_balance"`
 	CreditKnown   bool `json:"credit_known"`
+	// TokenLeftS 当前 access token 还剩多少秒；TokenKnown=false 时无意义。
+	// 面板靠它一眼看出"保活有没有在跑"：整池都不 known 说明还没开始续期。
+	TokenLeftS int  `json:"token_left_s"`
+	TokenKnown bool `json:"token_known"`
+	// HasRefresh 是否已经拿到 refresh_token（没有就只能用密码重登）。
+	HasRefresh bool `json:"has_refresh"`
 }
 
 // Pool 账号池（并发安全）。
@@ -109,13 +108,20 @@ type Pool struct {
 func New(cfg config.Pool, accounts []config.Account, stateFile string) *Pool {
 	p := &Pool{cfg: cfg, state: stateFile}
 	for _, a := range accounts {
-		p.accounts = append(p.accounts, &Account{
-			Name:     a.Name,
-			Token:    a.Token,
-			Email:    a.Email,
-			Password: a.Password,
-			Note:     a.Note,
-		})
+		acc := &Account{
+			Name:         a.Name,
+			Token:        a.Token,
+			Email:        a.Email,
+			Password:     a.Password,
+			RefreshToken: a.RefreshToken,
+			Note:         a.Note,
+		}
+		// 启动时就从 JWT 解出过期时刻：之后预热/调度都靠它判断，
+		// 不需要"先跑一次请求才知道这张票还能不能用"。
+		if exp, ok := expireOf(a.Token); ok {
+			acc.tokenExp = exp
+		}
+		p.accounts = append(p.accounts, acc)
 	}
 	p.restore()
 	return p
@@ -216,7 +222,7 @@ func (p *Pool) pick(need pickKind) (*Account, bool) {
 	defer p.mu.Unlock()
 
 	now := time.Now()
-	var candidates, fresh []*Account
+	var candidates []*Account
 	for _, a := range p.accounts {
 		if a.authDead {
 			continue
@@ -241,22 +247,20 @@ func (p *Pool) pick(need pickKind) (*Account, bool) {
 		}
 		_ = need
 		candidates = append(candidates, a)
-		// tokenAt 为零 = 年龄未知（重启后从文件加载的旧凭据）。
-		// 🔴 不把"未知"当成"新鲜"：否则重启后 3000 个号全都算热号，
-		// 按 LRU 又会把每个冷号轮流碰一遍（每个请求重登一次）。
-		// 未知的号先用一轮、成功后由 MarkOK 标成热号。
-		if !a.tokenAt.IsZero() && now.Sub(a.tokenAt) < tokenFresh {
-			fresh = append(fresh, a)
-		}
 	}
 	if len(candidates) == 0 {
 		return nil, false
 	}
-	// 有热号就只在热号里轮转；一个热号都没有才动冷号（并因此触发一次重登）。
-	if len(fresh) > 0 {
-		candidates = fresh
-	}
+	// 均匀轮询：**用得最少的先上**，其次谁在途最少，最后用"最久没用"兜底。
+	//
+	// 🔴 不能只看 lastUsed：3000 个账号按"最久没用"排，等价于每个请求都换一个
+	// 新号（每个新号都要先续期）；按 served 排序能把负载在整池摊平，同时让
+	// "接下来要用的一批"变得可预测 —— 后台预热就是照这个顺序做的。
 	sort.SliceStable(candidates, func(i, j int) bool {
+		si, sj := candidates[i].served, candidates[j].served
+		if si != sj {
+			return si < sj
+		}
 		ci, cj := atomic.LoadInt32(&candidates[i].inflight), atomic.LoadInt32(&candidates[j].inflight)
 		if ci != cj {
 			return ci < cj
@@ -581,11 +585,6 @@ func (p *Pool) MarkOK(a *Account) {
 	a.failures = 0
 	a.lastError = ""
 	a.served++
-	// 这次请求用这张凭据成功了 ⇒ 它此刻有效，记进"热池"。
-	// 冷号被用到时靠这一步转热，热池大小因此随流量自然增长。
-	if a.Token != "" {
-		a.tokenAt = time.Now()
-	}
 	p.mu.Unlock()
 }
 
@@ -647,7 +646,11 @@ func (p *Pool) SetToken(name, cred string) bool {
 	for _, a := range p.accounts {
 		if a.Name == name {
 			a.Token = cred
-			a.tokenAt = time.Now()
+			if exp, ok := expireOf(cred); ok {
+				a.tokenExp = exp
+			} else {
+				a.tokenExp = time.Time{}
+			}
 			a.authMode = ""
 			a.authDead = false
 			a.failures = 0
@@ -752,6 +755,11 @@ func (p *Pool) Snapshot() []View {
 			CreditsLimit:  p.cfg.MaxVideoCreditsPerDay,
 			CreditBalance: a.creditBalance,
 			CreditKnown:   a.creditKnown,
+			HasRefresh:    a.RefreshToken != "",
+		}
+		if !a.tokenExp.IsZero() {
+			v.TokenKnown = true
+			v.TokenLeftS = int(time.Until(a.tokenExp).Seconds())
 		}
 		switch {
 		case a.authDead:

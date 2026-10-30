@@ -7,10 +7,18 @@ package pool
 // 所以增删只改内存 + 落 state/config，不重启进程。
 
 import (
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/yuanjie-ai/qwen2api/internal/config"
+	"github.com/yuanjie-ai/qwen2api/internal/upstream"
 )
+
+// expireOf 从凭据的 JWT exp 解出过期时刻。解不出（非 JWT）返回 ok=false。
+func expireOf(cred string) (time.Time, bool) {
+	return upstream.TokenExpiry(cred)
+}
 
 // AddResult 一次导入的单条结果（直接给面板回显，字段名即 JSON）。
 type AddResult struct {
@@ -95,4 +103,94 @@ func (p *Pool) Has(name string) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.lookupLocked(name) != nil
+}
+
+// ---------- 凭据续期（refresh_token） ----------
+
+// SetRefresh 记录 refresh_token（可重复使用，用于换新的 access token）。
+// 传空串表示清掉。
+func (p *Pool) SetRefresh(name, refreshToken string) bool {
+	p.mu.Lock()
+	a := p.lookupLocked(name)
+	if a == nil {
+		p.mu.Unlock()
+		return false
+	}
+	a.RefreshToken = strings.TrimSpace(refreshToken)
+	p.mu.Unlock()
+	p.save()
+	return true
+}
+
+// RefreshToken 取账号的 refresh_token（没有则空串）。
+func (p *Pool) RefreshToken(name string) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if a := p.lookupLocked(name); a != nil {
+		return a.RefreshToken
+	}
+	return ""
+}
+
+// TokenExpiry 取当前 access token 的过期时刻（零值/false = 未知）。
+func (p *Pool) TokenExpiry(name string) (time.Time, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	a := p.lookupLocked(name)
+	if a == nil || a.tokenExp.IsZero() {
+		return time.Time{}, false
+	}
+	return a.tokenExp, true
+}
+
+// WarmCandidates 返回"接下来会被用到、且凭据快过期"的账号名。
+//
+// 为什么要按 served 排序：选号也是按 served 升序取的，所以这里取前 target 个
+// 正好就是**下一步要用的那批**。提前把它们的 token 换新，请求路径上就不用
+// 停下来等 refresh（这就是"预热预取、不影响性能"）。
+//
+// target 由调用方按当前流量估算；window 是"多快过期算快过期"；
+// limit 是单轮上限（防止一次刷太多把上游打热）。
+func (p *Pool) WarmCandidates(target int, window time.Duration, limit int) []string {
+	if target <= 0 || limit <= 0 {
+		return nil
+	}
+	type row struct {
+		name   string
+		served int64
+		exp    time.Time
+	}
+	p.mu.RLock()
+	rows := make([]row, 0, len(p.accounts))
+	for _, a := range p.accounts {
+		if a.authDead || a.RefreshToken == "" {
+			continue
+		}
+		rows = append(rows, row{name: a.Name, served: a.served, exp: a.tokenExp})
+	}
+	p.mu.RUnlock()
+
+	// 与选号同序：用得最少的排前面。
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].served != rows[j].served {
+			return rows[i].served < rows[j].served
+		}
+		return rows[i].name < rows[j].name
+	})
+	if target > len(rows) {
+		target = len(rows)
+	}
+	now := time.Now()
+	out := make([]string, 0, limit)
+	for _, r := range rows[:target] {
+		// exp 为零 = 未知（配置里手写的长期凭据），不去动它。
+		if r.exp.IsZero() || now.Before(r.exp.Add(-window)) {
+			continue
+		}
+		out = append(out, r.name)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }

@@ -99,6 +99,12 @@ func main() {
 	srv := server.New(cfg, pool, up, reqLog, version)
 	srv.SetPanel(panel.New(srv))
 
+	// 账号保活：后台提前把"接下来要用的那批"凭据换新（access 只有 15 分钟）。
+	// 单独起 goroutine：它不该影响启动，也不该拖慢任何请求。
+	kaCtx, kaCancel := context.WithCancel(context.Background())
+	defer kaCancel()
+	go srv.KeepAlive(kaCtx)
+
 	httpSrv := &http.Server{
 		Addr:    cfg.Listen,
 		Handler: srv.Handler(),

@@ -100,6 +100,12 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.b.RefreshCredits(r.Context(), true)
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		})
+	case r.URL.Path == "/panel/api/accounts" && r.Method == http.MethodGet:
+		if !p.authorized(r) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		p.handleAccounts(w, r)
 	case r.URL.Path == "/panel/api/models":
 		if !p.authorized(r) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -253,14 +259,21 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"state_file":           cfg.StateFile,
 		"reasoning":            cfg.ReasoningEnabled(),
 	}
+	// 🔴 不再返回 accounts 全量：3000+ 账号时那是 840KB/次，而面板是轮询的。
+	// 只回汇总（几百字节），列表走 /panel/api/accounts 分页取。
+	views := p.b.Pool().Snapshot()
+	videoMin := videoMinDefault
+	if c, ok := cfg.Video.VideoCredits("720P", 5); ok && c > 0 {
+		videoMin = c
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"service":  "qwen2api",
-		"version":  p.b.Version(),
-		"uptime_s": p.b.UptimeSeconds(),
-		"accounts": p.b.Pool().Snapshot(),
-		"stats":    p.b.Log().Stats(),
-		"requests": p.b.Log().Recent(80),
-		"config":   summary,
+		"service":    "qwen2api",
+		"version":    p.b.Version(),
+		"uptime_s":   p.b.UptimeSeconds(),
+		"pool_stats": summarize(views, videoMin),
+		"stats":      p.b.Log().Stats(),
+		"requests":   p.b.Log().Recent(80),
+		"config":     summary,
 	})
 }
 

@@ -192,8 +192,24 @@ func (s *Server) openUpstreamSpec(ctx context.Context, model, gear, prompt strin
 	return nil, lastErr
 }
 
-// relogin 用账号密码重新登录，把新凭据写回池。成功返回 true。
+// relogin 续期凭据：**优先用 refresh_token 换新 access**，失败才用密码重登。
+//
+// 为什么这个顺序很重要：access token 只有 15 分钟，而 signin 是整条链路里
+// 最贵、最容易吃 WAF 的一步。refresh_token 换一张只要几百毫秒、不碰密码。
 func (s *Server) relogin(ctx context.Context, acct *pool.Account) bool {
+	// ① 有 refresh_token 就先走这条
+	if rt := s.pool.RefreshToken(acct.Name); rt != "" {
+		if access, next, err := s.up.RefreshWithToken(upstream.WithAccount(ctx, acct.Name), rt); err == nil {
+			s.pool.SetToken(acct.Name, upstream.ModeBearer+":"+access)
+			if next != "" {
+				s.pool.SetRefresh(acct.Name, next)
+			}
+			log.Printf("[qwen2api] 账号 %s 凭据已续期（refresh_token）", acct.Name)
+			return true
+		} else {
+			log.Printf("[qwen2api] 账号 %s refresh_token 续期失败，改用密码重登: %v", acct.Name, err)
+		}
+	}
 	if acct.Email == "" || acct.Password == "" {
 		return false
 	}
@@ -201,12 +217,15 @@ func (s *Server) relogin(ctx context.Context, acct *pool.Account) bool {
 	// 不带的话 SignIn 会从服务器真实 IP 直连上游 —— 与它平时的出口不一致，
 	// 既容易吃 WAF（实测：3128 个号批量登录后，直连登录全被挑战页拦下），
 	// 也正是风控画像里"账号登录地突变"的信号。
-	cred, err := s.up.SignIn(upstream.WithAccount(ctx, acct.Name), acct.Email, acct.Password)
+	access, refresh, err := s.up.SignInSession(upstream.WithAccount(ctx, acct.Name), acct.Email, acct.Password)
 	if err != nil {
 		log.Printf("[qwen2api] 账号 %s 自动重登失败: %v", acct.Name, err)
 		return false
 	}
-	s.pool.SetToken(acct.Name, cred)
+	s.pool.SetToken(acct.Name, access)
+	if refresh != "" {
+		s.pool.SetRefresh(acct.Name, refresh)
+	}
 	log.Printf("[qwen2api] 账号 %s 凭据已自动续期（signin）", acct.Name)
 	return true
 }

@@ -27,6 +27,10 @@ type Account struct {
 	Name  string `json:"name"`  // 展示名（面板/日志用），空则自动编号
 	Token string `json:"token"` // 凭据本体；可带 cookie:/bearer: 前缀显式指定形态
 	Email string `json:"email"` // 登录邮箱（配 password 时用于自动续期）
+	// RefreshToken signin 之后 refresh 下发的 refresh_token（**可重复使用**）。
+	// 有了它，access token（TTL 900s）过期时不必再用密码登录 —— 换一张新的即可。
+	// 由网关自动填充；手写配置留空则退回"密码重登"（慢且更容易吃 WAF）。
+	RefreshToken string `json:"refresh_token,omitempty"`
 	// Password 明文登录密码。配了它，网关在凭据失效时会**自动重登**换新 token
 	// （signin 签发的 token 是 cookie 形态，且会过期）。
 	// ⚠️ 与 token 二选一即可：只配 password 也行，启动时自动登录。

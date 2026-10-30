@@ -2,7 +2,9 @@ package upstream
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -77,6 +79,29 @@ func SplitCredential(cred string) (mode, value string) {
 	default:
 		return "", normalizeBearer(c)
 	}
+}
+
+// TokenExpiry 从 JWT 的 exp 解出过期时间（**不验签**）。
+//
+// 只用于本地调度（选号优先"还能用"的、后台提前续期），不参与任何鉴权判断。
+// 解不出 exp（非 JWT / 格式变了）时返回 ok=false，调用方按"未知"处理。
+func TokenExpiry(cred string) (time.Time, bool) {
+	_, v := SplitCredential(cred)
+	parts := strings.Split(v, ".")
+	if len(parts) < 2 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var c struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &c); err != nil || c.Exp <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(c.Exp, 0), true
 }
 
 // IsCookieJar 判断凭据是否为完整 cookie jar：

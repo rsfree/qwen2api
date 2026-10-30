@@ -74,7 +74,10 @@ func (s *Server) ImportAccounts(ctx context.Context, in []config.Account, valida
 	sem := make(chan struct{}, 4)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var okCreds = map[int]string{}
+	// 同时保存 access 与 refresh_token：access 只有 15 分钟，
+	// 而 refresh_token 可重复使用 —— 之后续期不必再碰密码。
+	type credPair struct{ access, refresh string }
+	var okCreds = map[int]credPair{}
 	for _, j := range jobs {
 		wg.Add(1)
 		go func(j job) {
@@ -88,7 +91,7 @@ func (s *Server) ImportAccounts(ctx context.Context, in []config.Account, valida
 				defer cancel()
 				// 登录也要走该账号的固定出口 —— 登录 IP 与使用 IP 不一致本身
 				// 就是风控画像里的可疑信号。
-				cred, err := s.up.SignIn(upstream.WithAccount(cctx, j.acc.Name), j.acc.Email, j.acc.Password)
+				access, refresh, err := s.up.SignInSession(upstream.WithAccount(cctx, j.acc.Name), j.acc.Email, j.acc.Password)
 				if err != nil {
 					res.Error = friendlySigninErr(err)
 					mu.Lock()
@@ -97,7 +100,7 @@ func (s *Server) ImportAccounts(ctx context.Context, in []config.Account, valida
 					return
 				}
 				mu.Lock()
-				okCreds[j.idx] = cred
+				okCreds[j.idx] = credPair{access: access, refresh: refresh}
 				mu.Unlock()
 			}
 			res.OK = true
@@ -119,8 +122,11 @@ func (s *Server) ImportAccounts(ctx context.Context, in []config.Account, valida
 			results[j.idx].Error = "入池时发现重名"
 			continue
 		}
-		if cred := okCreds[j.idx]; cred != "" {
-			s.pool.SetToken(j.acc.Name, cred)
+		if cp := okCreds[j.idx]; cp.access != "" {
+			s.pool.SetToken(j.acc.Name, cp.access)
+			if cp.refresh != "" {
+				s.pool.SetRefresh(j.acc.Name, cp.refresh)
+			}
 			s.pool.Reset(j.acc.Name)
 		}
 		imported++
@@ -165,12 +171,15 @@ func (s *Server) TestAccount(ctx context.Context, name string) error {
 	}
 	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	cred, err := s.up.SignIn(upstream.WithAccount(cctx, name), a.Email, a.Password)
+	access, refresh, err := s.up.SignInSession(upstream.WithAccount(cctx, name), a.Email, a.Password)
 	if err != nil {
 		s.pool.MarkAuth(a, err.Error())
 		return fmt.Errorf("登录失败: %w", err)
 	}
-	s.pool.SetToken(name, cred)
+	s.pool.SetToken(name, access)
+	if refresh != "" {
+		s.pool.SetRefresh(name, refresh)
+	}
 	s.pool.Reset(name)
 	return nil
 }

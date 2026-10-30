@@ -41,6 +41,8 @@ type Server struct {
 	accountsMu sync.Mutex
 	// creditCursor 余额刷新轮转游标（受 creditRefreshMu 保护）。
 	creditCursor int
+	// refreshErrAt 预热续期的失败日志去重（账号名 → 上次记录时间）。
+	refreshErrAt map[string]time.Time
 }
 
 // New 构造前门。

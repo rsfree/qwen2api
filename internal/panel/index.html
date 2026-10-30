@@ -280,7 +280,7 @@ button.xs { white-space:nowrap; }
             <thead><tr>
               <th class="c-chk"><input type="checkbox" id="accChkAll" title="全选当前页" aria-label="全选当前页" style="width:auto"></th>
               <th>账号</th><th>状态</th><th class="num">积分</th><th class="num">今日出图</th>
-              <th class="num">今日视频</th><th class="num">成功/失败</th><th class="num">在途</th><th>最近使用</th><th class="c-acts"></th>
+              <th class="num">今日视频</th><th class="num">成功/失败</th><th class="num">在途</th><th class="num" title="access token 剩余寿命（15 分钟一换）">凭据</th><th>最近使用</th><th class="c-acts"></th>
             </tr></thead>
             <tbody id="accBody"></tbody>
           </table>
@@ -332,7 +332,7 @@ button.xs { white-space:nowrap; }
         <div class="stat"><div class="v" id="cAccts">-</div><div class="k">可用账号</div></div>
       </div>
       <div class="box">
-        <header><h3>每号余量</h3><span class="hint">出图按本地每日限额；视频按真实余额 ÷ 单价</span></header>
+        <header><h3>每号余量</h3><span class="hint">出图按本地每日限额；视频按真实余额 ÷ 单价；明细为余额最高的 100 个</span></header>
         <div class="tbl-wrap">
           <table>
             <thead><tr><th>账号</th><th>今日出图</th><th class="num">剩余张数</th><th class="num">余额</th><th class="num">可做 720P 5s</th><th class="num">可做 1080P 15s</th></tr></thead>
@@ -569,7 +569,7 @@ async function doAuth() {
 
 /* ═══════════════ 状态 ═══════════════ */
 const S = {
-  ov: null, models: null, view: 'accounts',
+  ov: null, acc: null, models: null, view: 'accounts',
   q: '', status: 'all', sort: 'default', size: 20, page: 0,
   sel: new Set(),
 };
@@ -581,8 +581,11 @@ async function loadOverview() {
   $('#navPulse').className = 'pulse';
   $('#navVer').textContent = 'v' + (d.version || '-');
   $('#navUp').textContent = fmtUp(d.uptime_s);
-  $('#subMeta').textContent = (d.accounts || []).length + ' 账号 · ' + ((d.stats && d.stats.total) || 0) + ' 请求 · 运行 ' + fmtUp(d.uptime_s);
+  const ps = d.pool_stats || {};
+  $('#subMeta').textContent = (ps.total || 0) + ' 账号 · ' + ((d.stats && d.stats.total) || 0) + ' 请求 · 运行 ' + fmtUp(d.uptime_s);
   renderCurrent();
+  // 账号列表是分页取的：汇总刷新后顺带拉当前页（页面不在账号视图就不拉）。
+  if (S.view === 'accounts') loadAccounts(S.page).catch(() => {});
 }
 
 function fmtUp(s) {
@@ -621,86 +624,81 @@ function acctStatus(a) {
   return { k: 'ready', t: '可用', cls: 'ok' };
 }
 
-function accountsFiltered() {
-  let list = (S.ov ? S.ov.accounts : []).slice();
-  if (S.q) {
-    const q = S.q.toLowerCase();
-    list = list.filter(a =>
-      (a.name || '').toLowerCase().includes(q) ||
-      (a.email || '').toLowerCase().includes(q) ||
-      (a.note || '').toLowerCase().includes(q));
-  }
-  if (S.status !== 'all') list = list.filter(a => acctStatus(a).k === S.status);
-  const order = { dead: 0, cooling: 1, exhausted: 2, ready: 3 };
-  const bal = a => a.credit_known ? a.credit_balance : -1;
-  switch (S.sort) {
-    case 'balance_desc': list.sort((a, b) => bal(b) - bal(a)); break;
-    case 'balance_asc': list.sort((a, b) => bal(a) - bal(b)); break;
-    case 'fails_desc': list.sort((a, b) => (b.failures || 0) - (a.failures || 0)); break;
-    case 'served_desc': list.sort((a, b) => (b.served || 0) - (a.served || 0)); break;
-    case 'name': list.sort((a, b) => String(a.name).localeCompare(String(b.name))); break;
-    default: list.sort((a, b) => (order[acctStatus(a).k] - order[acctStatus(b).k]) || (bal(b) - bal(a)));
-  }
-  return list;
+/* 服务端分页：列表只取当前页，搜索/筛选/排序/分页都在后端做。
+   3000+ 账号时全量 accounts 有 840KB，前端每几秒拉一次并不现实。 */
+let accSeq = 0;
+async function loadAccounts(page) {
+  if (page != null) S.page = Math.max(0, page);
+  const seq = ++accSeq;
+  const qs = new URLSearchParams({
+    page: String(S.page + 1),
+    size: String(S.size || 50),
+    q: S.q || '',
+    state: S.status || 'all',
+    sort: S.sort || 'default',
+  });
+  const d = await api('/panel/api/accounts?' + qs.toString());
+  if (seq !== accSeq) return; // 搜索时并发请求，只认最后一次
+  S.acc = d;
+  S.page = Math.max(0, (d.page || 1) - 1);
+  renderAccounts();
 }
 
 function renderAccounts() {
-  const all = S.ov.accounts || [];
-  let ready = 0, cooling = 0, dead = 0, imgLeft = 0, credits = 0, creditsKnown = 0, vidLeft = 0;
-  all.forEach(a => {
-    const st = acctStatus(a).k;
-    if (st === 'dead') dead++; else if (st === 'cooling') cooling++; else ready++;
-    if (a.image_limit > 0) imgLeft += Math.max(0, a.image_limit - a.image_today);
-    if (a.credit_known) { credits += a.credit_balance; creditsKnown++; vidLeft += Math.floor(a.credit_balance / VIDEO_MIN); }
-  });
-  $('#sTotal').textContent = all.length;
-  $('#sReady').textContent = ready;
-  $('#sCooling').textContent = cooling;
-  $('#sDead').textContent = dead;
-  $('#sImgLeft').textContent = imgLeft;
-  $('#sCredits').textContent = creditsKnown ? num(credits) : '-';
-  $('#sVidLeft').textContent = creditsKnown ? vidLeft : '-';
-  $('#accNote').textContent = !all.length ? ''
-    : (creditsKnown === all.length ? '' : (creditsKnown ? '（' + (all.length - creditsKnown) + ' 个余额未读到）' : '余额未读取，点「刷新余额」'));
+  const st = (S.ov && S.ov.pool_stats) || {};
+  $('#sTotal').textContent = st.total || 0;
+  $('#sReady').textContent = st.ready || 0;
+  $('#sCooling').textContent = st.cooling || 0;
+  $('#sDead').textContent = st.dead || 0;
+  $('#sImgLeft').textContent = st.img_left || 0;
+  $('#sCredits').textContent = st.credits_known ? num(st.credits) : '-';
+  $('#sVidLeft').textContent = st.credits_known ? num(st.vid_left) : '-';
+  $('#accNote').textContent = !st.total ? ''
+    : (!st.credits_known ? '余额未读取，点「刷新余额」'
+      : (st.credits_known < st.total ? '（' + (st.total - st.credits_known) + ' 个余额未读到）' : ''));
 
   const chips = [
-    ['all', '全部', all.length],
-    ['ready', '可用', ready],
-    ['cooling', '冷却', cooling],
-    ['dead', '失效', dead],
-    ['exhausted', '额度用尽', all.filter(a => acctStatus(a).k === 'exhausted').length],
+    ['all', '全部', st.total || 0],
+    ['ready', '可用', st.ready || 0],
+    ['cooling', '冷却', st.cooling || 0],
+    ['dead', '失效', st.dead || 0],
+    ['exhausted', '额度用尽', st.exhausted || 0],
   ];
   $('#accChips').innerHTML = chips.map(([k, t, n]) =>
     `<button data-status="${k}" class="${S.status === k ? 'on' : ''}">${t} <span class="note">${n}</span></button>`).join('');
 
-  const list = accountsFiltered();
-  const size = S.size === 0 ? (list.length || 1) : S.size;
-  const pages = Math.max(1, Math.ceil(list.length / size));
-  if (S.page >= pages) S.page = pages - 1;
-  const start = S.page * size;
-  const rows = list.slice(start, start + size);
+  const d = S.acc;
+  const items = (d && d.items) || [];
+  const total = (d && d.total) || 0;
+  const pages = (d && d.pages) || 1;
+  const size = (d && d.size) || S.size || 50;
+  const start = ((d && d.page) || 1) - 1;
+  $('#accPageInfo').textContent = total
+    ? `第 ${start * size + 1}–${start * size + items.length} / ${total}` : '没有匹配的账号';
+  $('#accPageNum').textContent = ((d && d.page) || 1) + ' / ' + pages;
+  $('#accPrev').disabled = !d || d.page <= 1;
+  $('#accNext').disabled = !d || d.page >= pages;
 
-  $('#accPageInfo').textContent = list.length ? `第 ${start + 1}–${Math.min(start + size, list.length)} / ${list.length}` : '没有匹配的账号';
-  $('#accPageNum').textContent = (S.page + 1) + ' / ' + pages;
-  $('#accPrev').disabled = S.page === 0;
-  $('#accNext').disabled = S.page >= pages - 1;
-
-  $('#accBody').innerHTML = rows.map(a => {
-    const st = acctStatus(a);
+  $('#accBody').innerHTML = items.map(a => {
+    const stt = acctStatus(a);
     const bal = a.credit_known ? num(a.credit_balance) : '<span class="hint">未知</span>';
     const img = a.image_limit > 0
       ? `${a.image_today}/${a.image_limit}<div class="bar ${a.image_today >= a.image_limit ? 'warn' : ''}" style="margin-top:4px"><i style="width:${pct(a.image_today, a.image_limit)}%"></i></div>`
       : String(a.image_today || 0);
     const vid = a.video_limit > 0 ? `${a.video_today}/${a.video_limit}` : String(a.video_today || 0);
+    // 凭据剩余寿命：未知（非 JWT 的长期凭据）显示 -；已过期标红。
+    const tk = !a.token_known ? '-' :
+      (a.token_left_s <= 0 ? '<span class="tag bad">过期</span>' : (Math.floor(a.token_left_s / 60) + 'm'));
     return `<tr data-name="${esc(a.name)}">
       <td class="c-chk"><input type="checkbox" class="rowchk" ${S.sel.has(a.name) ? 'checked' : ''} style="width:auto"></td>
       <td><div class="acc-name">${esc(a.name)}</div><div class="acc-sub">${esc(a.email || '-')}${a.note ? ' · ' + esc(a.note) : ''}</div></td>
-      <td><span class="tag ${st.cls}">${esc(st.t)}</span>${a.last_error ? ` <span class="tag muted" title="${esc(a.last_error)}">有错</span>` : ''}</td>
+      <td><span class="tag ${stt.cls}">${esc(stt.t)}</span>${a.last_error ? ` <span class="tag muted" title="${esc(a.last_error)}">有错</span>` : ''}</td>
       <td class="num">${bal}</td>
       <td class="num">${img}</td>
       <td class="num">${vid}</td>
       <td class="num">${a.served || 0} / ${a.failures || 0}</td>
       <td class="num">${a.inflight || 0}</td>
+      <td class="num">${tk}</td>
       <td class="note">${a.last_used ? fmtTime(a.last_used) : '-'}</td>
       <td class="c-acts"><div class="acts">
         <button class="xs" data-act="test">重登</button>
@@ -708,9 +706,9 @@ function renderAccounts() {
         <button class="xs danger" data-act="del">删除</button>
       </div></td>
     </tr>`;
-  }).join('') || `<tr><td colspan="10" style="text-align:center;color:var(--ink-3);padding:26px">没有账号。点右上角「导入账号」开始。</td></tr>`;
+  }).join('') || `<tr><td colspan="11" style="text-align:center;color:var(--ink-3);padding:26px">${d ? '没有匹配的账号' : '加载中…'}</td></tr>`;
 
-  $('#accChkAll').checked = rows.length > 0 && rows.every(a => S.sel.has(a.name));
+  $('#accChkAll').checked = items.length > 0 && items.every(a => S.sel.has(a.name));
   renderBulk();
 }
 
@@ -784,24 +782,28 @@ function renderUsage() {
 }
 
 /* ═══════════════ 容量 ═══════════════ */
-function renderCapacity() {
-  const accts = S.ov.accounts || [];
+async function renderCapacity() {
+  const st = (S.ov && S.ov.pool_stats) || {};
   const cfg = S.ov.config || {};
   const pricing = (cfg.video && cfg.video.pricing) || {};
   const p720 = (pricing['720P'] && pricing['720P']['5']) || VIDEO_MIN;
   const p1080 = (pricing['1080P'] && pricing['1080P']['15']) || 120;
 
-  let img = 0, vid = 0, credits = 0, usable = 0;
+  // 汇总直接用服务端的全池统计；明细只取余额最高的 100 个 ——
+  // 3000+ 账号的明细既传不动，也没人真的会一屏看 3000 行。
+  $('#cImg').textContent = st.img_left || 0;
+  $('#cVid').textContent = st.vid_left || 0;
+  $('#cCredits').textContent = num(st.credits || 0);
+  $('#cAccts').textContent = st.ready || 0;
+
+  let d = null;
+  try { d = await api('/panel/api/accounts?size=100&sort=balance_desc'); } catch (e) { d = null; }
+  const accts = (d && d.items) || [];
   $('#capBody').innerHTML = accts.map(a => {
     const left = a.image_limit > 0 ? Math.max(0, a.image_limit - a.image_today) : null;
-    if (left != null) img += left;
     const bal = a.credit_known ? a.credit_balance : null;
-    if (bal != null) credits += bal;
     const v = bal != null ? Math.floor(bal / p720) : null;
     const v15 = bal != null ? Math.floor(bal / p1080) : null;
-    if (v != null) vid += v;
-    if (acctStatus(a).k === 'ready') usable++;
-
     const ratio = a.image_limit > 0 ? pct(a.image_today, a.image_limit) : 0;
     const barCls = ratio >= 100 ? 'bad' : (ratio >= 70 ? 'warn' : '');
     return `<tr>
@@ -816,11 +818,6 @@ function renderCapacity() {
       <td class="num">${v15 == null ? '-' : v15}</td>
     </tr>`;
   }).join('') || `<tr><td colspan="6" style="text-align:center;color:var(--ink-3);padding:26px">没有账号</td></tr>`;
-
-  $('#cImg').textContent = img;
-  $('#cVid').textContent = vid;
-  $('#cCredits').textContent = num(credits);
-  $('#cAccts').textContent = usable;
 }
 
 /* ═══════════════ 模型 ═══════════════ */
@@ -906,7 +903,7 @@ function renderConfig() {
 
   const sf = c.state_file || '';
   $('#cfgAccountsPath').textContent = sf ? sf.replace(/\/[^/]*$/, '/accounts.json') : 'accounts.json';
-  $('#cfgAccountsSrc').textContent = `当前 ${(S.ov.accounts || []).length} 个账号在池 —— 启动日志里「账号清单由面板托管」那行说明是不是来自 accounts.json`;
+  $('#cfgAccountsSrc').textContent = `当前 ${((S.ov.pool_stats || {}).total || 0)} 个账号在池 —— 启动日志里「账号清单由面板托管」那行说明是不是来自 accounts.json`;
 }
 
 /* ═══════════════ 视图切换 ═══════════════ */
@@ -929,6 +926,8 @@ function go(view) {
   if (location.hash.slice(1) !== view) history.replaceState(null, '', '#' + view);
   $('#navDrawer').classList.remove('open');
   if (S.ov) renderCurrent();
+  // 切回账号视图时立刻拉一次当前页（列表不在 overview 里了）。
+  if (S.ov && view === 'accounts') loadAccounts(S.page).catch(() => {});
 }
 
 /* ═══════════════ 导入 ═══════════════ */
@@ -1081,21 +1080,27 @@ function bind() {
     try { await loadOverview(); toast('已刷新', 'ok'); } catch (e) { toast('刷新失败: ' + e.message, 'err'); }
   });
 
-  $('#accQ').addEventListener('input', e => { S.q = e.target.value; S.page = 0; renderAccounts(); });
-  $('#accSort').addEventListener('change', e => { S.sort = e.target.value; renderAccounts(); });
-  $('#accSize').addEventListener('change', e => { S.size = Number(e.target.value); S.page = 0; renderAccounts(); });
-  $('#accPrev').addEventListener('click', () => { S.page--; renderAccounts(); });
-  $('#accNext').addEventListener('click', () => { S.page++; renderAccounts(); });
+  // 搜索防抖：每敲一个字就发一次请求会把后端打热（3000 个账号的快照不便宜）。
+  let qTimer = null;
+  $('#accQ').addEventListener('input', e => {
+    S.q = e.target.value;
+    clearTimeout(qTimer);
+    qTimer = setTimeout(() => loadAccounts(0).catch(() => {}), 250);
+  });
+  $('#accSort').addEventListener('change', e => { S.sort = e.target.value; loadAccounts(0).catch(() => {}); });
+  $('#accSize').addEventListener('change', e => { S.size = Number(e.target.value) || 50; loadAccounts(0).catch(() => {}); });
+  $('#accPrev').addEventListener('click', () => { if (S.page > 0) loadAccounts(S.page - 1).catch(() => {}); });
+  $('#accNext').addEventListener('click', () => { loadAccounts(S.page + 1).catch(() => {}); });
   $('#accChips').addEventListener('click', e => {
     const b = e.target.closest('[data-status]');
     if (!b) return;
-    S.status = b.dataset.status; S.page = 0; renderAccounts();
+    S.status = b.dataset.status;
+    loadAccounts(0).catch(() => {});
   });
 
   $('#accChkAll').addEventListener('change', e => {
-    const list = accountsFiltered();
-    const size = S.size === 0 ? list.length : S.size;
-    list.slice(S.page * size, S.page * size + size).forEach(a => {
+    const list = (S.acc && S.acc.items) || [];
+    list.forEach(a => {
       if (e.target.checked) S.sel.add(a.name); else S.sel.delete(a.name);
     });
     renderAccounts();
@@ -1248,7 +1253,7 @@ function bind() {
   // 轮询间隔按池子规模自适应：3000+ 账号时 overview 有 800KB+，
   // 固定 5s 拉一次等于每分钟十几 MB（跨洋实测一次要 5s 才传完）。
   const pollDelay = () => {
-    const n = ((S.ov && S.ov.accounts) || []).length;
+    const n = ((S.ov && S.ov.pool_stats && S.ov.pool_stats.total) || 0);
     return n > 1000 ? 30000 : n > 200 ? 15000 : 5000;
   };
   const pollLoop = async () => {
