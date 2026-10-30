@@ -59,14 +59,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req); err != nil {
 		entry.Status = http.StatusBadRequest
 		entry.Error = "解析请求体: " + err.Error()
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "请求体解析失败: "+err.Error())
 		return
 	}
 	if len(req.Messages) == 0 {
 		entry.Status = http.StatusBadRequest
 		entry.Error = "messages 为空"
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "messages 不能为空")
 		return
 	}
@@ -75,7 +75,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		entry.Status = http.StatusBadRequest
 		entry.Error = err.Error()
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
@@ -88,14 +88,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if imgErr != nil {
 		entry.Status = http.StatusBadRequest
 		entry.Error = imgErr.Error()
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeErrorParam(w, http.StatusBadRequest, "invalid_request_error", imgErr.Error(), "image")
 		return
 	}
 	if len(imgRefs) > maxInputImages {
 		entry.Status = http.StatusBadRequest
 		entry.Error = "图片过多"
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeErrorParam(w, http.StatusBadRequest, "invalid_request_error",
 			fmt.Sprintf("图片最多 %d 张（本次 %d 张）", maxInputImages, len(imgRefs)), "image")
 		return
@@ -107,7 +107,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if filesErr != nil {
 		entry.Status = http.StatusBadRequest
 		entry.Error = filesErr.Error()
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeErrorParam(w, http.StatusBadRequest, "invalid_request_error", filesErr.Error(), "file_id")
 		return
 	}
@@ -129,7 +129,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		entry.Model = model
 		entry.Status = http.StatusBadRequest
 		entry.Error = "生成模型不能用于 chat: " + model
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeErrorParam(w, http.StatusBadRequest, "invalid_request_error",
 			fmt.Sprintf("模型 %s 是生成模型，不能用于 chat；请改调 %s", model, ep), "model")
 		return
@@ -148,7 +148,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		entry.Status = httpStatusFor(err)
 		entry.Error = err.Error()
 		entry.DurationMS = time.Since(start).Milliseconds()
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeError(w, entry.Status, errTypeFor(err), err.Error())
 		return
 	}
@@ -460,7 +460,7 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 	if !ok {
 		entry.Status = http.StatusInternalServerError
 		entry.Error = "响应写入器不支持流式"
-		s.log.Add(*entry)
+		s.addReq(entry)
 		writeError(w, http.StatusInternalServerError, "internal_error", "响应写入器不支持流式")
 		return
 	}
@@ -537,17 +537,16 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 	if streamErr != nil {
 		entry.Error = streamErr.Error()
 		if r.Context().Err() == nil {
-			s.writeSSE(w, flusher, ErrorBody{Error: ErrorDetail{
-				Message: streamErr.Error(),
-				Type:    errTypeFor(streamErr),
-			}})
+			// 流内错误同样只给标准英文：详细原因留在 entry.Error。
+			typ, msg := clientError(http.StatusBadGateway, errTypeFor(streamErr), streamErr.Error())
+			s.writeSSE(w, flusher, ErrorBody{Error: ErrorDetail{Message: msg, Type: typ}})
 		}
 	} else if chars == 0 && reasoningLen == 0 {
 		// 一字未出（含思考）：形态不符，必须让客户端知道，而不是回一个空回复。
 		entry.Error = upstream.ErrNoText.Error()
 		log.Printf("[qwen2api] 上游零文本，原始帧取证（%d 条）：%v", len(sd.stream.RawFrames()), sd.stream.RawFrames())
 		s.writeSSE(w, flusher, ErrorBody{Error: ErrorDetail{
-			Message: upstream.ErrNoText.Error(),
+			Message: "upstream returned no content, please retry later",
 			Type:    "upstream_error",
 		}})
 	}
@@ -573,7 +572,7 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 		entry.OutputTokens = usage.OutputTokens
 	}
 	entry.DurationMS = time.Since(start).Milliseconds()
-	s.log.Add(*entry)
+	s.addReq(entry)
 }
 
 // ---------- 非流式 ----------
@@ -594,7 +593,7 @@ func (s *Server) serveChatOnce(w http.ResponseWriter, r *http.Request, sd *opene
 			entry.Status = httpStatusFor(err)
 			entry.Error = err.Error()
 			entry.DurationMS = time.Since(start).Milliseconds()
-			s.log.Add(*entry)
+			s.addReq(entry)
 			writeError(w, entry.Status, errTypeFor(err), err.Error())
 			return
 		}
@@ -625,7 +624,7 @@ func (s *Server) serveChatOnce(w http.ResponseWriter, r *http.Request, sd *opene
 		entry.Error = upstream.ErrNoText.Error()
 		log.Printf("[qwen2api] 上游零文本，原始帧取证（%d 条）：%v", len(sd.stream.RawFrames()), sd.stream.RawFrames())
 		entry.DurationMS = time.Since(start).Milliseconds()
-		s.log.Add(*entry)
+		s.addReq(entry)
 		writeError(w, http.StatusBadGateway, "upstream_error", upstream.ErrNoText.Error())
 		return
 	}
@@ -653,7 +652,7 @@ func (s *Server) serveChatOnce(w http.ResponseWriter, r *http.Request, sd *opene
 		entry.OutputTokens = usage.OutputTokens
 	}
 	entry.DurationMS = time.Since(start).Milliseconds()
-	s.log.Add(*entry)
+	s.addReq(entry)
 }
 
 // writeChunk 写一个 OpenAI SSE 块。
@@ -698,6 +697,10 @@ func httpStatusFor(err error) int {
 	if errors.Is(err, errNoAccount) {
 		return http.StatusServiceUnavailable
 	}
+	// 上游"只发心跳不产出"是超时语义 ⇒ 504（调用方/SDK 一眼能区分 502 故障与超时）。
+	if errors.Is(err, errUpstreamTimeout) || errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout
+	}
 	if errors.Is(err, upstream.ErrQuota) || errors.Is(err, errImageQuotaLocal) ||
 		errors.Is(err, errVideoQuotaLocal) || errors.Is(err, errCreditsShort) {
 		// 额度耗尽是"现在不行、等下/升级才行" ⇒ 429 而不是 502。
@@ -728,6 +731,9 @@ func errTypeFor(err error) string {
 	if errors.Is(err, errImageQuotaLocal) || errors.Is(err, errVideoQuotaLocal) ||
 		errors.Is(err, errCreditsShort) {
 		return "insufficient_quota"
+	}
+	if errors.Is(err, errUpstreamTimeout) || errors.Is(err, context.DeadlineExceeded) {
+		return "upstream_timeout"
 	}
 	switch upstream.KindOf(err) {
 	case upstream.KindAuth:

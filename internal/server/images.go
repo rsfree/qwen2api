@@ -186,7 +186,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req); err != nil {
 		entry.Status = http.StatusBadRequest
 		entry.Error = "解析请求体: " + err.Error()
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "请求体解析失败: "+err.Error())
 		return
 	}
@@ -194,7 +194,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	if refErr != nil {
 		entry.Status = http.StatusBadRequest
 		entry.Error = refErr.Error()
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeErrorParam(w, http.StatusBadRequest, "invalid_request_error", refErr.Error(), "image")
 		return
 	}
@@ -207,7 +207,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	if maskWithoutImage(req.Mask, refs) {
 		entry.Status = http.StatusBadRequest
 		entry.Error = "mask 没有 image"
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeErrorParam(w, http.StatusBadRequest, "invalid_request_error", "mask 必须配合 image 使用", "mask")
 		return
 	}
@@ -219,7 +219,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.Prompt) == "" {
 		entry.Status = http.StatusBadRequest
 		entry.Error = "prompt 为空"
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeErrorParam(w, http.StatusBadRequest, "invalid_request_error",
 			"prompt 不能为空（无 image 时必填）", "prompt")
 		return
@@ -256,6 +256,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	prompt := buildImagePrompt(req.Prompt, ratio)
 
 	entry.Model = requested
+	entry.RefImages = len(refs)
 	// 图片是计费动作：n>1 时逐张串行，不并发轰同一账号。
 	var (
 		datums   []ImageDatum
@@ -264,11 +265,13 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	)
 	for i := 0; i < req.N; i++ {
 		imgs, revised, acct, err := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, ratio, s.blobBase(r))
+		// 🔴 失败也要记账号：否则流水里 acct= 空，既定位不到号、也带不出出口 IP
+		// （2026-10-30 线上出现过一条 acct= 空的 502，白查了一轮）。
+		usedAcct = acct
 		if err != nil {
 			lastErr = err
 			break
 		}
-		usedAcct = acct
 		for _, u := range imgs {
 			d := ImageDatum{URL: u, RevisedPrompt: revised}
 			if format == "b64_json" {
@@ -297,7 +300,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		entry.Status = code
 		entry.Error = lastErr.Error()
 		entry.DurationMS = time.Since(start).Milliseconds()
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeError(w, code, errTypeFor(lastErr), lastErr.Error())
 		return
 	}
@@ -308,11 +311,33 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	entry.Status = http.StatusOK
 	entry.Chars = len(datums)
 	entry.DurationMS = time.Since(start).Milliseconds()
-	s.log.Add(entry)
+	s.addReq(&entry)
 }
 
 // maxInputImages 单次图生图的参考图上限（上游单请求的实务上限；再多请分批）。
 const maxInputImages = 20
+
+// errUpstreamTimeout 上游在时间预算内没有任何产物（只发心跳）。
+//
+// 单独做成 sentinel 是为了让上层能把它映射成 **504 + 标准英文文案**：
+// "额度将尽 or 上游抖动"这种判断只对运维有意义，对调用方只剩"过会儿再来"。
+var errUpstreamTimeout = errors.New("上游在时间预算内没有任何产物（只发心跳）")
+
+// imageTimeout 单次出图的时间预算（按参考图数量放宽）。
+//
+// 依据（2026-10-30 生产实测）：1 张 47.8s / 2 张 69.9s / 3 张 83.4s。
+// 基线 180s 覆盖无参考图与单图；每多一张加 30s（实测增量 18s + 抖动余量），
+// 上限 300s —— nginx 那边 900s，不会抢在网关前面回 504。
+func imageTimeout(refs int) time.Duration {
+	d := 180 * time.Second
+	if refs > 1 {
+		d += time.Duration(refs-1) * 30 * time.Second
+	}
+	if d > 300*time.Second {
+		d = 300 * time.Second
+	}
+	return d
+}
 
 // generateImage 跑一次图片生成：选号 → （有参考图时）上传 → 建会话 → 提交 → 读流。
 //
@@ -325,8 +350,11 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 
 	// 🔴 上游额度用尽后不会报错，而是**只发 keep_alive 心跳、永不产出**（2026-10-28 实测：
 	// 第 4 张起 240s 无产物帧）。所以必须由网关自己设上限，否则调用方只能干等到客户端超时。
-	// 180s 的依据：正常出图 55~80s，加上传参考图最坏 140s，180s 足够覆盖正常路径。
-	ctx, cancel := context.WithTimeout(ctx, 180*time.Second)
+	// 预算按垫图数量放宽：多一张参考图上游确实更慢（实测 1 张 47.8s / 2 张 69.9s /
+	// 3 张 83.4s，≈ 每张 +18s），而原来"180s 含上传"的推导已经过时 —— 上传现在是本地
+	// 内存写 blob，真正的耗时全在生成。
+	budget := imageTimeout(len(refs))
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
 	// 🔴 用 PickForImage：跳过"今日已出够 max_image_per_day 张"的号。
@@ -388,9 +416,12 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 				//   · 额度将尽的前兆 —— 再发一次会拿到明确的 insufficient_quota；
 				//   · 上游临时故障 —— 等几分钟同一账号又能出图（本号在第 4、5 次挂起后恢复）。
 				// 所以文案不能断言"额度用完"，只能说"两种可能 + 怎么区分"。
-				return nil, "", a.Name, errors.New("上游 180s 内没有任何产物（只发心跳）。" +
-					"两种可能：①该账号今日生图额度将尽（再发一次通常返回 insufficient_quota 确认）；" +
-					"②上游临时故障（等几分钟重试往往恢复）。建议换号或稍后重试")
+				// 🔴 这段中文只进流水/容器日志；客户端拿到的是 504 + "upstream timeout"
+				// （见 clientError）—— 排查指南不该出现在 API 响应里。
+				return nil, "", a.Name, fmt.Errorf("%w（预算 %s，垫图 %d 张）。两种可能："+
+					"①该账号今日生图额度将尽（再发一次通常返回 insufficient_quota 确认）；"+
+					"②上游临时故障（等几分钟重试往往恢复，多垫图时更慢）。建议换号或稍后重试",
+					errUpstreamTimeout, budget, len(refs))
 			}
 			return nil, "", a.Name, err
 		}
@@ -525,7 +556,7 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		entry.Status = http.StatusBadRequest
 		entry.Error = err.Error()
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
@@ -556,6 +587,7 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 		format = "url"
 	}
 
+	entry.RefImages = len(refs)
 	imgs, revised, acct, genErr := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, "", s.blobBase(r))
 	if genErr != nil {
 		code := httpStatusFor(genErr)
@@ -563,7 +595,7 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 		entry.Status = code
 		entry.Error = genErr.Error()
 		entry.DurationMS = time.Since(start).Milliseconds()
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeError(w, code, errTypeFor(genErr), genErr.Error())
 		return
 	}
@@ -572,7 +604,7 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 		entry.Status = http.StatusBadGateway
 		entry.Error = "上游没有返回任何图片"
 		entry.DurationMS = time.Since(start).Milliseconds()
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeError(w, http.StatusBadGateway, "upstream_error",
 			"上游没有返回任何图片（模型未触发 image_edit 产物帧）")
 		return
@@ -596,5 +628,5 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	entry.Status = http.StatusOK
 	entry.Chars = len(datums)
 	entry.DurationMS = time.Since(start).Milliseconds()
-	s.log.Add(entry)
+	s.addReq(&entry)
 }

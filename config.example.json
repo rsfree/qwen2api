@@ -48,6 +48,8 @@
     "// bx_ua": "阿里设备指纹头。实测页面自己也常 load_failed，不是硬门槛；留空即不发",
     "bx_ua": "",
     "bx_umidtoken": "",
+    "// egress_ip_url": "出口 IP 探测地址（纯文本回 IP）。面板流水的「出口」靠它实测：从该账号的 socks5 隧道请求一次，看对面看到的来源 IP。设 \"-\" 关闭探测",
+    "egress_ip_url": "https://api.ipify.org",
     "timeout_s": 180,
     "connect_timeout_s": 20,
     "insecure_skip_verify": false,

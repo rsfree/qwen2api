@@ -29,8 +29,14 @@ type Entry struct {
 	DurationMS   int64     `json:"duration_ms"`
 	Error        string    `json:"error,omitempty"`
 	Degraded     string    `json:"degraded,omitempty"`
-	ClientIP     string    `json:"client_ip,omitempty"`
-	UserAgent    string    `json:"user_agent,omitempty"`
+	ClientIP string `json:"client_ip,omitempty"`
+	UserAgent string `json:"user_agent,omitempty"`
+	// RefImages 本次带的参考图（垫图）张数 —— 排查"变慢/超时"时第一个要看的东西：
+	// 多一张图上游确实更慢（实测每张约 +18s）。
+	RefImages int `json:"ref_images,omitempty"`
+	// EgressIP 本次用的出口公网 IP（账号对应 socks5 的实测出口，空 = 还没探到）。
+	// 与 ClientIP 是两件事：ClientIP 是"谁调我们"，EgressIP 是"我们从哪个 IP 访问上游"。
+	EgressIP string `json:"egress_ip,omitempty"`
 }
 
 // Stats 汇总。
@@ -120,6 +126,9 @@ func (l *Log) Add(e Entry) {
 		line := fmt.Sprintf("[req] %s %s model=%s acct=%s stream=%v status=%d tok=%d/%d %dms",
 			e.ID, e.Path, e.Model, e.Account, e.Stream, e.Status,
 			e.PromptTokens, e.OutputTokens, e.DurationMS)
+		if e.EgressIP != "" {
+			line += " egress=" + e.EgressIP
+		}
 		if e.Error != "" {
 			line += " err=" + e.Error
 		}

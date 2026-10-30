@@ -59,6 +59,13 @@ type Upstream struct {
 	InsecureSkipVerify bool `json:"insecure_skip_verify"`
 	// Proxy 出口代理（按账号分流）。
 	Proxy Proxy `json:"proxy"`
+	// EgressIPURL 出口 IP 探测地址（默认 https://api.ipify.org，纯文本回 IP）。
+	//
+	// 为什么要它：面板请求流水里的"出口"只能是**实测值** —— socks5h 的出口 IP 由
+	// 运营商侧分配，光看代理 host（pool.livetest.cn:2090）完全看不出是哪条出口，
+	// 而风控/封号恰恰按 IP 画像。探测=从该账号的隧道发一次请求，看对面看到的来源 IP。
+	// 设成 "-" 关闭（不想让网关额外出网时）；留空用默认地址。
+	EgressIPURL string `json:"egress_ip_url,omitempty"`
 }
 
 // Proxy 出口代理：**每个账号一条固定出口**。
@@ -393,6 +400,9 @@ func applyEnv(cfg *Config) {
 	// 代理密码单列（url_template 可以入库，密码不该跟着进版本库）
 	if v := os.Getenv("QWEN2API_PROXY_PASSWORD"); v != "" {
 		cfg.Upstream.Proxy.Password = v
+	}
+	if v := os.Getenv("QWEN2API_EGRESS_IP_URL"); v != "" {
+		cfg.Upstream.EgressIPURL = v
 	}
 	// 面板登录密码走环境变量（容器部署时别把密码写进挂载的配置文件）。
 	if v := os.Getenv("QWEN2API_PANEL_USERNAME"); v != "" {

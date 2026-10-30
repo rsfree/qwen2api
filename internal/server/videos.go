@@ -108,7 +108,7 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		entry.Status = http.StatusBadRequest
 		entry.Error = "解析请求体: " + err.Error()
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "请求体解析失败: "+err.Error())
 		return
 	}
@@ -158,7 +158,7 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 		} else {
 			entry.Status = http.StatusBadRequest
 			entry.Error = "不支持的视频档位"
-			s.log.Add(entry)
+			s.addReq(&entry)
 			writeErrorParam(w, http.StatusBadRequest, "invalid_request_error",
 				fmt.Sprintf("不支持的档位 %s/%ds；支持的档位见 config.video.pricing（默认 720P|1080P × 5|10|15s）",
 					resolution, duration), "resolution")
@@ -237,7 +237,7 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 		entry.Status = code
 		entry.Error = lastErr.Error()
 		entry.DurationMS = time.Since(start).Milliseconds()
-		s.log.Add(entry)
+		s.addReq(&entry)
 		writeError(w, code, errTypeFor(lastErr), lastErr.Error())
 		return
 	}
@@ -264,7 +264,7 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 	entry.Account = acct
 	entry.Status = http.StatusOK
 	entry.DurationMS = time.Since(start).Milliseconds()
-	s.log.Add(entry)
+	s.addReq(&entry)
 }
 
 // handleVideoGet `GET /v1/videos/{id}`。

@@ -60,6 +60,10 @@ type Account struct {
 	// creditDailyAt 最近一次「每日赠送」入账时刻（零值 = 未知）。
 	// 上游没有"下次重置"字段，只能从积分流水里推（见 upstream.creditHistory）。
 	creditDailyAt time.Time
+	// egressIP / egressAt 最近一次实测的出口公网 IP（上游眼中的来源）。
+	// 空 = 还没探测过；面板流水与账号列表靠它回答"这次是从哪个 IP 出去的"。
+	egressIP string
+	egressAt time.Time
 	cooldownUntil time.Time
 	failures      int
 	lastUsed      time.Time
@@ -96,6 +100,8 @@ type View struct {
 	// CreditDailyAt 最近一次「每日赠送」入账时刻（RFC3339，空 = 未知）。
 	// 上游没有"下次重置"字段，面板按它 +24h 推算下一次。
 	CreditDailyAt string `json:"credit_daily_at,omitempty"`
+	// EgressIP 最近一次实测的出口公网 IP（空 = 未探测）。
+	EgressIP string `json:"egress_ip,omitempty"`
 	// TokenLeftS 当前 access token 还剩多少秒；TokenKnown=false 时无意义。
 	// 面板靠它一眼看出"保活有没有在跑"：整池都不 known 说明还没开始续期。
 	TokenLeftS int  `json:"token_left_s"`
@@ -389,6 +395,33 @@ func dailyAt(a *Account) string {
 		return ""
 	}
 	return a.creditDailyAt.Format(time.RFC3339)
+}
+
+// SetEgressIP 记录账号的出口公网 IP（探测结果，供流水/面板展示）。
+func (p *Pool) SetEgressIP(name, ip string) {
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if a := p.lookupLocked(name); a != nil {
+		a.egressIP, a.egressAt = ip, time.Now()
+	}
+}
+
+// EgressIP 读取缓存的出口 IP（空 = 未知）。超过 maxAge 视为未知。
+func (p *Pool) EgressIP(name string, maxAge time.Duration) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.lookupLocked(name)
+	if a == nil || a.egressIP == "" {
+		return ""
+	}
+	if maxAge > 0 && time.Since(a.egressAt) > maxAge {
+		return ""
+	}
+	return a.egressIP
 }
 
 // SetCreditDailyAt 记录「每日赠送」最近一次入账时刻（0 值忽略）。
@@ -793,6 +826,7 @@ func (p *Pool) Snapshot() []View {
 			CreditBalance: a.creditBalance,
 			CreditKnown:   a.creditKnown,
 		CreditDailyAt: dailyAt(a),
+		EgressIP:      a.egressIP,
 			HasRefresh:    a.RefreshToken != "",
 		}
 		if !a.tokenExp.IsZero() {

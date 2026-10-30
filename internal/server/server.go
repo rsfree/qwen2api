@@ -58,6 +58,9 @@ type Server struct {
 	// warmMu / warmStat 最近一轮保活预热的参数（target/batch/actual）。
 	warmMu   sync.Mutex
 	warmStat WarmStat
+	// egressMu / egress 账号级"出口 IP"缓存（懒探测，见 egress.go）。
+	egressMu sync.Mutex
+	egress   map[string]*egressState
 }
 
 // New 构造前门。
@@ -73,6 +76,7 @@ func New(cfg config.Config, p *pool.Pool, up *upstream.Client, log *reqlog.Log, 
 		videos:  newVideoStore(),
 		files:   NewFileStore(),
 		blobs:   NewBlobStore(),
+		egress:  map[string]*egressState{},
 	}
 	// 配置了公网基址就固定下来（服务端到服务端取图时 Host 不是公网域名）。
 	if cfg.BlobBaseURL != "" {
@@ -261,12 +265,44 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func writeError(w http.ResponseWriter, code int, typ, msg string) {
+	typ, msg = clientError(code, typ, msg)
 	writeJSON(w, code, ErrorBody{Error: ErrorDetail{Message: msg, Type: typ}})
 }
 
 // writeErrorParam 带 param 的错误（Images 端点用：指明是哪个字段的问题）。
 func writeErrorParam(w http.ResponseWriter, code int, typ, msg, param string) {
+	typ, msg = clientError(code, typ, msg)
 	writeJSON(w, code, ErrorBody{Error: ErrorDetail{Message: msg, Type: typ, Param: param}})
+}
+
+// clientError 把"服务端 / 上游的问题"统一成标准英文文案。
+//
+// 规则（2026-10-30 定）：
+//   - **5xx**（上游超时 / 故障 / 凭据坏了）⇒ 短英文 + 稳定 type：
+//     客户端要的是机器可读的失败信号，不是一段中文排查指南（那种文案换个人写就变）。
+//   - 4xx 与 429 ⇒ 原样返回：429 说明"是哪个额度、还差多少"，调用方和运维都用得上；
+//     4xx 是调用方自己写错了，具体到字段的中文提示最省事。
+//
+// 5xx 的详细原因（"额度将尽 / 上游临时故障 / 换号或稍等"这类判断）只写进请求流水与
+// 容器日志（reqlog.Entry.Error），面板「日志」页照常看得到 —— 不丢信息，只是不外泄。
+func clientError(code int, typ, msg string) (string, string) {
+	if code < 500 {
+		return typ, msg
+	}
+	switch typ {
+	case "upstream_timeout":
+		return typ, "upstream timeout, please retry later"
+	case "service_unavailable":
+		return typ, "no available upstream account, please retry later"
+	case "insufficient_quota":
+		return typ, "upstream quota exceeded"
+	case "rate_limit_error":
+		return typ, "upstream rate limited, please retry later"
+	case "upstream_auth_error":
+		// 网关自己的上游凭据坏了：不把"哪个号、什么错"递给调用方。
+		return "upstream_error", "upstream authentication failed"
+	}
+	return "upstream_error", "upstream error, please retry later"
 }
 
 // clientIP 取调用来源 IP（尊重常见反代头）。

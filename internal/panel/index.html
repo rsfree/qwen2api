@@ -417,7 +417,7 @@ button.xs { white-space:nowrap; }
         </div>
         <div class="tbl-wrap" style="max-height:52vh">
           <table>
-            <thead><tr><th>时间</th><th>路径</th><th>模型</th><th>账号</th><th>结果</th><th class="num">tok 入/出</th><th class="num">首字节</th><th class="num">耗时</th><th>来源</th><th>说明</th></tr></thead>
+            <thead><tr><th>时间</th><th>路径</th><th>模型</th><th>账号</th><th>结果</th><th class="num">tok 入/出</th><th class="num">首字节</th><th class="num">耗时</th><th>来源 / 出口</th><th>说明</th></tr></thead>
             <tbody id="reqBody"></tbody>
           </table>
         </div>
@@ -1196,13 +1196,13 @@ function renderReqTable() {
     return `<tr title="${esc(r.id || '')} · ${esc(r.user_agent || '')}">
       <td class="note">${fmtTime(r.time)}</td>
       <td class="mono">${esc(r.path || '-')}</td>
-      <td class="mono">${esc(r.model || '-')}</td>
+      <td class="mono">${esc(r.model || '-')}${r.ref_images ? ' <span class="tag muted">垫图 ' + r.ref_images + '</span>' : ''}</td>
       <td class="mono">${esc(r.account || '-')}</td>
       <td><span class="tag ${cls}">${esc(resLabel)}</span>${r.stream ? ' <span class="tag muted">流</span>' : ''}</td>
       <td class="num">${r.prompt_tokens || 0} / ${r.output_tokens || 0}</td>
       <td class="num">${r.first_byte_ms ? r.first_byte_ms + 'ms' : '-'}</td>
       <td class="num">${r.duration_ms ? r.duration_ms + 'ms' : '-'}</td>
-      <td class="note">${esc(r.client_ip || '-')}</td>
+      <td class="note" title="来源=谁调的我们 · 出口=我们访问上游用的 IP（账号对应 socks5 的实测值）">${esc(r.client_ip || '-')}${r.egress_ip ? '<br><span class="mono hint">出口 ' + esc(r.egress_ip) + '</span>' : ''}</td>
       <td class="note" title="${esc(note)}">${esc((note || '-').slice(0, 60))}</td>
     </tr>`;
   }).join('') : `<tr><td colspan="10" style="text-align:center;color:var(--ink-3);padding:26px">没有匹配的请求</td></tr>`;
@@ -2075,10 +2075,11 @@ function bind() {
   $('#btnReqCopy').addEventListener('click', () => {
     const rows = LOGS.reqs || [];
     if (!rows.length) { toast('没有可复制的行', 'err'); return; }
-    const head = ['时间', '路径', '模型', '账号', '状态', 'tok入', 'tok出', '首字节ms', '耗时ms', '来源IP', '说明', '请求ID'];
+    const head = ['时间', '路径', '模型', '账号', '状态', 'tok入', 'tok出', '首字节ms', '耗时ms', '来源IP', '出口IP', '说明', '请求ID'];
     const body = rows.map(r => [
       r.time, r.path, r.model, r.account, r.status, r.prompt_tokens || 0, r.output_tokens || 0,
-      r.first_byte_ms || 0, r.duration_ms || 0, r.client_ip || '', (r.error || r.degraded || ''), r.id || '',
+      r.first_byte_ms || 0, r.duration_ms || 0, r.client_ip || '', r.egress_ip || '',
+      (r.error || r.degraded || ''), r.id || '',
     ].join('\t'));
     copyText([head.join('\t')].concat(body).join('\n'), '已复制 ' + rows.length + ' 条');
   });
