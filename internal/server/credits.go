@@ -65,6 +65,18 @@ func (s *Server) refreshStaleCredits(ctx context.Context, ttl time.Duration) {
 	wg.Wait()
 }
 
+// RefreshCredits 给面板用的余额刷新。
+//
+// force=false 走 2 分钟 TTL（面板 5s 轮询不会把三方域名打热）；
+// force=true 无视 TTL（用户点「刷新余额」时的明确意图）。
+func (s *Server) RefreshCredits(ctx context.Context, force bool) {
+	ttl := creditTTLStats
+	if force {
+		ttl = 0
+	}
+	s.refreshStaleCredits(ctx, ttl)
+}
+
 // noteCreditErr 余额读取失败只记一次日志（否则一次网络抖动会刷满屏幕）。
 func (s *Server) noteCreditErr(name string, err error) {
 	s.creditErrMu.Lock()

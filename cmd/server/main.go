@@ -48,6 +48,16 @@ func main() {
 		cfg.Listen = *listen
 	}
 
+	// 面板托管的账号清单（accounts.json）：存在即**完全接管** config.json 的 accounts。
+	// 规则见 internal/config/accounts.go —— 不合并是刻意的，否则"删掉的号"重启会复活。
+	accPath := config.AccountsFile(cfg.StateFile)
+	if accs, err := config.LoadAccountsOverride(accPath); err != nil {
+		log.Printf("[qwen2api] ⚠️ %v —— 本次仍用 config.json 的账号，但面板里的删除可能在重启后复活", err)
+	} else if accs != nil {
+		cfg.Accounts = accs
+		log.Printf("[qwen2api] 账号清单由面板托管：%s（%d 个）", accPath, len(accs))
+	}
+
 	// 配置来源必须打出来。没有这一行时，"--config 没传对 / 环境变量没生效"
 	// 的表现是：服务正常启动、但账号列表和 api_keys 都是空的（静默用默认值），
 	// 排查时只能靠猜。2026-10-29 容器部署实测踩过。

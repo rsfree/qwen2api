@@ -37,6 +37,8 @@ type Server struct {
 	// 积分余额读取失败的日志去重（见 credits.go）。
 	creditErrMu sync.Mutex
 	creditErrAt time.Time
+	// accountsMu 串行化 accounts.json 的写入（面板导入/删除）。
+	accountsMu sync.Mutex
 }
 
 // New 构造前门。

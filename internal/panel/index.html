@@ -1,355 +1,1150 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>qwen2api · 控制台</title>
 <style>
-  :root {
-    --bg: #f7f8fa;
-    --panel: #ffffff;
-    --border: #e4e7ec;
-    --text: #16181d;
-    --muted: #6b7280;
-    --brand: #615ced;
-    --brand-soft: #eef0ff;
-    --ok: #0f9d58;
-    --warn: #d97706;
-    --bad: #dc2626;
-    --code: #f1f3f6;
-    --shadow: 0 1px 2px rgba(16,24,40,.05), 0 4px 12px rgba(16,24,40,.04);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0f1115;
-      --panel: #171a21;
-      --border: #262b36;
-      --text: #e8eaee;
-      --muted: #9aa3b2;
-      --brand: #8b86ff;
-      --brand-soft: #1e1f3a;
-      --ok: #3ddc84;
-      --warn: #f0b429;
-      --bad: #ff6b6b;
-      --code: #10131a;
-      --shadow: 0 1px 2px rgba(0,0,0,.4);
-    }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font: 14px/1.55 -apple-system, "SF Pro Text", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-    -webkit-font-smoothing: antialiased;
-  }
-  .wrap { max-width: 1180px; margin: 0 auto; padding: 22px 20px 60px; }
-  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 22px; }
-  .logo {
-    width: 34px; height: 34px; border-radius: 9px; background: var(--brand); color: #fff;
-    display: grid; place-items: center; font-weight: 700; font-size: 16px; letter-spacing: -.5px;
-  }
-  h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: -.2px; }
-  .sub { color: var(--muted); font-size: 12.5px; }
-  .spacer { flex: 1; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
-  .dot.ok { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
-  .dot.bad { background: var(--bad); }
-  .keybox { display: flex; gap: 6px; }
-  input[type=password], input[type=text], select, textarea {
-    background: var(--panel); color: var(--text); border: 1px solid var(--border);
-    border-radius: 8px; padding: 7px 10px; font: inherit; outline: none;
-  }
-  input:focus, select:focus, textarea:focus { border-color: var(--brand); }
-  button {
-    background: var(--brand); color: #fff; border: 0; border-radius: 8px;
-    padding: 7px 14px; font: inherit; font-weight: 550; cursor: pointer;
-  }
-  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); font-weight: 450; }
-  button.ghost:hover { color: var(--text); }
-  button:disabled { opacity: .55; cursor: not-allowed; }
+/* ── 设计令牌：明暗两套独立色板 ─────────────────────────────────────────
+   冷石墨基调（仪表盘语言）：底色分层 + 单一靛蓝强调（仅交互），语义色只给状态。
+   等宽数字承载所有观测值，tabular-nums 对齐。 */
+:root {
+  --bg:#f4f5f8; --surface:#ffffff; --surface-2:#f8f9fb; --raise:#ffffff;
+  --line:#e2e5ec; --line-soft:#eceef3;
+  --ink:#14171f; --ink-2:#545c6e; --ink-3:#6f7789;
+  --accent:#3d5fe0; --accent-ink:#fff; --accent-soft:rgba(61,95,224,.09);
+  --ok:#0a7a4c; --ok-soft:rgba(10,122,76,.1);
+  --warn:#b47611; --warn-soft:rgba(180,118,17,.11);
+  --bad:#cf3b34; --bad-soft:rgba(207,59,52,.09);
+  --shadow:0 1px 2px rgba(16,20,32,.06), 0 8px 24px -14px rgba(16,20,32,.14);
+  --mono:ui-monospace,"SF Mono","Cascadia Mono",Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+}
+[data-theme="dark"] {
+  --bg:#0c0e14; --surface:#14171f; --surface-2:#1a1e28; --raise:#202531;
+  --line:#262c3a; --line-soft:#1e232e;
+  --ink:#e8ebf2; --ink-2:#a8b0c2; --ink-3:#7c8599;
+  --accent:#5b7cfa; --accent-ink:#fff; --accent-soft:rgba(91,124,250,.13);
+  --ok:#3ddc97; --ok-soft:rgba(61,220,151,.12);
+  --warn:#f5b544; --warn-soft:rgba(245,181,68,.12);
+  --bad:#f0655f; --bad-soft:rgba(240,101,95,.12);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.5);
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+[hidden] { display:none !important; }
+html,body { height:100%; }
+body { background:var(--bg); color:var(--ink); font:14px/1.55 var(--sans); -webkit-font-smoothing:antialiased; }
+::selection { background:var(--accent-soft); }
+:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
+@media (prefers-reduced-motion:reduce) { * { transition:none !important; animation:none !important; } }
 
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; margin-bottom: 20px; }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 11px; padding: 13px 14px; box-shadow: var(--shadow); }
-  .card .k { color: var(--muted); font-size: 11.5px; letter-spacing: .2px; text-transform: uppercase; }
-  .card .v { font-size: 22px; font-weight: 640; margin-top: 3px; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
-  .card .v small { font-size: 12px; font-weight: 450; color: var(--muted); }
+/* ── 壳层 ───────────────────────────────────────────────────────────── */
+.shell { display:grid; grid-template-columns:208px 1fr; min-height:100vh; }
+.nav { background:var(--surface); border-right:1px solid var(--line); display:flex; flex-direction:column; position:sticky; top:0; height:100vh; }
+.brand { padding:20px 18px 16px; border-bottom:1px solid var(--line-soft); }
+.brand .name { font-weight:650; letter-spacing:-.01em; font-size:15px; }
+.brand .sub { color:var(--ink-3); font-size:11.5px; font-family:var(--mono); margin-top:3px; }
+.nav ul { list-style:none; padding:10px 8px; flex:1; }
+.nav a { display:flex; align-items:center; gap:9px; padding:9px 11px; border-radius:8px; color:var(--ink-2); text-decoration:none; font-size:13.5px; transition:background .15s,color .15s; }
+.nav a:hover { background:var(--surface-2); color:var(--ink); }
+.nav a.on { background:var(--accent-soft); color:var(--accent); font-weight:600; }
+.nav a svg { width:16px; height:16px; flex:none; }
+.nav .sig { padding:12px 16px; border-top:1px solid var(--line-soft); font-size:11.5px; color:var(--ink-3); font-family:var(--mono); }
+.nav .sig .row { display:flex; align-items:center; gap:7px; }
+.pulse { width:7px; height:7px; border-radius:50%; background:var(--ok); box-shadow:0 0 0 0 var(--ok-soft); animation:pulse 2s infinite; }
+.pulse.bad { background:var(--bad); }
+.pulse.warn { background:var(--warn); }
+@keyframes pulse { 70% { box-shadow:0 0 0 6px transparent; } 100% { box-shadow:0 0 0 0 transparent; } }
 
-  section { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; box-shadow: var(--shadow); }
-  section > h2 { font-size: 13px; margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--border); font-weight: 600; display: flex; align-items: center; gap: 8px; }
-  section > h2 .hint { color: var(--muted); font-weight: 400; font-size: 12px; }
-  table { width: 100%; border-collapse: collapse; font-size: 12.8px; }
-  th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; font-size: 11.5px; text-transform: uppercase; letter-spacing: .3px; }
-  td { padding: 9px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-  tr:last-child td { border-bottom: 0; }
-  tbody tr:hover { background: color-mix(in srgb, var(--brand) 4%, transparent); }
-  .num { font-variant-numeric: tabular-nums; }
-  .pill { display: inline-block; padding: 1px 8px; border-radius: 20px; font-size: 11.5px; font-weight: 550; }
-  .pill.ready { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
-  .pill.cooling { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
-  .pill.auth_dead, .pill.err { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
-  .pill.ok { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); }
-  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
-  .muted { color: var(--muted); }
-  .err-text { color: var(--bad); font-size: 12px; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.main { padding:0 22px 40px; min-width:0; }
+.topbar { display:flex; align-items:center; gap:10px; padding:16px 0 14px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:5; }
+.topbar h2 { font-size:16px; font-weight:650; letter-spacing:-.01em; }
+.topbar .sep { color:var(--ink-3); }
+.topbar .meta { font-size:12px; color:var(--ink-3); font-family:var(--mono); }
+.grow { flex:1; }
+.nav-btn { display:none; }
 
-  .try { padding: 14px 16px; display: grid; gap: 10px; }
-  .try-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .try textarea { width: 100%; min-height: 68px; resize: vertical; }
-  #out {
-    background: var(--code); border: 1px solid var(--border); border-radius: 9px;
-    padding: 12px 14px; min-height: 74px; max-height: 380px; overflow: auto;
-    white-space: pre-wrap; word-break: break-word; font-size: 13px;
-  }
-  #out .reason { color: var(--muted); font-size: 12.5px; }
-  .kv { display: flex; gap: 16px; flex-wrap: wrap; padding: 0 16px 14px; color: var(--muted); font-size: 12px; }
-  .kv b { color: var(--text); font-weight: 550; }
-  .empty { padding: 26px 16px; text-align: center; color: var(--muted); font-size: 13px; }
+/* ── 控件 ───────────────────────────────────────────────────────────── */
+button { font:inherit; font-size:13px; color:var(--ink-2); background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:6px 12px; cursor:pointer; transition:.15s; }
+button:hover { border-color:var(--ink-3); color:var(--ink); }
+button.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:600; }
+button.primary:hover { filter:brightness(1.07); }
+button.danger { color:var(--bad); }
+button.danger:hover { border-color:var(--bad); background:var(--bad-soft); }
+button.ghost { background:transparent; }
+button.xs { padding:3px 9px; font-size:12px; border-radius:6px; }
+button.icon { padding:6px 8px; line-height:0; }
+button:disabled { opacity:.5; cursor:not-allowed; }
+input,select,textarea { font:inherit; font-size:13px; color:var(--ink); background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:7px 10px; width:100%; }
+input::placeholder,textarea::placeholder { color:var(--ink-3); }
+textarea { font-family:var(--mono); font-size:12.5px; line-height:1.7; resize:vertical; }
+label.sel-note { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--ink-3); white-space:nowrap; }
+label.sel-note select { width:auto; padding:5px 8px; }
+
+/* ── 卡片 / 面板 ────────────────────────────────────────────────────── */
+.view { padding-top:16px; }
+.stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(148px,1fr)); gap:10px; margin-bottom:14px; }
+.stat { background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+.stat .v { font-family:var(--mono); font-size:20px; font-weight:600; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+.stat .k { color:var(--ink-3); font-size:11.5px; margin-top:2px; }
+.stat.good .v { color:var(--ok); } .stat.warn .v { color:var(--warn); } .stat.bad .v { color:var(--bad); }
+.box { background:var(--surface); border:1px solid var(--line); border-radius:10px; margin-bottom:14px; overflow:hidden; }
+.box > header { display:flex; align-items:center; gap:10px; padding:12px 14px; border-bottom:1px solid var(--line-soft); flex-wrap:wrap; }
+.box > header h3 { font-size:13.5px; font-weight:650; }
+.hint { color:var(--ink-3); font-size:11.5px; font-weight:400; }
+.note { color:var(--ink-3); font-size:11.5px; font-family:var(--mono); }
+.pad { padding:14px; }
+
+/* ── 表格 ───────────────────────────────────────────────────────────── */
+.tbl-wrap { overflow:auto; }
+table { width:100%; border-collapse:collapse; font-size:12.5px; }
+th { text-align:left; font-weight:500; color:var(--ink-3); font-size:11.5px; letter-spacing:.03em; text-transform:uppercase; padding:9px 10px; border-bottom:1px solid var(--line-soft); white-space:nowrap; position:sticky; top:0; background:var(--surface); z-index:1; }
+td { padding:9px 10px; border-bottom:1px solid var(--line-soft); vertical-align:middle; }
+tbody tr:hover { background:var(--surface-2); }
+tbody tr:last-child td { border-bottom:0; }
+td.num,th.num { font-family:var(--mono); font-variant-numeric:tabular-nums; text-align:right; }
+td.mono { font-family:var(--mono); }
+.c-chk { width:34px; }
+.c-acts { width:182px; text-align:right; }
+.acc-name { font-weight:600; }
+.acc-sub { color:var(--ink-3); font-size:11.5px; font-family:var(--mono); }
+.acts { display:flex; gap:5px; justify-content:flex-end; flex-wrap:nowrap; }
+button.xs { white-space:nowrap; }
+
+/* ── 标签 ───────────────────────────────────────────────────────────── */
+.tag { display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border-radius:999px; font-size:11.5px; font-weight:500; white-space:nowrap; }
+.tag.ok { background:var(--ok-soft); color:var(--ok); }
+.tag.warn { background:var(--warn-soft); color:var(--warn); }
+.tag.bad { background:var(--bad-soft); color:var(--bad); }
+.tag.muted { background:var(--surface-2); color:var(--ink-3); }
+.bar { height:5px; border-radius:3px; background:var(--line); overflow:hidden; min-width:56px; max-width:140px; }
+.bar > i { display:block; height:100%; background:var(--accent); }
+.bar.warn > i { background:var(--warn); }
+.bar.bad > i { background:var(--bad); }
+
+/* ── 工具栏 / chips / 分页 ──────────────────────────────────────────── */
+.tools { padding:10px 14px; border-bottom:1px solid var(--line-soft); display:flex; flex-direction:column; gap:9px; }
+.tools .row { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+.search { position:relative; flex:1; min-width:180px; max-width:340px; }
+.search input { padding-left:30px; }
+.search svg { position:absolute; left:9px; top:50%; transform:translateY(-50%); width:14px; height:14px; color:var(--ink-3); }
+.chips { display:flex; gap:6px; flex-wrap:wrap; }
+.chips button { padding:4px 10px; font-size:12px; border-radius:999px; }
+.chips button.on { background:var(--accent-soft); border-color:transparent; color:var(--accent); font-weight:600; }
+.pager { display:flex; align-items:center; gap:10px; padding:9px 14px; border-top:1px solid var(--line-soft); font-size:12px; color:var(--ink-3); }
+
+/* ── 批量条 ─────────────────────────────────────────────────────────── */
+.bulkbar { position:fixed; left:50%; bottom:18px; transform:translate(-50%,140%); background:var(--raise); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); padding:9px 14px; display:flex; align-items:center; gap:10px; z-index:20; transition:transform .22s cubic-bezier(.32,.72,0,1); }
+.bulkbar.on { transform:translate(-50%,0); }
+.bulkbar .cnt { font-size:12.5px; color:var(--ink-2); }
+
+/* ── 对话框 ─────────────────────────────────────────────────────────── */
+.veil { position:fixed; inset:0; background:rgba(10,12,18,.5); backdrop-filter:blur(2px); display:flex; align-items:center; justify-content:center; padding:20px; z-index:40; }
+.dlg { background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); width:640px; max-width:100%; max-height:90vh; display:flex; flex-direction:column; }
+.dlg > header { padding:15px 18px; border-bottom:1px solid var(--line-soft); display:flex; align-items:center; gap:10px; }
+.dlg > header h3 { font-size:14.5px; font-weight:650; }
+.dlg .body { padding:16px 18px; overflow:auto; }
+.dlg > footer { padding:13px 18px; border-top:1px solid var(--line-soft); display:flex; align-items:center; gap:9px; }
+.tabs { display:flex; gap:6px; margin-bottom:14px; border-bottom:1px solid var(--line-soft); }
+.tabs button { border:0; border-bottom:2px solid transparent; border-radius:0; background:transparent; padding:7px 12px; color:var(--ink-3); }
+.tabs button.on { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
+.field { margin-bottom:12px; }
+.field > label { display:block; font-size:12px; color:var(--ink-3); margin-bottom:5px; }
+.state { border-radius:8px; padding:9px 11px; font-size:12.5px; margin-top:10px; }
+.state.ok { background:var(--ok-soft); color:var(--ok); }
+.state.err { background:var(--bad-soft); color:var(--bad); }
+.res { margin-top:10px; border:1px solid var(--line); border-radius:8px; overflow:hidden; max-height:230px; overflow-y:auto; }
+.res .row { display:flex; gap:8px; align-items:center; padding:7px 10px; border-bottom:1px solid var(--line-soft); font-size:12px; }
+.res .row:last-child { border-bottom:0; }
+.res .row .em { font-family:var(--mono); color:var(--ink-2); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.res .row .why { color:var(--bad); font-size:11.5px; max-width:46%; text-align:right; }
+
+/* ── Toast ──────────────────────────────────────────────────────────── */
+#toast { position:fixed; top:18px; right:18px; z-index:60; display:flex; flex-direction:column; gap:8px; }
+#toast div { background:var(--raise); border:1px solid var(--line); border-left:3px solid var(--accent); border-radius:8px; padding:9px 13px; font-size:12.5px; box-shadow:var(--shadow); animation:slide .2s; }
+#toast div.ok { border-left-color:var(--ok); } #toast div.err { border-left-color:var(--bad); }
+@keyframes slide { from { transform:translateX(20px); opacity:0; } }
+
+/* ── 调试台 ─────────────────────────────────────────────────────────── */
+.debug { display:grid; gap:10px; }
+.debug textarea { min-height:74px; }
+.out { background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:11px; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-word; min-height:60px; max-height:320px; overflow:auto; }
+
+/* ── 手机 ───────────────────────────────────────────────────────────── */
+@media (max-width:900px) {
+  .shell { grid-template-columns:1fr; }
+  .nav { position:fixed; left:0; top:0; width:230px; transform:translateX(-100%); transition:transform .24s; z-index:50; }
+  .nav.open { transform:translateX(0); box-shadow:var(--shadow); }
+  .nav-btn { display:inline-flex; }
+  .main { padding:0 12px 40px; }
+  .stats { grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); }
+  .topbar .meta, .topbar .sep { display:none; }
+  .c-acts { width:auto; }
+  .dlg { max-height:94vh; }
+}
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <div class="logo">Q</div>
-    <div>
-      <h1>qwen2api 控制台</h1>
-      <div class="sub"><span id="dot" class="dot"></span> <span id="status">连接中…</span></div>
+<div class="shell">
+  <nav class="nav" id="navDrawer">
+    <div class="brand">
+      <div class="name">qwen2api</div>
+      <div class="sub" id="navSub">控制台</div>
     </div>
-    <div class="spacer"></div>
-    <div class="keybox">
-      <input id="key" type="password" placeholder="API Key（若已配置）" style="width:200px">
-      <button class="ghost" onclick="saveKey()">保存</button>
-      <button class="ghost" onclick="load()">刷新</button>
+    <ul>
+      <li><a href="#accounts" data-view="accounts" class="on">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4"/></svg>
+        账号池</a></li>
+      <li><a href="#usage" data-view="usage">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12"/><path d="M4.5 13.5V8.2M8 13.5V3.5M11.5 13.5v-3"/></svg>
+        用量</a></li>
+      <li><a href="#capacity" data-view="capacity">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12M3 11l3-3 2.5 2L13 4.5"/><path d="M10 4.5h3v3"/></svg>
+        容量</a></li>
+      <li><a href="#models" data-view="models">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
+        模型与调试</a></li>
+      <li><a href="#config" data-view="config">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
+        配置</a></li>
+    </ul>
+    <div class="sig">
+      <div class="row"><span class="pulse" id="navPulse"></span><span id="navState">连接中</span></div>
+      <div class="row" style="margin-top:5px"><span id="navVer">v-</span> · <span id="navUp">-</span></div>
     </div>
-  </header>
+  </nav>
 
-  <div class="cards" id="cards"></div>
+  <div class="main">
+    <div class="topbar">
+      <button class="icon ghost nav-btn" id="navBtn" aria-label="打开导航">
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg>
+      </button>
+      <h2 id="ttl">账号池</h2>
+      <span class="sep">/</span>
+      <span class="meta" id="subMeta">-</span>
+      <div class="grow"></div>
+      <button class="icon ghost" id="btnTheme" title="切换明暗" aria-label="切换主题">
+        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z"/></svg>
+      </button>
+      <button id="btnRefresh">刷新</button>
+      <button class="primary" id="btnImport">导入账号</button>
+    </div>
 
-  <section>
-    <h2>账号池 <span class="hint" id="pool-hint"></span></h2>
-    <div id="accounts"></div>
-  </section>
-
-  <section>
-    <h2>在线试跑 <span class="hint">直接打本机 /v1/chat/completions（流式）</span></h2>
-    <div class="try">
-      <div class="try-row">
-        <select id="model"></select>
-        <select id="thinking">
-          <option value="auto">思考：自动</option>
-          <option value="thinking">思考：强制</option>
-          <option value="fast">思考：快速</option>
-        </select>
-        <button id="send" onclick="send()">发送</button>
-        <span class="muted" id="trymeta"></span>
+    <!-- ══════════ 账号池 ══════════ -->
+    <section class="view" id="view-accounts">
+      <div class="stats">
+        <div class="stat"><div class="v" id="sTotal">-</div><div class="k">账号总数</div></div>
+        <div class="stat good"><div class="v" id="sReady">-</div><div class="k">可用</div></div>
+        <div class="stat warn"><div class="v" id="sCooling">-</div><div class="k">冷却中</div></div>
+        <div class="stat bad"><div class="v" id="sDead">-</div><div class="k">凭据失效</div></div>
+        <div class="stat"><div class="v" id="sImgLeft">-</div><div class="k">今日可出图</div></div>
+        <div class="stat"><div class="v" id="sCredits">-</div><div class="k">积分余额合计</div></div>
+        <div class="stat"><div class="v" id="sVidLeft">-</div><div class="k">可做 720P 5s</div></div>
       </div>
-      <textarea id="prompt" placeholder="输入一句话试试…">用一句话说明你是谁。</textarea>
-      <div id="out" class="muted">输出会显示在这里。</div>
-    </div>
-  </section>
 
-  <section>
-    <h2>请求流水 <span class="hint">最近 80 条</span></h2>
-    <div id="reqs"></div>
-  </section>
+      <div class="box">
+        <header>
+          <h3>账号池</h3>
+          <span class="hint" id="accNote"></span>
+          <span class="grow"></span>
+          <button class="xs" id="btnRefreshCredits" title="从上游重新读取每个账号的积分余额">刷新余额</button>
+        </header>
+        <div class="tools">
+          <div class="row">
+            <div class="search">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.4"/><path d="M10.4 10.4 14 14" stroke-linecap="round"/></svg>
+              <input id="accQ" type="search" placeholder="搜索账号名 / 邮箱 / 备注" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="chips" id="accChips"></div>
+            <span class="grow"></span>
+            <label class="sel-note">排序<select id="accSort">
+              <option value="default">异常优先</option>
+              <option value="balance_desc">余额 ↓</option>
+              <option value="balance_asc">余额 ↑</option>
+              <option value="fails_desc">失败次数 ↓</option>
+              <option value="served_desc">已服务 ↓</option>
+              <option value="name">账号名</option>
+            </select></label>
+            <label class="sel-note">每页<select id="accSize">
+              <option value="20">20</option><option value="50">50</option><option value="100">100</option><option value="0">全部</option>
+            </select></label>
+          </div>
+          <div class="row" id="accErrRow" hidden>
+            <span class="tag bad" id="accErrText"></span>
+            <button class="xs ghost" id="accErrClear">清空过滤</button>
+          </div>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr>
+              <th class="c-chk"><input type="checkbox" id="accChkAll" title="全选当前页" aria-label="全选当前页" style="width:auto"></th>
+              <th>账号</th><th>状态</th><th class="num">积分</th><th class="num">今日出图</th>
+              <th class="num">今日视频</th><th class="num">成功/失败</th><th class="num">在途</th><th>最近使用</th><th class="c-acts"></th>
+            </tr></thead>
+            <tbody id="accBody"></tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <span id="accPageInfo"></span>
+          <span class="grow"></span>
+          <button class="xs ghost" id="accPrev">上一页</button>
+          <span class="num" id="accPageNum"></span>
+          <button class="xs ghost" id="accNext">下一页</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════ 用量 ══════════ -->
+    <section class="view" id="view-usage" hidden>
+      <div class="stats">
+        <div class="stat"><div class="v" id="uTotal">-</div><div class="k">累计请求</div></div>
+        <div class="stat good"><div class="v" id="uOk">-</div><div class="k">成功</div></div>
+        <div class="stat bad"><div class="v" id="uFail">-</div><div class="k">失败</div></div>
+        <div class="stat"><div class="v" id="uTokens">-</div><div class="k">Token 合计</div></div>
+        <div class="stat"><div class="v" id="uLatency">-</div><div class="k">平均耗时</div></div>
+        <div class="stat"><div class="v" id="uStream">-</div><div class="k">流式请求</div></div>
+      </div>
+      <div class="box">
+        <header><h3>请求流水</h3><span class="hint">最近 80 条 · 进程内累计，重启归零</span></header>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>路径</th><th>模型</th><th>账号</th><th>状态</th><th class="num">tok 入/出</th><th class="num">首字节</th><th class="num">耗时</th><th>说明</th></tr></thead>
+            <tbody id="logBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="box">
+        <header><h3>分布</h3><span class="hint">按模型 / 按账号（进程内累计）</span></header>
+        <div class="pad" style="display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">
+          <div><div class="hint" style="margin-bottom:6px">按模型</div><table><tbody id="byModelBody"></tbody></table></div>
+          <div><div class="hint" style="margin-bottom:6px">按账号</div><table><tbody id="byAccountBody"></tbody></table></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════ 容量 ══════════ -->
+    <section class="view" id="view-capacity" hidden>
+      <div class="stats">
+        <div class="stat"><div class="v" id="cImg">-</div><div class="k">全池今日可出图（张）</div></div>
+        <div class="stat"><div class="v" id="cVid">-</div><div class="k">全池可做 720P 5s（条）</div></div>
+        <div class="stat"><div class="v" id="cCredits">-</div><div class="k">积分余额合计</div></div>
+        <div class="stat"><div class="v" id="cAccts">-</div><div class="k">可用账号</div></div>
+      </div>
+      <div class="box">
+        <header><h3>每号余量</h3><span class="hint">出图按本地每日限额；视频按真实余额 ÷ 单价</span></header>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>账号</th><th>今日出图</th><th class="num">剩余张数</th><th class="num">余额</th><th class="num">可做 720P 5s</th><th class="num">可做 1080P 15s</th></tr></thead>
+            <tbody id="capBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════ 模型与调试 ══════════ -->
+    <section class="view" id="view-models" hidden>
+      <div class="box">
+        <header><h3>模型清单</h3><span class="hint" id="modelsNote">与 /v1/models 同一份缓存</span></header>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>模型</th><th>标题</th><th>媒体</th><th>能力</th><th class="num">上下文</th><th>备注</th></tr></thead>
+            <tbody id="modelBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="box">
+        <header><h3>在线调试</h3><span class="hint">直接打 /v1/chat/completions（流式），会消耗真实额度</span></header>
+        <div class="pad debug">
+          <div style="display:flex;gap:9px;flex-wrap:wrap">
+            <label class="sel-note">模型<select id="dbgModel" style="min-width:230px"></select></label>
+            <label class="sel-note">思考<select id="dbgGear"><option value="fast">fast</option><option value="auto">auto</option><option value="thinking">thinking</option></select></label>
+          </div>
+          <textarea id="dbgPrompt" placeholder="输入 prompt，回车发送（Shift+回车换行）">只回复两个字：在线</textarea>
+          <div style="display:flex;gap:9px"><button class="primary" id="dbgSend">发送</button><button id="dbgClear">清空输出</button></div>
+          <div class="out" id="dbgOut">（输出会实时追加在这里）</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════ 配置 ══════════ -->
+    <section class="view" id="view-config" hidden>
+      <div class="box">
+        <header><h3>服务</h3><span class="grow"></span><span class="note" id="cfgVer"></span></header>
+        <div class="pad" style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))" id="cfgService"></div>
+      </div>
+      <div class="box">
+        <header><h3>上游</h3></header>
+        <div class="pad" style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))" id="cfgUpstream"></div>
+      </div>
+      <div class="box">
+        <header><h3>账号池与配额</h3></header>
+        <div class="pad" style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))" id="cfgPool"></div>
+      </div>
+      <div class="box">
+        <header><h3>视频积分单价</h3><span class="hint">按模型版本分两套：happyhorse11（默认）与 1.0 不同价</span></header>
+        <div class="pad"><table><thead><tr><th>档位</th><th class="num">5s</th><th class="num">10s</th><th class="num">15s</th></tr></thead><tbody id="cfgPricing"></tbody></table></div>
+      </div>
+      <div class="box">
+        <header><h3>账号清单来源</h3></header>
+        <div class="pad">
+          <div class="state ok" id="cfgAccountsSrc">-</div>
+          <div class="hint" style="margin-top:8px">
+            面板的导入/删除写在 <span class="mono" id="cfgAccountsPath">accounts.json</span>；
+            该文件一旦存在就<b>完全接管</b> config.json 里的 accounts。
+            想退回声明式配置：删掉该文件并重启。
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
 </div>
 
+<!-- 导入账号 -->
+<div class="veil" id="importVeil" hidden>
+  <div class="dlg">
+    <header><h3>导入账号</h3><span class="grow"></span><button class="xs ghost" id="importClose">关闭</button></header>
+    <div class="body">
+      <div class="tabs">
+        <button data-tab="paste" class="on">粘贴文本</button>
+        <button data-tab="file">导入文件</button>
+        <button data-tab="single">单个添加</button>
+      </div>
+
+      <div id="tab-paste">
+        <div class="field">
+          <label>每行一个账号：<b>邮箱 密码 [账号名] [备注]</b>；分隔符支持空格 / 逗号 / 竖线 / 制表符。也可直接粘贴 JSON 数组。</label>
+          <textarea id="pasteBox" rows="9" placeholder="zhang@example.com 密码 main 主号
+li@example.com,密码2
+wang@example.com|密码3|备用号"></textarea>
+        </div>
+      </div>
+
+      <div id="tab-file" hidden>
+        <div class="field">
+          <label>选择 .txt 或 .json（内容会填进「粘贴文本」，可先检查再导入）</label>
+          <input type="file" id="fileBox" accept=".txt,.json,text/plain,application/json">
+        </div>
+      </div>
+
+      <div id="tab-single" hidden>
+        <div class="field"><label>账号名（可空，默认取邮箱前缀）</label><input id="sName" placeholder="main"></div>
+        <div class="field"><label>邮箱</label><input id="sEmail" placeholder="name@example.com"></div>
+        <div class="field"><label>密码</label><input id="sPass" type="password" placeholder="上游登录密码"></div>
+        <div class="field"><label>备注（可空）</label><input id="sNote" placeholder="Go 套餐 / 备用"></div>
+      </div>
+
+      <div class="state" id="importHint" hidden></div>
+      <div class="res" id="importRes" hidden></div>
+    </div>
+    <footer>
+      <label class="sel-note"><input type="checkbox" id="importValidate" checked style="width:auto"> 导入前逐个登录校验</label>
+      <span class="grow"></span>
+      <span class="note" id="importCount"></span>
+      <button class="primary" id="importGo">开始导入</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 需要 Key -->
+<div class="veil" id="keyVeil" hidden>
+  <div class="dlg" style="width:430px">
+    <header><h3>需要访问密钥</h3></header>
+    <div class="body">
+      <div class="field">
+        <label>API Key（与 /v1 前门同一把；只存在浏览器本地）</label>
+        <input id="keyInput" type="password" placeholder="sk-..." autocomplete="off">
+      </div>
+      <div class="state err" id="keyErr" hidden></div>
+    </div>
+    <footer><span class="grow"></span><button class="primary" id="keyGo">进入</button></footer>
+  </div>
+</div>
+
+<div id="toast"></div>
+
 <script>
-const $ = (id) => document.getElementById(id);
-let timer = null;
+'use strict';
+/* ═══════════════ 基础设施 ═══════════════ */
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+const KEY_STORE = 'qwen2api_key';
+const THEME_STORE = 'qwen2api_theme';
+const key = () => localStorage.getItem(KEY_STORE) || '';
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num = n => (n == null || n === '') ? '-' : Number(n).toLocaleString('en-US');
+const pct = (a, b) => b > 0 ? Math.min(100, Math.round(a / b * 100)) : 0;
 
-function key() { return $('key').value.trim(); }
-function saveKey() {
-  localStorage.setItem('qwen2api_key', key());
-  load();
-}
-function authHeaders() {
+function hdrs(extra) {
+  const h = Object.assign({}, extra || {});
   const k = key();
-  return k ? { 'Authorization': 'Bearer ' + k } : {};
+  if (k) h['Authorization'] = 'Bearer ' + k;
+  return h;
+}
+async function api(path, opt) {
+  const o = Object.assign({ headers: hdrs() }, opt || {});
+  if (o.body && !o.headers['Content-Type']) o.headers['Content-Type'] = 'application/json';
+  const r = await fetch(path, o);
+  const txt = await r.text();
+  let data = null;
+  try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = { error: txt.slice(0, 200) }; }
+  if (r.status === 401) { askKey(); throw new Error('unauthorized'); }
+  if (!r.ok) throw new Error((data && (data.error || data.message)) || ('HTTP ' + r.status));
+  return data;
+}
+function toast(msg, kind) {
+  const d = document.createElement('div');
+  d.className = kind || '';
+  d.textContent = msg;
+  $('#toast').appendChild(d);
+  setTimeout(() => d.remove(), 3600);
+}
+function askKey() { $('#keyVeil').hidden = false; setTimeout(() => $('#keyInput').focus(), 30); }
+
+/* ═══════════════ 状态 ═══════════════ */
+const S = {
+  ov: null, models: null, view: 'accounts',
+  q: '', status: 'all', sort: 'default', size: 20, page: 0,
+  sel: new Set(),
+};
+
+async function loadOverview() {
+  const d = await api('/panel/api/overview');
+  S.ov = d;
+  $('#navState').textContent = '已连接';
+  $('#navPulse').className = 'pulse';
+  $('#navVer').textContent = 'v' + (d.version || '-');
+  $('#navUp').textContent = fmtUp(d.uptime_s);
+  $('#subMeta').textContent = (d.accounts || []).length + ' 账号 · ' + ((d.stats && d.stats.total) || 0) + ' 请求 · 运行 ' + fmtUp(d.uptime_s);
+  renderCurrent();
 }
 
-async function load() {
-  try {
-    const r = await fetch('/panel/api/overview', { headers: authHeaders() });
-    if (r.status === 401) {
-      $('dot').className = 'dot bad';
-      $('status').textContent = '需要 API Key（在右上角填入并保存）';
-      return;
-    }
-    const d = await r.json();
-    render(d);
-    $('dot').className = 'dot ok';
-    $('status').textContent = `运行中 · v${d.version} · 已运行 ${fmtDur(d.uptime_s)}`;
-  } catch (e) {
-    $('dot').className = 'dot bad';
-    $('status').textContent = '无法连接网关：' + e.message;
-  }
+function fmtUp(s) {
+  s = s || 0;
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  if (s < 86400) return Math.floor(s / 3600) + 'h' + Math.floor(s % 3600 / 60) + 'm';
+  return Math.floor(s / 86400) + 'd' + Math.floor(s % 86400 / 3600) + 'h';
 }
-
 function fmtDur(s) {
-  if (s < 60) return s + ' 秒';
-  if (s < 3600) return Math.floor(s / 60) + ' 分';
-  if (s < 86400) return Math.floor(s / 3600) + ' 时 ' + Math.floor(s % 3600 / 60) + ' 分';
-  return Math.floor(s / 86400) + ' 天';
+  s = Math.max(0, s | 0);
+  if (s < 60) return s + 's';
+  return Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + 's';
 }
-function fmtMs(ms) { return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms'; }
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function fmtTime(iso) {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  if (isNaN(d)) return '-';
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 0) return d.toLocaleTimeString('zh-CN');
+  if (diff < 60) return Math.floor(diff) + 's 前';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm 前';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h 前';
+  return d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }) + ' ' + d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 }
 
-function render(d) {
-  const s = d.stats || {};
-  const acc = d.accounts || [];
-  const ready = acc.filter(a => a.state === 'ready').length;
-  const cool = acc.filter(a => a.state === 'cooling').length;
-  const dead = acc.filter(a => a.state === 'auth_dead').length;
-  const rate = s.total ? Math.round((s.ok / s.total) * 100) : 0;
+/* ═══════════════ 账号池 ═══════════════ */
+const VIDEO_MIN = 30; // 最低档 720P 5s，用来判断"余额还能不能做点什么"
 
-  $('cards').innerHTML = [
-    card('账号', acc.length, `可用 ${ready} · 冷却 ${cool} · 失效 ${dead}`),
-    card('请求', s.total || 0, `流式 ${s.streaming || 0}`),
-    card('成功率', rate + '%', `成功 ${s.ok || 0} · 失败 ${s.failed || 0}`),
-    card('Token', (s.tokens_total || 0).toLocaleString(), '输入 + 输出'),
-    card('平均耗时', fmtMs(s.avg_duration_ms || 0), '请求全周期'),
+function acctStatus(a) {
+  if (a.state === 'auth_dead') return { k: 'dead', t: '失效', cls: 'bad' };
+  if (a.state === 'cooling') return { k: 'cooling', t: '冷却 ' + fmtDur(a.cooldown_left_s), cls: 'warn' };
+  const imgFull = a.image_limit > 0 && a.image_today >= a.image_limit;
+  const noCredit = a.credit_known && a.credit_balance < VIDEO_MIN;
+  if (imgFull && noCredit) return { k: 'exhausted', t: '额度用尽', cls: 'warn' };
+  return { k: 'ready', t: '可用', cls: 'ok' };
+}
+
+function accountsFiltered() {
+  let list = (S.ov ? S.ov.accounts : []).slice();
+  if (S.q) {
+    const q = S.q.toLowerCase();
+    list = list.filter(a =>
+      (a.name || '').toLowerCase().includes(q) ||
+      (a.email || '').toLowerCase().includes(q) ||
+      (a.note || '').toLowerCase().includes(q));
+  }
+  if (S.status !== 'all') list = list.filter(a => acctStatus(a).k === S.status);
+  const order = { dead: 0, cooling: 1, exhausted: 2, ready: 3 };
+  const bal = a => a.credit_known ? a.credit_balance : -1;
+  switch (S.sort) {
+    case 'balance_desc': list.sort((a, b) => bal(b) - bal(a)); break;
+    case 'balance_asc': list.sort((a, b) => bal(a) - bal(b)); break;
+    case 'fails_desc': list.sort((a, b) => (b.failures || 0) - (a.failures || 0)); break;
+    case 'served_desc': list.sort((a, b) => (b.served || 0) - (a.served || 0)); break;
+    case 'name': list.sort((a, b) => String(a.name).localeCompare(String(b.name))); break;
+    default: list.sort((a, b) => (order[acctStatus(a).k] - order[acctStatus(b).k]) || (bal(b) - bal(a)));
+  }
+  return list;
+}
+
+function renderAccounts() {
+  const all = S.ov.accounts || [];
+  let ready = 0, cooling = 0, dead = 0, imgLeft = 0, credits = 0, creditsKnown = 0, vidLeft = 0;
+  all.forEach(a => {
+    const st = acctStatus(a).k;
+    if (st === 'dead') dead++; else if (st === 'cooling') cooling++; else ready++;
+    if (a.image_limit > 0) imgLeft += Math.max(0, a.image_limit - a.image_today);
+    if (a.credit_known) { credits += a.credit_balance; creditsKnown++; vidLeft += Math.floor(a.credit_balance / VIDEO_MIN); }
+  });
+  $('#sTotal').textContent = all.length;
+  $('#sReady').textContent = ready;
+  $('#sCooling').textContent = cooling;
+  $('#sDead').textContent = dead;
+  $('#sImgLeft').textContent = imgLeft;
+  $('#sCredits').textContent = creditsKnown ? num(credits) : '-';
+  $('#sVidLeft').textContent = creditsKnown ? vidLeft : '-';
+  $('#accNote').textContent = !all.length ? ''
+    : (creditsKnown === all.length ? '' : (creditsKnown ? '（' + (all.length - creditsKnown) + ' 个余额未读到）' : '余额未读取，点「刷新余额」'));
+
+  const chips = [
+    ['all', '全部', all.length],
+    ['ready', '可用', ready],
+    ['cooling', '冷却', cooling],
+    ['dead', '失效', dead],
+    ['exhausted', '额度用尽', all.filter(a => acctStatus(a).k === 'exhausted').length],
+  ];
+  $('#accChips').innerHTML = chips.map(([k, t, n]) =>
+    `<button data-status="${k}" class="${S.status === k ? 'on' : ''}">${t} <span class="note">${n}</span></button>`).join('');
+
+  const list = accountsFiltered();
+  const size = S.size === 0 ? (list.length || 1) : S.size;
+  const pages = Math.max(1, Math.ceil(list.length / size));
+  if (S.page >= pages) S.page = pages - 1;
+  const start = S.page * size;
+  const rows = list.slice(start, start + size);
+
+  $('#accPageInfo').textContent = list.length ? `第 ${start + 1}–${Math.min(start + size, list.length)} / ${list.length}` : '没有匹配的账号';
+  $('#accPageNum').textContent = (S.page + 1) + ' / ' + pages;
+  $('#accPrev').disabled = S.page === 0;
+  $('#accNext').disabled = S.page >= pages - 1;
+
+  $('#accBody').innerHTML = rows.map(a => {
+    const st = acctStatus(a);
+    const bal = a.credit_known ? num(a.credit_balance) : '<span class="hint">未知</span>';
+    const img = a.image_limit > 0
+      ? `${a.image_today}/${a.image_limit}<div class="bar ${a.image_today >= a.image_limit ? 'warn' : ''}" style="margin-top:4px"><i style="width:${pct(a.image_today, a.image_limit)}%"></i></div>`
+      : String(a.image_today || 0);
+    const vid = a.video_limit > 0 ? `${a.video_today}/${a.video_limit}` : String(a.video_today || 0);
+    return `<tr data-name="${esc(a.name)}">
+      <td class="c-chk"><input type="checkbox" class="rowchk" ${S.sel.has(a.name) ? 'checked' : ''} style="width:auto"></td>
+      <td><div class="acc-name">${esc(a.name)}</div><div class="acc-sub">${esc(a.email || '-')}${a.note ? ' · ' + esc(a.note) : ''}</div></td>
+      <td><span class="tag ${st.cls}">${esc(st.t)}</span>${a.last_error ? ` <span class="tag muted" title="${esc(a.last_error)}">有错</span>` : ''}</td>
+      <td class="num">${bal}</td>
+      <td class="num">${img}</td>
+      <td class="num">${vid}</td>
+      <td class="num">${a.served || 0} / ${a.failures || 0}</td>
+      <td class="num">${a.inflight || 0}</td>
+      <td class="note">${a.last_used ? fmtTime(a.last_used) : '-'}</td>
+      <td class="c-acts"><div class="acts">
+        <button class="xs" data-act="test">重登</button>
+        <button class="xs" data-act="reset">重置</button>
+        <button class="xs danger" data-act="del">删除</button>
+      </div></td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="10" style="text-align:center;color:var(--ink-3);padding:26px">没有账号。点右上角「导入账号」开始。</td></tr>`;
+
+  $('#accChkAll').checked = rows.length > 0 && rows.every(a => S.sel.has(a.name));
+  renderBulk();
+}
+
+function renderBulk() {
+  let bar = $('#bulkbar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'bulkbar';
+    bar.className = 'bulkbar';
+    bar.innerHTML = '<span class="cnt"></span><button class="xs" data-bulk="reset">重置状态</button><button class="xs danger" data-bulk="del">删除</button><button class="xs ghost" data-bulk="clear">取消</button>';
+    document.body.appendChild(bar);
+    bar.addEventListener('click', async e => {
+      const b = e.target.closest('[data-bulk]');
+      if (!b) return;
+      const act = b.dataset.bulk;
+      if (act === 'clear') { S.sel.clear(); renderAccounts(); return; }
+      const names = Array.from(S.sel);
+      if (act === 'del' && !confirm(`确定删除 ${names.length} 个账号？\n\n会同时写回 accounts.json，重启后也不会回来。`)) return;
+      let ok = 0, fail = 0;
+      for (const n of names) {
+        try {
+          if (act === 'reset') await api('/panel/api/reset?name=' + encodeURIComponent(n), { method: 'POST' });
+          else await api('/panel/api/accounts/delete?name=' + encodeURIComponent(n), { method: 'POST' });
+          ok++;
+        } catch (err) { fail++; }
+      }
+      toast(`${act === 'del' ? '删除' : '重置'}完成：成功 ${ok}${fail ? '，失败 ' + fail : ''}`, fail ? 'err' : 'ok');
+      S.sel.clear();
+      await loadOverview();
+    });
+  }
+  bar.querySelector('.cnt').textContent = `已选 ${S.sel.size} 个`;
+  bar.classList.toggle('on', S.sel.size > 0);
+}
+
+/* ═══════════════ 用量 ═══════════════ */
+function renderUsage() {
+  const st = S.ov.stats || {};
+  const reqs = S.ov.requests || [];
+  $('#uTotal').textContent = num(st.total || 0);
+  $('#uOk').textContent = num(st.ok || 0);
+  $('#uFail').textContent = num(st.failed || 0);
+  $('#uTokens').textContent = num(st.tokens_total || 0);
+  $('#uLatency').textContent = st.avg_duration_ms ? (st.avg_duration_ms + 'ms') : '-';
+  $('#uStream').textContent = num(st.streaming || 0);
+
+  $('#logBody').innerHTML = reqs.length ? reqs.slice().reverse().map(r => {
+    const code = r.status || 0;
+    const cls = code >= 400 ? 'bad' : (code >= 300 ? 'warn' : 'ok');
+    const note = r.error || (r.degraded ? '降级: ' + r.degraded : '');
+    return `<tr>
+      <td class="note">${fmtTime(r.time)}</td>
+      <td class="mono">${esc(String(r.path || '').replace('/v1/', ''))}</td>
+      <td class="mono">${esc(r.model || '-')}</td>
+      <td class="mono">${esc(r.account || '-')}</td>
+      <td><span class="tag ${cls}">${code || '-'}</span></td>
+      <td class="num">${r.prompt_tokens || 0} / ${r.output_tokens || 0}</td>
+      <td class="num">${r.first_byte_ms ? r.first_byte_ms + 'ms' : '-'}</td>
+      <td class="num">${r.duration_ms ? r.duration_ms + 'ms' : '-'}</td>
+      <td class="note" title="${esc(note)}">${esc(note.slice(0, 46))}</td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="9" style="text-align:center;color:var(--ink-3);padding:26px">还没有请求</td></tr>`;
+
+  const byModel = st.by_model || {}, byAccount = st.by_account || {};
+  const row = (k, v, max) => `<tr><td class="mono">${esc(k)}</td><td style="width:44%"><div class="bar"><i style="width:${pct(v, max)}%"></i></div></td><td class="num">${num(v)}</td></tr>`;
+  const mk = Object.entries(byModel).sort((a, b) => b[1] - a[1]);
+  const ak = Object.entries(byAccount).sort((a, b) => b[1] - a[1]);
+  const mmax = mk.length ? mk[0][1] : 1, amax = ak.length ? ak[0][1] : 1;
+  $('#byModelBody').innerHTML = mk.length ? mk.map(([k, v]) => row(k, v, mmax)).join('') : '<tr><td class="hint">暂无</td></tr>';
+  $('#byAccountBody').innerHTML = ak.length ? ak.map(([k, v]) => row(k, v, amax)).join('') : '<tr><td class="hint">暂无</td></tr>';
+}
+
+/* ═══════════════ 容量 ═══════════════ */
+function renderCapacity() {
+  const accts = S.ov.accounts || [];
+  const cfg = S.ov.config || {};
+  const pricing = (cfg.video && cfg.video.pricing) || {};
+  const p720 = (pricing['720P'] && pricing['720P']['5']) || VIDEO_MIN;
+  const p1080 = (pricing['1080P'] && pricing['1080P']['15']) || 120;
+
+  let img = 0, vid = 0, credits = 0, usable = 0;
+  $('#capBody').innerHTML = accts.map(a => {
+    const left = a.image_limit > 0 ? Math.max(0, a.image_limit - a.image_today) : null;
+    if (left != null) img += left;
+    const bal = a.credit_known ? a.credit_balance : null;
+    if (bal != null) credits += bal;
+    const v = bal != null ? Math.floor(bal / p720) : null;
+    const v15 = bal != null ? Math.floor(bal / p1080) : null;
+    if (v != null) vid += v;
+    if (acctStatus(a).k === 'ready') usable++;
+
+    const ratio = a.image_limit > 0 ? pct(a.image_today, a.image_limit) : 0;
+    const barCls = ratio >= 100 ? 'bad' : (ratio >= 70 ? 'warn' : '');
+    return `<tr>
+      <td><div class="acc-name">${esc(a.name)}</div><div class="acc-sub">${esc(a.email || '-')}</div></td>
+      <td style="width:22%">
+        <div class="num" style="text-align:left">${a.image_limit > 0 ? `${a.image_today}/${a.image_limit}` : (a.image_today || 0)}</div>
+        ${a.image_limit > 0 ? `<div class="bar ${barCls}" style="margin-top:4px"><i style="width:${ratio}%"></i></div>` : ''}
+      </td>
+      <td class="num">${left == null ? '不限' : left}</td>
+      <td class="num">${bal == null ? '<span class="hint">未知</span>' : num(bal)}</td>
+      <td class="num">${v == null ? '-' : v}</td>
+      <td class="num">${v15 == null ? '-' : v15}</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="6" style="text-align:center;color:var(--ink-3);padding:26px">没有账号</td></tr>`;
+
+  $('#cImg').textContent = img;
+  $('#cVid').textContent = vid;
+  $('#cCredits').textContent = num(credits);
+  $('#cAccts').textContent = usable;
+}
+
+/* ═══════════════ 模型 ═══════════════ */
+async function renderModels() {
+  if (!S.models) {
+    try { const d = await api('/panel/api/models'); S.models = (d && d.data) || []; } catch (e) { S.models = []; }
+  }
+  const list = S.models || [];
+  $('#modelBody').innerHTML = list.map(m => {
+    const caps = [];
+    if (m.thinking) caps.push('思考档');
+    if (m.vision) caps.push('视觉');
+    if (m.verified) caps.push('已实测');
+    return `<tr>
+      <td class="mono">${esc(m.id)}</td>
+      <td>${esc(m.title || '-')}</td>
+      <td>${esc(m.media || 'text')}</td>
+      <td>${caps.map(c => `<span class="tag muted">${c}</span>`).join(' ') || '-'}</td>
+      <td class="num">${m.context_length ? num(m.context_length) : '-'}</td>
+      <td class="note">${esc(m.notes || '')}</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="6" style="text-align:center;color:var(--ink-3);padding:26px">没有模型</td></tr>`;
+  const sel = $('#dbgModel');
+  if (sel.options.length !== list.length) {
+    sel.innerHTML = list.map(m => `<option value="${esc(m.id)}">${esc(m.title || m.id)}</option>`).join('');
+  }
+}
+
+/* ═══════════════ 配置 ═══════════════ */
+function kv(k, v) { return `<div><div class="hint">${k}</div><div class="mono" style="font-size:13px">${v}</div></div>`; }
+function renderConfig() {
+  const c = S.ov.config || {};
+  $('#cfgVer').textContent = 'v' + (S.ov.version || '-') + ' · uptime ' + fmtUp(S.ov.uptime_s);
+  $('#cfgService').innerHTML = [
+    kv('监听', esc(c.listen || '-')),
+    kv('默认模型', esc(c.default_model || '-')),
+    kv('默认思考档', esc(c.default_thinking || '-')),
+    kv('API Key', c.api_key_required ? '<span class="tag ok">已启用</span>' : '<span class="tag bad">未启用</span>'),
+    kv('reasoning 透出', c.reasoning ? '开' : '关'),
   ].join('');
+  const u = c.upstream || {};
+  $('#cfgUpstream').innerHTML = [
+    kv('chat 域', esc(u.base_url || '-')),
+    kv('版本头', esc(u.version || '-')),
+    kv('单请求超时', (u.timeout_s || '-') + 's'),
+    kv('积分域', esc(c.entitlement_base_url || '-')),
+  ].join('');
+  const p = c.pool || {};
+  $('#cfgPool').innerHTML = [
+    kv('轮换次数上限', p.max_rotate),
+    kv('软冷却 / 失效冷却', (p.cooldown_soft_s || 0) + 's / ' + (p.cooldown_auth_s || 0) + 's'),
+    kv('单号并发', p.max_inflight_per_account),
+    kv('每号每日出图', p.max_image_per_day || '不限'),
+    kv('每号每日视频数', p.max_video_per_day || '不限'),
+    kv('每号每日视频积分预算', p.max_video_credits_per_day ? num(p.max_video_credits_per_day) : '不启用（用真实余额）'),
+  ].join('');
+  const pr = (c.video && c.video.pricing) || {};
+  const durs = ['5', '10', '15'];
+  const resOrder = ['720P', '1080P', '480P'];
+  const resKeys = Object.keys(pr).sort((a, b) => {
+    const ia = resOrder.indexOf(a), ib = resOrder.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  $('#cfgPricing').innerHTML = resKeys.map(res =>
+    `<tr><td class="mono">${esc(res)}</td>${durs.map(d => `<td class="num">${pr[res][d] != null ? pr[res][d] : '-'}</td>`).join('')}</tr>`
+  ).join('') || '<tr><td colspan="4" class="hint">未配置价格表</td></tr>';
 
-  $('pool-hint').textContent = d.config?.pool
-    ? `最多换号 ${d.config.pool.max_rotate} 次 · 单号在途 ${d.config.pool.max_inflight_per_account}`
-    : '';
+  const sf = c.state_file || '';
+  $('#cfgAccountsPath').textContent = sf ? sf.replace(/\/[^/]*$/, '/accounts.json') : 'accounts.json';
+  $('#cfgAccountsSrc').textContent = `当前 ${(S.ov.accounts || []).length} 个账号在池 —— 启动日志里「账号清单由面板托管」那行说明是不是来自 accounts.json`;
+}
 
-  if (!acc.length) {
-    $('accounts').innerHTML = '<div class="empty">还没有配置账号 —— 在 config.json 的 accounts 里加 Bearer token，或用环境变量 QWEN2API_ACCOUNTS</div>';
-  } else {
-    $('accounts').innerHTML = `<table><thead><tr>
-      <th>名称</th><th>状态</th><th>今日出图</th><th>视频积分</th><th>余额</th><th>在途</th><th>已服务</th><th>失败</th><th>最近使用</th><th>最近错误</th><th></th>
-    </tr></thead><tbody>${acc.map(a => `
-      <tr>
-        <td><b>${esc(a.name)}</b>${a.email ? `<div class="muted mono">${esc(a.email)}</div>` : ''}</td>
-        <td><span class="pill ${a.state}">${a.state === 'ready' ? '可用' : a.state === 'cooling' ? '冷却 ' + a.cooldown_left_s + 's' : '凭据失效'}</span></td>
-        <td class="num">${a.image_limit > 0 ? `${a.image_today || 0}/${a.image_limit}` : (a.image_today || 0)}</td>
-        <td class="num">${a.credits_limit > 0 ? `${a.credits_used || 0}/${a.credits_limit}` : '—'}</td>
-        <td class="num">${a.credit_known ? a.credit_balance : '—'}</td>
-        <td class="num">${a.inflight}</td>
-        <td class="num">${a.served}</td>
-        <td class="num">${a.failures || 0}</td>
-        <td class="muted mono">${a.last_used ? new Date(a.last_used).toLocaleTimeString() : '—'}</td>
-        <td class="err-text" title="${esc(a.last_error || '')}">${esc(a.last_error || '—')}</td>
-        <td>${a.state !== 'ready' ? `<button class="ghost" onclick="reset('${esc(a.name)}')">重置</button>` : ''}</td>
-      </tr>`).join('')}</tbody></table>`;
+/* ═══════════════ 视图切换 ═══════════════ */
+const TITLES = { accounts: '账号池', usage: '用量', capacity: '容量', models: '模型与调试', config: '配置' };
+function renderCurrent() {
+  if (!S.ov) return;
+  if (S.view === 'accounts') renderAccounts();
+  else if (S.view === 'usage') renderUsage();
+  else if (S.view === 'capacity') renderCapacity();
+  else if (S.view === 'models') renderModels();
+  else if (S.view === 'config') renderConfig();
+}
+function go(view) {
+  if (!TITLES[view]) view = 'accounts';
+  S.view = view;
+  $$('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === view));
+  $$('.view').forEach(v => { v.hidden = v.id !== 'view-' + view; });
+  $('#ttl').textContent = TITLES[view];
+  $('#btnImport').hidden = view !== 'accounts';
+  if (location.hash.slice(1) !== view) history.replaceState(null, '', '#' + view);
+  $('#navDrawer').classList.remove('open');
+  if (S.ov) renderCurrent();
+}
+
+/* ═══════════════ 导入 ═══════════════ */
+let importTab = 'paste';
+
+function parseAccounts(text) {
+  const t = (text || '').trim();
+  if (!t) return { list: [], err: '' };
+  if (t.startsWith('[') || t.startsWith('{')) {
+    try {
+      const j = JSON.parse(t);
+      const arr = Array.isArray(j) ? j : (j.accounts || []);
+      const list = arr.map(x => ({
+        name: x.name || x.account || x.username || '',
+        email: x.email || x.mail || x.account || '',
+        password: x.password || x.pass || x.pwd || '',
+        note: x.note || x.remark || '',
+      })).filter(x => x.email);
+      return { list, err: list.length ? '' : 'JSON 里没解析出带 email 的账号' };
+    } catch (e) { return { list: [], err: 'JSON 解析失败：' + e.message }; }
   }
+  const list = [];
+  t.split(/\r?\n/).forEach(line => {
+    const s = line.trim();
+    if (!s || s.startsWith('#')) return;
+    const parts = s.replace(/----/g, ' ').split(/[\s,，|]+/).filter(Boolean);
+    if (parts.length < 2) return;
+    list.push({ email: parts[0], password: parts[1], name: parts[2] || '', note: parts[3] || '' });
+  });
+  return { list, err: list.length ? '' : '没解析出账号（每行至少要有「邮箱 密码」两段）' };
+}
 
-  const reqs = d.requests || [];
-  if (!reqs.length) {
-    $('reqs').innerHTML = '<div class="empty">还没有请求</div>';
-  } else {
-    $('reqs').innerHTML = `<table><thead><tr>
-      <th>时间</th><th>路径</th><th>模型</th><th>账号</th><th>状态</th><th>首字</th><th>耗时</th><th>Token</th><th>错误</th>
-    </tr></thead><tbody>${reqs.map(r => `
-      <tr>
-        <td class="muted mono">${new Date(r.time).toLocaleTimeString()}</td>
-        <td class="mono">${esc(r.path)}${r.stream ? ' <span class="muted">stream</span>' : ''}</td>
-        <td class="mono">${esc(r.model || '—')}</td>
-        <td class="mono">${esc(r.account || '—')}</td>
-        <td><span class="pill ${r.error ? 'err' : 'ok'}">${r.status}</span></td>
-        <td class="num muted">${r.first_byte_ms ? fmtMs(r.first_byte_ms) : '—'}</td>
-        <td class="num">${fmtMs(r.duration_ms || 0)}</td>
-        <td class="num muted">${(r.prompt_tokens || 0) + '/' + (r.output_tokens || 0)}</td>
-        <td class="err-text" title="${esc(r.error || '')}">${esc(r.error || '')}</td>
-      </tr>`).join('')}</tbody></table>`;
+function importPreview() {
+  if (importTab === 'single') {
+    const email = $('#sEmail').value.trim();
+    $('#importCount').textContent = email ? '1 个' : '';
+    return { list: email ? [{ name: $('#sName').value.trim(), email, password: $('#sPass').value, note: $('#sNote').value.trim() }] : [], err: '' };
   }
+  const r = parseAccounts($('#pasteBox').value);
+  $('#importCount').textContent = r.list.length ? r.list.length + ' 个' : '';
+  return r;
+}
 
-  if (!$('model').dataset.filled) {
-    $('model').innerHTML = '<option>加载中…</option>';
-    fetch('/v1/models', { headers: authHeaders() })
-      .then(r => r.json())
-      .then(m => {
-        const list = (m.data || []).map(x => x.id);
-        $('model').innerHTML = list.map(id => `<option>${esc(id)}</option>`).join('') || '<option>（无模型）</option>';
-        $('model').dataset.filled = '1';
-      })
-      .catch(() => { $('model').innerHTML = '<option>（读取失败）</option>'; });
+function hint(msg, ok) {
+  const el = $('#importHint');
+  el.textContent = msg;
+  el.className = 'state ' + (ok ? 'ok' : 'err');
+  el.hidden = false;
+}
+
+async function doImport() {
+  const pv = importPreview();
+  if (pv.err) { hint(pv.err, false); return; }
+  if (!pv.list.length) { hint('没有可导入的账号', false); return; }
+
+  const btn = $('#importGo');
+  btn.disabled = true; btn.textContent = '导入中…';
+  $('#importRes').hidden = true; $('#importHint').hidden = true;
+  try {
+    const res = await api('/panel/api/accounts/import', {
+      method: 'POST',
+      body: JSON.stringify({ accounts: pv.list, validate: $('#importValidate').checked }),
+    });
+    const rows = (res.results || []).map(r => `<div class="row">
+      <span class="tag ${r.ok ? 'ok' : 'bad'}">${r.ok ? '成功' : '跳过'}</span>
+      <span class="em">${esc(r.name || '-')} · ${esc(r.email || '')}</span>
+      <span class="why" title="${esc(r.error || '')}">${esc((r.error || '').slice(0, 80))}</span></div>`).join('');
+    $('#importRes').innerHTML = rows || '<div class="row"><span class="em">没有结果</span></div>';
+    $('#importRes').hidden = false;
+    const msg = `导入完成：成功 ${res.imported}，跳过 ${res.skipped}（共 ${res.total}）` + (res.persist_error ? '｜落盘失败：' + res.persist_error : '');
+    hint(msg, res.ok);
+    toast(msg, res.ok ? 'ok' : 'err');
+    if (res.imported > 0) { $('#pasteBox').value = ''; await loadOverview(); }
+  } catch (e) {
+    hint('导入失败：' + e.message, false);
+  } finally {
+    btn.disabled = false; btn.textContent = '开始导入';
   }
 }
 
-function card(k, v, sub) {
-  return `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="k" style="margin-top:4px;text-transform:none;letter-spacing:0">${esc(sub)}</div></div>`;
-}
-
-async function reset(name) {
-  const r = await fetch('/panel/api/reset?name=' + encodeURIComponent(name), { method: 'POST', headers: authHeaders() });
-  if (!r.ok) alert('重置失败：' + (await r.text()));
-  load();
-}
-
-async function send() {
-  const btn = $('send'), out = $('out');
-  btn.disabled = true;
+/* ═══════════════ 调试台 ═══════════════ */
+async function debugSend() {
+  const model = $('#dbgModel').value;
+  const prompt = $('#dbgPrompt').value.trim();
+  if (!model) { toast('模型清单还没加载好，稍等一下再发', 'err'); return; }
+  if (!prompt) return;
+  const out = $('#dbgOut');
   out.textContent = '';
-  out.classList.remove('muted');
+  const btn = $('#dbgSend');
+  btn.disabled = true;
   const t0 = performance.now();
-  let first = 0, text = '', reasoning = '';
-
   try {
     const r = await fetch('/v1/chat/completions', {
       method: 'POST',
-      headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
-      body: JSON.stringify({
-        model: $('model').value,
-        thinking: $('thinking').value,
-        stream: true,
-        stream_options: { include_usage: true },
-        messages: [{ role: 'user', content: $('prompt').value }],
-      }),
+      headers: hdrs({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ model, thinking: $('#dbgGear').value, stream: true, messages: [{ role: 'user', content: prompt }] }),
     });
-    if (!r.ok && r.headers.get('content-type')?.includes('json')) {
-      const e = await r.json();
-      throw new Error(e.error?.message || ('HTTP ' + r.status));
+    if (!r.ok) {
+      out.textContent = 'HTTP ' + r.status + '\n' + (await r.text()).slice(0, 800);
+      return;
     }
-    const reader = r.body.getReader(), dec = new TextDecoder();
+    const rd = r.body.getReader(), dec = new TextDecoder();
     let buf = '';
     while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const parts = buf.split('\n\n');
-      buf = parts.pop();
-      for (const p of parts) {
-        const line = p.trim();
-        if (!line.startsWith('data:')) continue;
-        const payload = line.slice(5).trim();
+      const chunk = await rd.read();
+      if (chunk.done) break;
+      buf += dec.decode(chunk.value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        const s = line.trim();
+        if (!s.startsWith('data:')) continue;
+        const payload = s.slice(5).trim();
         if (payload === '[DONE]') continue;
-        let j; try { j = JSON.parse(payload); } catch { continue; }
-        if (j.error) throw new Error(j.error.message || '上游错误');
-        const d = j.choices?.[0]?.delta || {};
-        if (!first && (d.content || d.reasoning_content)) first = performance.now() - t0;
-        if (d.reasoning_content) { reasoning += d.reasoning_content; renderOut(reasoning, text); }
-        if (d.content) { text += d.content; renderOut(reasoning, text); }
-        if (j.usage) {
-          $('trymeta').textContent = `tokens ${j.usage.prompt_tokens}/${j.usage.completion_tokens} · 首字 ${Math.round(first)}ms · 总 ${Math.round(performance.now() - t0)}ms`;
-        }
+        try {
+          const j = JSON.parse(payload);
+          const d = j.choices && j.choices[0] && j.choices[0].delta;
+          if (d && (d.reasoning_content || d.content)) {
+            out.textContent += (d.reasoning_content || '') + (d.content || '');
+            out.scrollTop = out.scrollHeight;
+          }
+        } catch (e) { /* 忽略非 JSON 帧 */ }
       }
     }
-    if (!text && !reasoning) out.textContent = '（上游没有返回任何文本）';
+    out.textContent += `\n\n—— ${Math.round(performance.now() - t0)}ms`;
   } catch (e) {
-    out.innerHTML = `<span style="color:var(--bad)">${esc(e.message)}</span>`;
+    out.textContent += '\n请求失败: ' + e.message;
   } finally {
     btn.disabled = false;
   }
 }
 
-function renderOut(reasoning, text) {
-  const out = $('out');
-  out.innerHTML = (reasoning ? `<div class="reason">${esc(reasoning)}</div><hr style="border:0;border-top:1px solid var(--border);margin:8px 0">` : '') + esc(text);
-  out.scrollTop = out.scrollHeight;
+/* ═══════════════ 事件绑定 ═══════════════ */
+function bind() {
+  $$('.nav a').forEach(a => a.addEventListener('click', e => { e.preventDefault(); go(a.dataset.view); }));
+  $('#navBtn').addEventListener('click', () => $('#navDrawer').classList.toggle('open'));
+
+  const applyTheme = t => {
+    const real = t === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : t;
+    document.documentElement.dataset.theme = real;
+  };
+  applyTheme(localStorage.getItem(THEME_STORE) || 'system');
+  $('#btnTheme').addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    localStorage.setItem(THEME_STORE, next);
+    applyTheme(next);
+  });
+
+  $('#btnRefresh').addEventListener('click', async () => {
+    try { await loadOverview(); toast('已刷新', 'ok'); } catch (e) { toast('刷新失败: ' + e.message, 'err'); }
+  });
+
+  $('#accQ').addEventListener('input', e => { S.q = e.target.value; S.page = 0; renderAccounts(); });
+  $('#accSort').addEventListener('change', e => { S.sort = e.target.value; renderAccounts(); });
+  $('#accSize').addEventListener('change', e => { S.size = Number(e.target.value); S.page = 0; renderAccounts(); });
+  $('#accPrev').addEventListener('click', () => { S.page--; renderAccounts(); });
+  $('#accNext').addEventListener('click', () => { S.page++; renderAccounts(); });
+  $('#accChips').addEventListener('click', e => {
+    const b = e.target.closest('[data-status]');
+    if (!b) return;
+    S.status = b.dataset.status; S.page = 0; renderAccounts();
+  });
+
+  $('#accChkAll').addEventListener('change', e => {
+    const list = accountsFiltered();
+    const size = S.size === 0 ? list.length : S.size;
+    list.slice(S.page * size, S.page * size + size).forEach(a => {
+      if (e.target.checked) S.sel.add(a.name); else S.sel.delete(a.name);
+    });
+    renderAccounts();
+  });
+
+  $('#accBody').addEventListener('click', async e => {
+    const tr = e.target.closest('tr[data-name]');
+    if (!tr) return;
+    const name = tr.dataset.name;
+    if (e.target.classList.contains('rowchk')) {
+      if (e.target.checked) S.sel.add(name); else S.sel.delete(name);
+      renderBulk();
+      return;
+    }
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    const act = btn.dataset.act;
+    const label = act === 'test' ? '重登' : act === 'reset' ? '重置' : '删除';
+    try {
+      if (act === 'test') {
+        btn.disabled = true; btn.textContent = '…';
+        await api('/panel/api/accounts/test?name=' + encodeURIComponent(name), { method: 'POST' });
+        toast(name + ' 重登成功', 'ok');
+      } else if (act === 'reset') {
+        await api('/panel/api/reset?name=' + encodeURIComponent(name), { method: 'POST' });
+        toast(name + ' 状态已重置', 'ok');
+      } else {
+        if (!confirm(`删除账号 ${name}？\n\n会写回 accounts.json，重启后也不会回来。`)) return;
+        await api('/panel/api/accounts/delete?name=' + encodeURIComponent(name), { method: 'POST' });
+        toast(name + ' 已删除', 'ok');
+      }
+      S.sel.delete(name);
+      await loadOverview();
+    } catch (err) {
+      toast((act === 'test' ? '重登失败: ' : '') + err.message, 'err');
+      btn.disabled = false; btn.textContent = label;
+    }
+  });
+
+  $('#btnRefreshCredits').addEventListener('click', async () => {
+    const btn = $('#btnRefreshCredits');
+    btn.disabled = true; btn.textContent = '读取中…';
+    try {
+      await api('/panel/api/credits/refresh', { method: 'POST' });
+      await loadOverview();
+      toast('余额已刷新', 'ok');
+    } catch (e) { toast('刷新失败: ' + e.message, 'err'); }
+    finally { btn.disabled = false; btn.textContent = '刷新余额'; }
+  });
+
+  $('#btnImport').addEventListener('click', () => {
+    $('#importVeil').hidden = false;
+    $('#importRes').hidden = true; $('#importHint').hidden = true;
+    importPreview();
+  });
+  $('#importClose').addEventListener('click', () => { $('#importVeil').hidden = true; });
+  $('#importVeil').addEventListener('click', e => { if (e.target.id === 'importVeil') $('#importVeil').hidden = true; });
+  $$('.tabs button').forEach(b => b.addEventListener('click', () => {
+    importTab = b.dataset.tab;
+    $$('.tabs button').forEach(x => x.classList.toggle('on', x === b));
+    ['paste', 'file', 'single'].forEach(t => { $('#tab-' + t).hidden = t !== importTab; });
+    importPreview();
+  }));
+  $('#pasteBox').addEventListener('input', importPreview);
+  $('#fileBox').addEventListener('change', e => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => {
+      $('#pasteBox').value = String(rd.result || '');
+      importTab = 'paste';
+      $$('.tabs button').forEach(x => x.classList.toggle('on', x.dataset.tab === 'paste'));
+      ['paste', 'file', 'single'].forEach(t => { $('#tab-' + t).hidden = t !== 'paste'; });
+      importPreview();
+      hint('已读取 ' + f.name + '，确认内容后点「开始导入」', true);
+    };
+    rd.readAsText(f);
+  });
+  ['sName', 'sEmail', 'sPass', 'sNote'].forEach(id => $('#' + id).addEventListener('input', importPreview));
+  $('#importGo').addEventListener('click', doImport);
+
+  $('#keyGo').addEventListener('click', async () => {
+    const v = $('#keyInput').value.trim();
+    if (!v) return;
+    localStorage.setItem(KEY_STORE, v);
+    try {
+      await loadOverview();
+      $('#keyVeil').hidden = true;
+      $('#keyErr').hidden = true;
+    } catch (e) {
+      localStorage.removeItem(KEY_STORE);
+      $('#keyErr').textContent = 'Key 无效：' + e.message;
+      $('#keyErr').hidden = false;
+    }
+  });
+  $('#keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('#keyGo').click(); });
+
+  $('#dbgSend').addEventListener('click', debugSend);
+  $('#dbgPrompt').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); debugSend(); }
+  });
+  $('#dbgClear').addEventListener('click', () => { $('#dbgOut').textContent = ''; });
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { $('#importVeil').hidden = true; $('#navDrawer').classList.remove('open'); }
+  });
 }
 
-// 启动：URL ?key= 优先（便于直接给一条可点的链接）→ localStorage → 拉数据 → 3s 轮询
-const urlKey = new URLSearchParams(location.search).get('key');
-if (urlKey) {
-  localStorage.setItem('qwen2api_key', urlKey);
-  history.replaceState(null, '', location.pathname); // 不把 key 留在地址栏
-}
-$('key').value = localStorage.getItem('qwen2api_key') || '';
-load();
-timer = setInterval(load, 3000);
+/* ═══════════════ 启动 ═══════════════ */
+(async function boot() {
+  bind();
+  const urlKey = new URLSearchParams(location.search).get('key');
+  if (urlKey) {
+    localStorage.setItem(KEY_STORE, urlKey);
+    history.replaceState(null, '', location.pathname + location.hash);
+  }
+  go(location.hash.slice(1) || 'accounts');
+  if (!key()) { askKey(); return; }
+  try {
+    await loadOverview();
+  } catch (e) {
+    if (e.message !== 'unauthorized') {
+      $('#navState').textContent = '连接失败';
+      $('#navPulse').className = 'pulse bad';
+    }
+    return;
+  }
+  setInterval(async () => {
+    if (document.hidden) return;
+    try { await loadOverview(); } catch (e) { /* 轮询失败静默 */ }
+  }, 5000);
+})();
 </script>
 </body>
 </html>
