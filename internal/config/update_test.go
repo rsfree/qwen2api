@@ -96,3 +96,25 @@ func TestFieldValuesCoversAllFields(t *testing.T) {
 		}
 	}
 }
+
+// 生图预算必须是**可热更**项：面板改完立即生效（不进 need_restart）。
+// 否则用户要重启才能让 300s 生效 —— 那就失去"放到配置项里"的意义了。
+func TestApplyImageTimeoutIsHot(t *testing.T) {
+	raw := map[string]any{}
+	applied, restart, err := Apply(raw, map[string]any{"image_timeout_s": 120})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != 1 || applied[0] != "image_timeout_s" {
+		t.Fatalf("applied 不对: %v", applied)
+	}
+	if len(restart) != 0 {
+		t.Fatalf("image_timeout_s 应热更，不该要求重启: %v", restart)
+	}
+	if raw["image_timeout_s"] != 120 {
+		t.Fatalf("没写进配置: %v (%T)", raw["image_timeout_s"], raw["image_timeout_s"])
+	}
+	if _, _, err := Apply(raw, map[string]any{"image_timeout_s": 5}); err == nil {
+		t.Fatal("低于 30s 应拒绝（会把正常出图全掐死）")
+	}
+}

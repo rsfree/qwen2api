@@ -27,6 +27,28 @@ func TestDefaults(t *testing.T) {
 	if !cfg.ReasoningEnabled() || !cfg.NewChatEach() {
 		t.Fatal("默认应透出思考、每请求新建会话")
 	}
+	// 生图预算默认 300s：实测出图 60s、最慢双垫图 137s，150s 会把"快好了"的请求掐死。
+	if cfg.ImageTimeoutS != DefaultImageTimeoutS {
+		t.Fatalf("生图默认预算应为 %ds，得到 %d", DefaultImageTimeoutS, cfg.ImageTimeoutS)
+	}
+}
+
+// 显式写 0 / 负数都是"没配"，归默认 —— 绝不能变成"立即超时"。
+func TestImageTimeoutZeroFallsBack(t *testing.T) {
+	for _, raw := range []string{`{"image_timeout_s":0}`, `{"image_timeout_s":-5}`} {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "config.json")
+		if err := os.WriteFile(p, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+		if cfg.ImageTimeoutS != DefaultImageTimeoutS {
+			t.Fatalf("%s 应归默认 %d，得到 %d", raw, DefaultImageTimeoutS, cfg.ImageTimeoutS)
+		}
+	}
 }
 
 func TestRejectBadThinking(t *testing.T) {
