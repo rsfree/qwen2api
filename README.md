@@ -201,7 +201,7 @@ curl -s localhost:8400/v1/images/generations \
 | 字段 | 说明 |
 |---|---|
 | `prompt` | 无 `image` 时必填 |
-| `image` | `str` 或 `str[]`（URL / data URI / 裸 base64），最多 20 张。非空即走**图生图**：先逐张上传到 qwen 自有 OSS（STS → V4 签名 PUT），再以 `chat_type=image_edit` 提交 |
+| `image` | `str` 或 `str[]`（URL / data URI / 裸 base64），最多 20 张。非空即走**图生图**：以 `chat_type=image_edit` 提交，参考图同样走 **URL 直通 / 本地 blob**（不再过被 WAF 挡住的 STS）。实测：白底黑字 `HELLO42` + 「背景改蓝、保留文字」⇒ 产物 2752×1376 蓝底黑字（宽高比与原图一致，是真编辑不是重画） |
 | `mask` | 没有 `image` 时传了就是 400（面门收下但不转发——上游无 mask 语义，绝不假装 inpaint） |
 | `n` | 非法值归一为 1；上限 4（每张都是一次独立上游调用 + 一次配额） |
 | `size` | `1024x1024` / `1:1` / `auto` 都收，内部映射成上游 5 档比例 |

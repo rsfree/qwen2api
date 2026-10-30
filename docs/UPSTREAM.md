@@ -752,8 +752,8 @@ GET https://sg-entitlement.qwen.com/api/entitlement/credits/credits/history
 
 | 入口 | 落地方式 |
 |---|---|
-| `POST /v1/images/generations` 的 `image`（图生图） | `chat_type=image_edit` + `files[]`（**要 OSS 条目**，见 §6.1 风险） |
-| `POST /v1/files` → content 里引用 `file_id` | `t2t` + `files[]`（`file_class=document`，走 OSS） |
+| `POST /v1/images/generations` 的 `image`（图生图） | `chat_type=image_edit` + `files[]`（**url 直通可用**，✅ 2026-10-30 实测） |
+| `POST /v1/files` → content 里引用 `file_id` | `t2t` + `files[]`（`file_class=document`，**必须真 OSS 条目**，url 不行） |
 | chat / messages / responses 的图片段 | `t2t` + `files[]`（`file_class=vision`，**走 url 直通/本地托管**） |
 
 chat 的图片段三种写法全收（`image_url` / `input_image` / Anthropic `image.source`），
@@ -771,12 +771,18 @@ POST /api/v2/files/getstsToken
 带或不带 `bx-ua` / 预热拿 `acw_tc`+`x-ap` —— 9 种组合无一通过。
 **结论：端点级人机验证（滑块），不是凭据、不是 IP、不是头。**
 
-⇒ 凡是需要 `files[]` 里"真 OSS 条目"的功能（图生图 `image_edit`、`/v1/files`）
-目前都受影响。**但 vision 不需要**：实测 `files[].url` 直接给公网外链，
-模型能准确答出颜色（红图答"红色"）和图中文字（`HELLO42`）——
-所以 chat 图片走"URL 直通 / 网关自托管 blob"，见 README。
+**绕法：`files[].url` 直接给公网外链。** 三条链路的实测结论（2026-10-30，逐条端到端）：
 
-⚠️ 若上游将来给 `url` 也加白名单，则需要回到 STS（那时得先过滑块）。
+| 用途 | `files[].url` 外链 | 证据 |
+|---|---|---|
+| vision（看图） | ✅ 可行 | 红图答「红色」；带字图答 `HELLO42` |
+| image_edit（图生图） | ✅ 可行 | 白底黑字 `HELLO42` + 「背景改蓝」⇒ 2752×1376 蓝底黑字（宽高比同原图 2:1） |
+| document（文件解析） | ❌ 不行 | 模型回「我无法直接读取您上传的文件内容」—— 服务端是按 `file_id` 去 OSS 取，不看 url |
+
+所以：图片与图生图走「URL 直通 / 网关自托管 blob」（见 README）；
+`POST /v1/files` 仍需要真 OSS 条目 ⇒ **当前受 §6.1 影响，会失败**。
+
+⚠️ 若上游将来给 `url` 也加白名单，则 vision / image_edit 也要回到 STS（那时得先过滑块）。
 
 ---
 

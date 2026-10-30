@@ -121,9 +121,12 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", errNoAccount.Error())
 		return
 	}
-	cred := s.pool.Credential(a.Name)
 	// 文件是账号维度资源：上传时用哪个出口，后续生成也得用同一条。
-	entry, upErr := s.up.UploadAttachment(upstream.WithAccount(r.Context(), a.Name), cred, fh.Filename, mime, data)
+	actx := upstream.WithAccount(r.Context(), a.Name)
+	// 🔴 上传前确保凭据新鲜：getstsToken 对过期 Bearer 不返回 401，
+	// 而是 HTTP 200 + WAF 挑战页，会让"401 才续期"的兜底完全失效。
+	cred := s.ensureFresh(actx, a, s.pool.Credential(a.Name))
+	entry, upErr := s.up.UploadAttachment(actx, cred, fh.Filename, mime, data)
 	s.pool.Release(a)
 	if upErr != nil {
 		s.noteFailure(a, upErr)

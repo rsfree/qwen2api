@@ -263,7 +263,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		usedAcct string
 	)
 	for i := 0; i < req.N; i++ {
-		imgs, revised, acct, err := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, ratio)
+		imgs, revised, acct, err := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, ratio, s.blobBase(r))
 		if err != nil {
 			lastErr = err
 			break
@@ -321,7 +321,7 @@ const maxInputImages = 20
 // imageModel 是"图片内核"（extra.meta.model），与建会话用的 chat 模型分开：
 // 上游模型表里没有图片模型 id，把它当 chat 模型发会 Bad_Request。
 func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking, prompt string,
-	refs []string, ratio string) (imgs []string, revised, acct string, err error) {
+	refs []string, ratio, blobBase string) (imgs []string, revised, acct string, err error) {
 
 	// 🔴 上游额度用尽后不会报错，而是**只发 keep_alive 心跳、永不产出**（2026-10-28 实测：
 	// 第 4 张起 240s 无产物帧）。所以必须由网关自己设上限，否则调用方只能干等到客户端超时。
@@ -350,7 +350,12 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 
 	var spec upstream.ChatSpec
 	if len(refs) > 0 {
-		files, upErr := s.uploadImageRefs(ctx, cred, refs)
+		// 🔴 参考图走 URL 直通 / 本地 blob，**不再过 getstsToken**：
+		// 该端点已被阿里云 WAF 滑块挡住（docs/UPSTREAM.md §6.1），而
+		// image_edit 的外链实测可用 —— 2026-10-30 端到端验证：
+		// 白底黑字 HELLO42 参考图 + "背景改蓝、保留文字" ⇒ 产物 2752×1376
+		// 蓝底黑字 HELLO42（宽高比与原图一致，证明是真编辑不是 t2i 重画）。
+		files, upErr := s.visionFiles(ctx, blobBase, refs)
 		if upErr != nil {
 			s.noteFailure(a, upErr)
 			return nil, "", a.Name, upErr
@@ -419,26 +424,6 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 		s.pool.MarkImageDone(a)
 	}
 	return imgs, revised, a.Name, nil
-}
-
-// uploadImageRefs 把参考图逐张上传，返回 files[] 条目。
-//
-// 🔴 串行：getstsToken 有"短时总次数"墙（约 56 次/4 秒），并发只会更快撞墙；
-// 而图生图的张数本来就不大（上限 20）。
-func (s *Server) uploadImageRefs(ctx context.Context, cred string, refs []string) ([]upstream.FileRef, error) {
-	files := make([]upstream.FileRef, 0, len(refs))
-	for i, ref := range refs {
-		data, mime, name, err := resolveImageRef(ctx, ref)
-		if err != nil {
-			return nil, fmt.Errorf("第 %d 张参考图解析失败: %w", i+1, err)
-		}
-		entry, err := s.up.UploadAttachment(ctx, cred, name, mime, data)
-		if err != nil {
-			return nil, fmt.Errorf("第 %d 张参考图上传失败: %w", i+1, err)
-		}
-		files = append(files, entry)
-	}
-	return files, nil
 }
 
 // downloadAsBase64 把直链图片转成 base64（b64_json 用）。
@@ -571,7 +556,7 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 		format = "url"
 	}
 
-	imgs, revised, acct, genErr := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, "")
+	imgs, revised, acct, genErr := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, "", s.blobBase(r))
 	if genErr != nil {
 		code := httpStatusFor(genErr)
 		entry.Account = acct

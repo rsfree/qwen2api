@@ -385,3 +385,63 @@ func TestRenewableErrClassifiesDisguisedWAF(t *testing.T) {
 		t.Fatal("新鲜凭据上的风控不该续期")
 	}
 }
+
+// ---------- 图生图（image_edit）也走 url 直通 ----------
+
+func TestImageEditUsesURLFiles(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	h := newTestServer(t, up, 1, nil)
+
+	body := `{"model":"qwen-image-3.0","prompt":"把背景改成蓝色",
+		"image":"https://cdn.example.com/src.png"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(body)))
+
+	// 假上游只回文本帧 ⇒ 拿不到图，但**请求体已经发出**，正是要断言的东西。
+	if len(up.gotSTS) != 0 {
+		t.Fatalf("图生图不该再调 getstsToken（WAF）: %+v", up.gotSTS)
+	}
+	if up.gotSubmit == nil {
+		t.Fatalf("上游没收到提交（状态 %d: %s）", rec.Code, rec.Body.String())
+	}
+	msg := up.gotSubmit["messages"].([]any)[0].(map[string]any)
+	if msg["chat_type"] != "image_edit" || msg["sub_chat_type"] != "image_edit" {
+		t.Fatalf("chat_type 不对: %+v", msg)
+	}
+	files := submitFiles(t, up.gotSubmit)
+	if len(files) != 1 || files[0]["url"] != "https://cdn.example.com/src.png" {
+		t.Fatalf("参考图应以原样外链进 files[]: %+v", files)
+	}
+	if files[0]["file_class"] != "vision" {
+		t.Fatalf("file_class 应为 vision: %+v", files[0])
+	}
+}
+
+// data URI 的参考图：落 blob，URL 指回本机。
+func TestImageEditDataURIBecomesBlobURL(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	h := newTestServer(t, up, 1, nil)
+
+	body := `{"model":"qwen-image-3.0","prompt":"换背景",
+		"image":["data:image/png;base64,` + onePixelPNG + `"]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(body)))
+
+	if up.gotSubmit == nil {
+		t.Fatalf("上游没收到提交（状态 %d: %s）", rec.Code, rec.Body.String())
+	}
+	files := submitFiles(t, up.gotSubmit)
+	if len(files) != 1 {
+		t.Fatalf("files 数量: %d", len(files))
+	}
+	rawURL, _ := files[0]["url"].(string)
+	u, err := url.Parse(rawURL)
+	if err != nil || !strings.HasPrefix(u.Path, "/v1/blobs/") {
+		t.Fatalf("参考图应指向本地 blob: %q", rawURL)
+	}
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, u.Path, nil))
+	if rec2.Code != 200 {
+		t.Fatalf("blob 取图失败: %d", rec2.Code)
+	}
+}
