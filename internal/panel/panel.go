@@ -43,6 +43,9 @@ type Backend interface {
 	Models(ctx context.Context) any
 	// RefreshCredits 刷新积分余额（force=true 无视 TTL）。
 	RefreshCredits(ctx context.Context, force bool)
+	// DebugHandler 调试转发：面板会话鉴权后，由服务端以内部身份调用前门 handler。
+	// 只挂在 /panel/api/debug/* 下 —— 拿不到 API Key 也能调试，但不额外开一个公开入口。
+	DebugHandler() http.Handler
 }
 
 // Panel 面板 handler。
@@ -129,6 +132,13 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	case strings.HasPrefix(r.URL.Path, "/panel/api/debug/"):
+		// 调试转发：此处已过顶部会话闸门，服务端不再要 API Key。
+		if !p.authorized(r) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		p.b.DebugHandler().ServeHTTP(w, r)
 	default:
 		http.NotFound(w, r)
 	}

@@ -27,6 +27,8 @@ type stubBackend struct {
 	pool *pool.Pool
 	log  *reqlog.Log
 	up   *upstream.Client
+	// debugHits 记录调试转发被真正调用了几次（用来证明"未登录根本没进去"）。
+	debugHits int
 }
 
 func newStub(cfg config.Config) *stubBackend {
@@ -51,6 +53,15 @@ func (s *stubBackend) DeleteAccount(string) (bool, error)        { return false,
 func (s *stubBackend) TestAccount(context.Context, string) error { return nil }
 func (s *stubBackend) Models(context.Context) any                { return []string{} }
 func (s *stubBackend) RefreshCredits(context.Context, bool)      {}
+
+// DebugHandler 桩：只回显"被调用了"，不碰真实前门。
+func (s *stubBackend) DebugHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.debugHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"path":"` + r.URL.Path + `"}`))
+	})
+}
 
 func withPanel(mut func(*config.Config)) (*Panel, *stubBackend) {
 	cfg := config.Default()
@@ -267,5 +278,36 @@ func TestLoginDisabledWhenNoPassword(t *testing.T) {
 	p, _ := withPanel(func(c *config.Config) { c.Panel = config.Panel{} })
 	if rec := doLogin(p, "admin", ""); rec.Code != http.StatusBadRequest {
 		t.Fatalf("未启用登录应 400，得到 %d", rec.Code)
+	}
+}
+
+// TestDebugProxyGatedBySession 调试转发不能绕开面板鉴权。
+//
+// 这是"面板改用密码登录后调试台 401"的修复带来的新入口：一旦它被放到鉴权之前，
+// 等于给公网开了一个"以服务端身份调上游"的免登录通道（能烧账号额度）。
+func TestDebugProxyGatedBySession(t *testing.T) {
+	p, b := withPanel(nil)
+
+	rec := getWith(p, "/panel/api/debug/v1/models", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("未登录访问调试转发应 401，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	if b.debugHits != 0 {
+		t.Fatalf("未登录时不该进入转发（hits=%d）", b.debugHits)
+	}
+
+	ck := withCookie(doLogin(p, "admin", "pw-test"))
+	if ck == nil {
+		t.Fatal("登录没拿到会话")
+	}
+	rec = getWith(p, "/panel/api/debug/v1/models", ck)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("已登录应 200，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	if b.debugHits != 1 {
+		t.Fatalf("已登录应转发 1 次，实际 %d", b.debugHits)
+	}
+	if !strings.Contains(rec.Body.String(), "/panel/api/debug/v1/models") {
+		t.Fatalf("路径应原样转发（由服务端负责改写）: %s", rec.Body.String())
 	}
 }
