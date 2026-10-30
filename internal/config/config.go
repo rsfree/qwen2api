@@ -213,7 +213,18 @@ type Config struct {
 //
 // 不配密码 = 保持老行为（只认 API Key）；配了就必须先登录才能进面板。
 type Panel struct {
-	// Username 面板用户名，默认 admin。
+	// Key 面板登录密钥（自定义，任意字符串；推荐 `sk-panel-` 前缀）。
+	//
+	// 面板默认就是密钥登录：登录框输入它 → 换一个 HttpOnly 会话 cookie（浏览器里
+	// 不再留明文），也可以 Bearer / x-api-key / ?key= 直接带它调 /panel/api/*。
+	//
+	// 留空 ⇒ 回落到 config.api_keys（前门令牌同样能进面板，单 Key 部署最省事）；
+	// 两个都空 ⇒ 面板不需要登录（只建议本机/内网）。
+	//
+	// 🔴 这把 Key 只在面板生效，**不会**被 /v1 接受 —— 权限边界保持清晰：
+	// 面板能导入/删除账号、能看到全部邮箱，不该和"给 SDK 用的推理令牌"共用一把。
+	Key string `json:"key,omitempty"`
+	// Username 面板用户名，默认 admin（仅账密登录用）。
 	Username string `json:"username"`
 	// Password 明文密码（配置文件 0600；部署时也可用 QWEN2API_PANEL_PASSWORD）。
 	Password string `json:"password"`
@@ -228,9 +239,22 @@ type Panel struct {
 	SessionSecret string `json:"session_secret"`
 }
 
-// AuthEnabled 是否启用了面板账号密码登录。
-func (p Panel) AuthEnabled() bool {
+// PasswordEnabled 是否配了账密登录（明文或 hash）。
+func (p Panel) PasswordEnabled() bool {
 	return strings.TrimSpace(p.Password) != "" || strings.TrimSpace(p.PasswordHash) != ""
+}
+
+// PanelKey 面板密钥（去空白后的自定义值；空 = 未配置）。
+func (p Panel) PanelKey() string {
+	return strings.TrimSpace(p.Key)
+}
+
+// AuthEnabled 面板是否需要凭据：密钥或账密任一配了就算。
+//
+// 注意这里不再只认密码：密钥登录也要走同一个会话闸门（hasSession），
+// 否则用密钥登录后每个请求还会被判未登录。
+func (p Panel) AuthEnabled() bool {
+	return p.PanelKey() != "" || p.PasswordEnabled()
 }
 
 // EffectiveUsername 用户名默认 admin。
@@ -377,6 +401,10 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("QWEN2API_PANEL_PASSWORD"); v != "" {
 		cfg.Panel.Password = v
 		cfg.Panel.PasswordHash = "" // 环境变量优先，避免配置文件里的旧 hash 覆盖它
+	}
+	// 面板密钥：容器部署时别把它写进挂载的配置文件（docker inspect 看得见）。
+	if v := os.Getenv("QWEN2API_PANEL_KEY"); v != "" {
+		cfg.Panel.Key = v
 	}
 	if v := os.Getenv("QWEN2API_TIMEOUT_S"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

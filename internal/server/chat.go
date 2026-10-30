@@ -56,7 +56,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ChatRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req); err != nil {
 		entry.Status = http.StatusBadRequest
 		entry.Error = "解析请求体: " + err.Error()
 		s.log.Add(entry)

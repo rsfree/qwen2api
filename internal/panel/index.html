@@ -190,8 +190,15 @@ button.xs { white-space:nowrap; }
 .grid a { display:block; border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--surface-2); }
 .grid img { display:block; width:216px; height:216px; object-fit:cover; }
 .grid .err { font-size:11.5px; color:var(--bad); padding:9px 11px; }
-.thumbs { display:flex; gap:6px; margin-top:7px; }
+.thumbs { display:flex; gap:6px; margin-top:7px; flex-wrap:wrap; }
 .thumbs img { width:58px; height:58px; object-fit:cover; border-radius:6px; border:1px solid var(--line); }
+/* 垫图槽：序号是给模型指代用的（"第 2 张"按序号提交），所以必须显式标出来 */
+.refs { display:flex; gap:8px; flex-wrap:wrap; }
+.refs .ref { position:relative; width:64px; height:64px; border-radius:8px; overflow:hidden; border:1px solid var(--line); background:var(--surface-2); }
+.refs .ref img { width:100%; height:100%; object-fit:cover; display:block; }
+.refs .ref .no { position:absolute; left:4px; top:4px; font-family:var(--mono); font-size:10px; line-height:1; padding:2px 4px; border-radius:4px; background:rgba(0,0,0,.58); color:#fff; }
+.refs .ref .rm { position:absolute; right:0; top:0; width:17px; height:17px; padding:0; border:0; cursor:pointer; border-radius:0 0 0 7px; background:rgba(0,0,0,.58); color:#fff; font-size:12px; line-height:17px; }
+.refs .ref .rm:hover { background:var(--bad); }
 .chat-bar { border-top:1px solid var(--line-soft); padding:10px 14px 12px; display:grid; gap:9px; background:var(--surface); }
 .chat-bar .row { display:flex; gap:9px; align-items:center; flex-wrap:wrap; }
 .chat-input { display:flex; gap:8px; align-items:flex-end; }
@@ -475,7 +482,7 @@ button.xs { white-space:nowrap; }
         </header>
         <div class="chat" id="dbgChat">
           <div class="chat-log" id="dbgLog">
-            <div class="chat-empty" id="dbgEmpty"><b>支持三类模型</b><br>文本（流式多轮）· 图片（文生图 / 图生图）· 视频（提交后自动轮询）<br>每轮都能展开看请求体与响应</div>
+            <div class="chat-empty" id="dbgEmpty"><b>支持三类模型</b><br>文本（流式多轮）· 图片（文生图 / 图生图，最多 20 张垫图）· 视频（提交后自动轮询）<br>每轮都能展开看请求体与响应</div>
           </div>
           <div class="chat-bar">
             <div class="row">
@@ -484,19 +491,20 @@ button.xs { white-space:nowrap; }
               <label class="sel-note" data-for="image">画幅<select id="dbgSize"><option value="">默认</option><option value="1:1">1:1</option><option value="4:3">4:3</option><option value="3:4">3:4</option><option value="16:9">16:9</option><option value="9:16">9:16</option><option value="auto">auto</option></select></label>
               <label class="sel-note" data-for="image">张数<select id="dbgN"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
               <label class="sel-note" data-for="image">返回<select id="dbgFmt"><option value="url">url</option><option value="b64_json">b64_json</option></select></label>
-              <label class="sel-note" data-for="image"><button class="xs ghost" id="dbgPick" type="button">参考图</button><span class="note" id="dbgRefName"></span><button class="xs ghost" id="dbgRefClear" type="button" title="移除参考图" hidden>×</button></label>
+              <label class="sel-note" data-for="image"><button class="xs ghost" id="dbgPick" type="button">垫图</button><span class="note" id="dbgRefName">0 / 20</span><button class="xs ghost" id="dbgRefClear" type="button" title="清空垫图" hidden>×</button></label>
               <label class="sel-note" data-for="video">画幅<select id="dbgVSize"><option>16:9</option><option>9:16</option><option>1:1</option></select></label>
               <label class="sel-note" data-for="video">分辨率<select id="dbgRes"><option>720P</option><option>1080P</option></select></label>
               <label class="sel-note" data-for="video">时长<select id="dbgDur"><option>5</option><option>10</option><option>15</option></select></label>
               <label class="sel-note" data-for="video">音轨<select id="dbgAudio"><option value="1">有</option><option value="0">无</option></select></label>
             </div>
+            <div class="refs" id="dbgRefs" hidden></div>
             <div class="chat-input">
               <textarea id="dbgPrompt" rows="2" placeholder="输入消息，Enter 发送 / Shift+Enter 换行"></textarea>
               <button class="primary" id="dbgSend">发送</button>
             </div>
           </div>
         </div>
-        <input type="file" id="dbgFile" accept="image/*" hidden>
+        <input type="file" id="dbgFile" accept="image/*" multiple hidden>
       </div>
     </section>
 
@@ -618,25 +626,26 @@ wang@example.com|密码3|备用号"></textarea>
   </div>
 </div>
 
-<!-- 登录面板 / API Key -->
+<!-- 登录面板：默认密钥登录（config.panel.key，留空回落前门 API Key） -->
 <div class="veil" id="keyVeil" hidden>
   <div class="dlg" style="width:430px">
-    <header><h3 id="authTitle">登录面板</h3></header>
+    <header><h3 id="authTitle">输入密钥进入</h3></header>
     <div class="body">
-      <div id="authPass">
+      <div id="authKey">
+        <div class="field">
+          <label>面板密钥</label>
+          <input id="keyInput" type="password" placeholder="sk-panel-…（config.panel.key）" autocomplete="off">
+        </div>
+        <div class="hint" style="margin-top:6px">也可以直接填前门 API Key。登录后换成 HttpOnly 会话，明文不会留在浏览器里。</div>
+      </div>
+      <div id="authPass" hidden>
         <div class="field"><label>用户名</label><input id="loginUser" value="admin" autocomplete="username"></div>
         <div class="field"><label>密码</label><input id="loginPass" type="password" autocomplete="current-password"></div>
       </div>
-      <div id="authKey" hidden>
-        <div class="field">
-          <label>API Key（与 /v1 前门同一把；只存在浏览器本地）</label>
-          <input id="keyInput" type="password" placeholder="sk-..." autocomplete="off">
-        </div>
-      </div>
       <div class="state err" id="keyErr" hidden></div>
-      <div class="hint" style="margin-top:10px"><a href="#" id="authSwitch">改用 API Key</a></div>
+      <div class="hint" style="margin-top:10px" id="authSwitchWrap" hidden><a href="#" id="authSwitch">改用账号密码登录</a></div>
     </div>
-    <footer><span class="grow"></span><button class="primary" id="keyGo">登录</button></footer>
+    <footer><span class="grow"></span><button class="primary" id="keyGo">进入</button></footer>
   </div>
 </div>
 
@@ -678,15 +687,19 @@ function toast(msg, kind) {
   $('#toast').appendChild(d);
   setTimeout(() => d.remove(), 3600);
 }
-/* 登录框：两种形态 —— 账号密码（默认）/ API Key（兼容脚本与老用户） */
-let authMode = 'pass';
+/* 登录框：**密钥优先**（面板主形态），账密只在服务端配了 panel.password 时作为后备出现。
+   两种凭据都走 /panel/api/login → HttpOnly 会话 cookie；浏览器里不再留明文凭据。 */
+let authMode = 'key';
+let authHasPass = false;   // 服务端是否还开着一道账密入口（/panel/api/session 告知）
 function showAuth(mode) {
   if (mode) authMode = mode;
   const isKey = authMode === 'key';
   $('#authPass').hidden = isKey;
   $('#authKey').hidden = !isKey;
-  $('#authTitle').textContent = isKey ? '用 API Key 进入' : '登录面板';
-  $('#authSwitch').textContent = isKey ? '改用账号密码登录' : '改用 API Key';
+  $('#authTitle').textContent = isKey ? '输入密钥进入' : '登录面板';
+  // 没配密码就别给一个"切过去也登不了"的链接。
+  $('#authSwitchWrap').hidden = !authHasPass;
+  $('#authSwitch').textContent = isKey ? '改用账号密码登录' : '改用密钥登录';
   $('#keyGo').textContent = isKey ? '进入' : '登录';
   $('#keyErr').hidden = true;
   $('#keyVeil').hidden = false;
@@ -694,22 +707,54 @@ function showAuth(mode) {
 }
 const askKey = () => showAuth('key');
 
-// doAuth 按当前形态提交。两种凭据都落到同一个"通过/未通过"上，
-// 区别只在服务端：密码换 HttpOnly 会话 cookie，Key 每次请求带 Authorization。
+// doAuth 按当前形态提交。
+// 🔴 密钥登录**不再把 Key 存进 localStorage**：服务端换一个 HttpOnly 会话，
+// 明文只在这一次请求里出现（旧版存 localStorage，等于把长期凭据交给任何 XSS）。
 async function doAuth() {
   const err = $('#keyErr');
   err.hidden = true;
   if (authMode === 'key') {
     const v = $('#keyInput').value.trim();
     if (!v) return;
-    localStorage.setItem(KEY_STORE, v);
+    const btn = $('#keyGo');
+    btn.disabled = true;
     try {
-      await loadOverview();
-      $('#keyVeil').hidden = true;
+      const r = await fetch('/panel/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: v }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) {
+        localStorage.removeItem(KEY_STORE);   // 旧版可能残留过一把
+        $('#keyInput').value = '';
+        $('#btnLogout').hidden = false;
+        await loadOverview();
+        $('#keyVeil').hidden = true;
+        toast('已进入面板', 'ok');
+        return;
+      }
+      if (r.status === 401) {
+        err.textContent = d.error || '密钥无效';
+        err.hidden = false;
+        return;
+      }
+      // 400/404：服务端没启用密钥登录（配置全空）或版本更老 —— 退回
+      // "本地保存 + 每请求带 Authorization"的老路，至少不把人挡在门外。
+      localStorage.setItem(KEY_STORE, v);
+      try {
+        await loadOverview();
+        $('#keyVeil').hidden = true;
+      } catch (e) {
+        localStorage.removeItem(KEY_STORE);
+        err.textContent = 'Key 无效：' + e.message;
+        err.hidden = false;
+      }
     } catch (e) {
-      localStorage.removeItem(KEY_STORE);
-      err.textContent = 'Key 无效：' + e.message;
+      err.textContent = e.message;
       err.hidden = false;
+    } finally {
+      btn.disabled = false;
     }
     return;
   }
@@ -1068,6 +1113,10 @@ function renderConfig() {
     kv('API Key', c.api_key_required
       ? '<span class="tag ok">已启用 ' + (c.api_keys_count || 1) + ' 把</span>' + (c.api_keys_managed ? ' <span class="tag muted">面板托管</span>' : '')
       : '<span class="tag bad">未启用</span>'),
+    // 面板登录形态：密钥（panel.key）/ API Key 回落 / 可选账密 —— 只显示有没有配，不回显值。
+    kv('面板登录', (c.panel && c.panel.key_set ? '<span class="tag ok">自定义密钥</span>' : '<span class="tag muted">用 API Key</span>')
+      + (c.panel && c.panel.password_enabled ? ' <span class="tag muted">+ 账密</span>' : '')),
+    kv('会话有效期', ((c.panel && c.panel.session_hours) || 12) + ' 小时'),
     kv('reasoning 透出', c.reasoning ? '开' : '关'),
   ].join('');
   const u = c.upstream || {};
@@ -1391,7 +1440,11 @@ const DBG_EP = {
   image: '/v1/images/generations',
   video: '/v1/videos/generations',
 };
-const DBG = { media: 'text', mediaOf: new Map(), busy: false, ref: null, history: [] };
+// DBG_MAX_REFS 与后端 maxInputImages 对齐（服务端超出直接 400）
+const DBG_MAX_REFS = 20;
+const DBG_MAX_REF_BYTES = 8 * 1024 * 1024;      // 单张
+const DBG_MAX_REF_TOTAL = 16 * 1024 * 1024;     // 合计（base64 约 21MB，服务端 32MB 上限）
+const DBG = { media: 'text', mediaOf: new Map(), busy: false, refs: [], history: [] };
 
 function dbgNode(tag, cls, text) {
   const n = document.createElement(tag);
@@ -1433,12 +1486,15 @@ function dbgNewTurn(prompt, media) {
   const u = dbgNode('div', 'turn user');
   const ub = dbgNode('div', 'bub');
   ub.append(dbgNode('div', 'who', '你'), dbgNode('div', 'txt', prompt));
-  if (media === 'image' && DBG.ref) {
+  if (media === 'image' && DBG.refs.length) {
     const th = dbgNode('div', 'thumbs');
-    const im = dbgNode('img');
-    im.src = DBG.ref.dataURI;
-    im.alt = DBG.ref.name || '参考图';
-    th.append(im);
+    DBG.refs.forEach((r, i) => {
+      const im = dbgNode('img');
+      im.src = r.dataURI;
+      im.alt = r.name || ('垫图 ' + (i + 1));
+      im.title = '第 ' + (i + 1) + ' 张 · ' + (r.name || '');
+      th.append(im);
+    });
     ub.append(th);
   }
   u.append(ub);
@@ -1551,10 +1607,18 @@ async function dbgSendImage(turn, model, prompt) {
   if (size) payload.size = size;
   const n = Number($('#dbgN').value) || 1;
   if (n > 1) payload.n = n;
-  if (DBG.ref) payload.image = DBG.ref.dataURI;
+  // 多张垫图：单张仍发字符串（兼容只认 str 的客户端/老版本），多张发数组。
+  // 顺序 = 界面上的序号（上游按 files[] 顺序指代"第几张图"）。
+  if (DBG.refs.length === 1) payload.image = DBG.refs[0].dataURI;
+  else if (DBG.refs.length > 1) payload.image = DBG.refs.map(r => r.dataURI);
 
   const echo = Object.assign({}, payload);
-  if (echo.image) echo.image = '（data URI，' + Math.round(payload.image.length / 1024) + 'KB）';
+  if (echo.image) {
+    const n = DBG.refs.length;
+    const kb = Math.round(DBG.refs.reduce((s, r) => s + (r.bytes || 0), 0) / 1024);
+    echo.image = n > 1 ? ('（' + n + ' 张 data URI，共 ' + kb + 'KB）')
+                       : ('（data URI，' + kb + 'KB）');
+  }
   turn.bub.append(dbgIO('请求体', dbgJSON(echo)));
 
   const r = await fetch(DBG_BASE + '/v1/images/generations', {
@@ -1715,30 +1779,88 @@ function dbgSyncMedia() {
   $('#dbgEndpoint').textContent = DBG_EP[DBG.media];
   $('#dbgPrompt').placeholder = {
     text: '输入消息，Enter 发送 / Shift+Enter 换行',
-    image: '描述画面；选了参考图就是图生图（约 50~120s）',
+    image: '描述画面；垫了图就是图生图（可多张，约 50~120s）',
     video: '描述镜头与动作（提交后自动轮询，约 3~15 分钟）',
   }[DBG.media];
+  dbgRenderRefs();   // 垫图条只在 image 模型下出现
 }
 
-function dbgPickRef(file) {
-  if (!file) return;
-  if (!/^image\//.test(file.type)) { toast('只支持图片文件', 'err'); return; }
-  if (file.size > 8 * 1024 * 1024) { toast('参考图别超过 8MB（base64 还要再涨 33%）', 'err'); return; }
-  const fr = new FileReader();
-  fr.onload = () => {
-    DBG.ref = { name: file.name, dataURI: String(fr.result) };
-    $('#dbgRefName').textContent = file.name + ' · ' + Math.round(file.size / 1024) + 'KB';
-    $('#dbgRefClear').hidden = false;
+// dbgPickRefs 收多张垫图。顺序 = 选择顺序（上游按 files[] 顺序指代"第几张"），
+// 所以 FileReader 的异步回调必须回填到**预占的槽位**，不能"谁先读完谁先 push"。
+function dbgPickRefs(files) {
+  const room = DBG_MAX_REFS - DBG.refs.length;
+  if (room <= 0) { toast('最多 ' + DBG_MAX_REFS + ' 张垫图（后端同一上限）', 'err'); return; }
+  // 合计上限要做，不然 20 张各自合规、加起来几百 MB 的请求会把网关拖死。
+  let used = DBG.refs.reduce((s, r) => s + (r.bytes || 0), 0);
+  const list = Array.from(files || []).filter(f => {
+    if (!/^image\//.test(f.type)) { toast('跳过非图片：' + f.name, 'err'); return false; }
+    if (f.size > DBG_MAX_REF_BYTES) { toast('跳过超过 8MB 的图：' + f.name, 'err'); return false; }
+    if (used + f.size > DBG_MAX_REF_TOTAL) {
+      toast('垫图合计上限 16MB，跳过：' + f.name, 'err');
+      return false;
+    }
+    used += f.size;
+    return true;
+  });
+  if (!list.length) return;
+  const take = list.slice(0, room);
+  if (list.length > room) toast('只收前 ' + room + ' 张（上限 ' + DBG_MAX_REFS + '）', 'err');
+
+  const slots = new Array(take.length).fill(null);
+  let left = take.length;
+  const done = () => {
+    slots.forEach(s => s && DBG.refs.push(s));
+    dbgRenderRefs();
   };
-  fr.readAsDataURL(file);
+  take.forEach((file, i) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      slots[i] = { name: file.name, dataURI: String(fr.result), bytes: file.size };
+      if (--left === 0) done();
+    };
+    fr.onerror = () => { toast('读不了：' + file.name, 'err'); if (--left === 0) done(); };
+    fr.readAsDataURL(file);
+  });
+}
+
+// dbgRenderRefs 重绘垫图槽：序号角标（决定指代顺序）+ 单张移除。
+function dbgRenderRefs() {
+  const box = $('#dbgRefs');
+  box.innerHTML = '';
+  DBG.refs.forEach((r, i) => {
+    const cell = dbgNode('div', 'ref');
+    cell.title = r.name || ('垫图 ' + (i + 1));
+    const im = dbgNode('img');
+    im.src = r.dataURI;
+    im.alt = r.name || ('垫图 ' + (i + 1));
+    const no = dbgNode('span', 'no', String(i + 1));
+    const rm = dbgNode('button', 'rm', '×');
+    rm.type = 'button';
+    rm.title = '移除第 ' + (i + 1) + ' 张';
+    rm.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      DBG.refs.splice(i, 1);
+      dbgRenderRefs();
+    });
+    cell.append(im, no, rm);
+    box.append(cell);
+  });
+  box.hidden = !DBG.refs.length || DBG.media !== 'image';
+  const n = DBG.refs.length;
+  const mb = DBG.refs.reduce((s, r) => s + (r.bytes || 0), 0) / 1048576;
+  $('#dbgRefName').textContent = n
+    ? (n + ' 张 · ' + (mb < 0.1 ? '<0.1' : mb.toFixed(1)) + 'MB · 按序号提交')
+    : ('0 / ' + DBG_MAX_REFS);
+  $('#dbgRefClear').hidden = !n;
+  $('#dbgPick').textContent = n ? '加垫图' : '垫图';
 }
 
 function dbgClearAll() {
   if (DBG.busy) { toast('等这一轮跑完再清', 'err'); return; }
   DBG.history = [];
-  DBG.ref = null;
-  $('#dbgRefName').textContent = '';
-  $('#dbgRefClear').hidden = true;
+  DBG.refs = [];
+  dbgRenderRefs();
   const log = $('#dbgLog');
   log.innerHTML = '';
   const e = dbgNode('div', 'chat-empty');
@@ -1909,7 +2031,7 @@ function bind() {
     $('#btnLogout').hidden = true;
     $('#navState').textContent = '已退出';
     $('#navPulse').className = 'pulse warn';
-    showAuth('pass');
+    showAuth('key');
   });
 
   $('#dbgSend').addEventListener('click', debugSend);
@@ -1920,13 +2042,12 @@ function bind() {
   $('#dbgModel').addEventListener('change', dbgSyncMedia);
   $('#dbgPick').addEventListener('click', () => $('#dbgFile').click());
   $('#dbgRefClear').addEventListener('click', () => {
-    DBG.ref = null;
-    $('#dbgRefName').textContent = '';
-    $('#dbgRefClear').hidden = true;
+    DBG.refs = [];
+    dbgRenderRefs();
   });
   $('#dbgFile').addEventListener('change', e => {
-    dbgPickRef(e.target.files && e.target.files[0]);
-    e.target.value = '';
+    dbgPickRefs(e.target.files);
+    e.target.value = '';   // 允许再选同一批文件
   });
 
   // ---- 日志页 ----
@@ -2063,10 +2184,21 @@ function bind() {
 /* ═══════════════ 启动 ═══════════════ */
 (async function boot() {
   bind();
+  // 深链 ?key=…：先拿它换会话（换完就从地址栏抹掉），换不到才退回本地存储。
   const urlKey = new URLSearchParams(location.search).get('key');
   if (urlKey) {
-    localStorage.setItem(KEY_STORE, urlKey);
     history.replaceState(null, '', location.pathname + location.hash);
+    let swapped = false;
+    try {
+      const r = await fetch('/panel/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: urlKey }),
+      });
+      swapped = r.ok;
+    } catch (e) { /* 网络问题：走下面的回落 */ }
+    if (swapped) localStorage.removeItem(KEY_STORE);
+    else localStorage.setItem(KEY_STORE, urlKey);
   }
   go(location.hash.slice(1) || 'accounts');
 
@@ -2078,13 +2210,14 @@ function bind() {
   } catch (e) { /* 服务端不可达时下面 loadOverview 会报 */ }
 
   if (sess) {
+    authHasPass = !!sess.password_enabled;
     $('#btnLogout').hidden = sess.method !== 'session';
     if (!sess.authed) {
-      showAuth(sess.need_auth ? 'pass' : 'key');
+      showAuth('key');   // 面板默认密钥登录；账密只是可选后备
       return;
     }
   } else if (!key()) {
-    showAuth('pass');
+    showAuth('key');
     return;
   }
 

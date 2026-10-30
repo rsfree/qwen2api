@@ -280,6 +280,12 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"default_thinking": cfg.DefaultThinking,
 		"api_key_required": len(keys) > 0,
 		"api_keys_count":   len(keys),
+		// 只回"配没配"，不回显密钥 —— 配置页要能看出"现在靠什么登录"。
+		"panel": map[string]any{
+			"key_set":          cfg.Panel.PanelKey() != "",
+			"password_enabled": cfg.Panel.PasswordEnabled(),
+			"session_hours":    cfg.Panel.EffectiveSessionHours(),
+		},
 		"api_keys_managed": p.b.APIKeysManaged(),
 		"upstream": map[string]any{
 			"base_url":  cfg.Upstream.BaseURL,

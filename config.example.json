@@ -59,8 +59,9 @@
       "direct_when_missing": true
     }
   },
-  "// panel": "面板登录（与 /v1 的 API Key 分开）。不配密码 = 保持只认 API Key；配了就必须先登录。password_hash 用 `qwen2api -passwd '<密码>'` 生成，优先于 password；session_secret 留空则每次启动随机（重启需重登），多副本必须配同一个",
+  "// panel": "面板登录：默认密钥（key，也可 QWEN2API_PANEL_KEY）。登录后换 HttpOnly 会话，明文不留在浏览器；也认 api_keys 里任意一把（单 Key 部署不用额外配）。想用账密就配 password_hash（`qwen2api -passwd '<密码>'`）或 password，登录框会多一个切换入口。🔴 panel.key 只在面板生效，/v1 不认。session_secret 留空则每次启动随机（重启需重登），多副本必须配同一个",
   "panel": {
+    "key": "sk-panel-change-me",
     "username": "admin",
     "password": "",
     "password_hash": "",

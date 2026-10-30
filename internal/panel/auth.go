@@ -1,10 +1,12 @@
 package panel
 
-// 面板登录：账号密码 → 签名会话 cookie。
+// 面板登录：**密钥优先**（config.panel.key，留空回落 config.api_keys），
+// 账密作为可选后备（只在配了 panel.password 时出现）。
 //
-// 为什么不复用 API Key 当"登录"：Key 是给 SDK/脚本的长期凭据，粘进浏览器就永久留在
-// 本机 localStorage；而面板能做"导入/删除账号"这类破坏性操作，值得一个能过期、
-// 能撤销（改密码即全部失效）、且不进 JS 可读区（HttpOnly）的凭据。
+// 两种凭据都换同一个签名会话 cookie（HttpOnly，默认 12h）：
+//   · 密钥登录不会把明文 Key 留在 localStorage —— 换完 cookie 就丢掉，
+//     XSS 也偷不到长期凭据；
+//   · 但请求头带 Bearer / x-api-key / ?key= 依然可用（脚本、书签、curl 需要）。
 //
 // 会话是无状态签名 token（HMAC-SHA256），不落盘、不占内存 —— 单副本够用。
 // 多副本要共享 SessionSecret，否则 A 签的会话在 B 上无效（已在 config 注释里写明）。
@@ -134,22 +136,39 @@ func (p *Panel) apiKeyOK(r *http.Request, keys []string) bool {
 	if token == "" {
 		token = strings.TrimSpace(r.URL.Query().Get("key"))
 	}
+	return matchKey(token, keys)
+}
+
+// keyStrings 面板认的密钥：自定义面板密钥优先，其次前门令牌。
+//
+// 为什么要"回落前门令牌"：单 Key 部署（只配 config.api_keys）的用户升级后
+// 不该先改配置才能进面板。两把都认，撤销 api_key 时面板也一起失效。
+// 反过来不成立：面板密钥只在面板生效，/v1 不认（见 config.Panel.Key 注释）。
+func (p *Panel) keyStrings() []string {
+	out := make([]string, 0, 4)
+	if k := p.b.Config().Panel.PanelKey(); k != "" {
+		out = append(out, k)
+	}
+	for _, k := range p.b.APIKeys() {
+		if k.Key != "" {
+			out = append(out, k.Key)
+		}
+	}
+	return out
+}
+
+// matchKey 常量时间比较，避免"逐字节比较 + 提前返回"泄漏前缀。
+func matchKey(token string, keys []string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
 	for _, k := range keys {
 		if subtle.ConstantTimeCompare([]byte(k), []byte(token)) == 1 {
 			return true
 		}
 	}
 	return false
-}
-
-// keyStrings 当前生效的前门令牌（面板与 /v1 认同一份，撤销后两边同时失效）。
-func (p *Panel) keyStrings() []string {
-	ks := p.b.APIKeys()
-	out := make([]string, 0, len(ks))
-	for _, k := range ks {
-		out = append(out, k.Key)
-	}
-	return out
 }
 
 // authMethod 返回本次请求的凭据来源：key / session / open / ""（未通过）。
@@ -172,20 +191,26 @@ func (p *Panel) authMethod(r *http.Request) string {
 // handleSession 前端启动时问一句"我该怎么证明身份"。
 func (p *Panel) handleSession(w http.ResponseWriter, r *http.Request) {
 	cfg := p.b.Config().Panel
+	method := p.authMethod(r)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"need_auth":  cfg.AuthEnabled(),
-		"authed":     p.authMethod(r) != "",
-		"method":     p.authMethod(r),
-		"username":   cfg.EffectiveUsername(),
-		"key_only":   !cfg.AuthEnabled() && len(p.keyStrings()) > 0,
-		"session_hr": cfg.EffectiveSessionHours(),
+		"need_auth":        cfg.AuthEnabled() || len(p.keyStrings()) > 0,
+		"authed":           method != "",
+		"method":           method,
+		"username":         cfg.EffectiveUsername(),
+		// key_only 面板默认就是密钥登录；只有配了密码时才多一个"账密登录"入口。
+		"key_only":         !cfg.PasswordEnabled(),
+		"password_enabled": cfg.PasswordEnabled(),
+		"panel_key":        cfg.PanelKey() != "",
+		"session_hr":       cfg.EffectiveSessionHours(),
 	})
 }
 
 func (p *Panel) handleLogin(w http.ResponseWriter, r *http.Request) {
 	cfg := p.b.Config().Panel
-	if !cfg.AuthEnabled() {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "未启用面板登录（config.panel.password 为空）"})
+	keys := p.keyStrings()
+	if !cfg.AuthEnabled() && len(keys) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "未启用面板登录（config.panel.key / panel.password / api_keys 都为空）"})
 		return
 	}
 	ip := clientIP(r)
@@ -199,12 +224,32 @@ func (p *Panel) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		Key      string `json:"key"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体解析失败"})
 		return
 	}
 
+	// ① 密钥登录（默认形态）：面板密钥或前门令牌都认。
+	//    换到 HttpOnly 会话后就丢掉明文 —— 前端也不再往 localStorage 里存。
+	if k := strings.TrimSpace(body.Key); k != "" {
+		if !matchKey(k, keys) {
+			p.recordFail(ip)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "密钥无效"})
+			return
+		}
+		p.clearFail(ip)
+		p.issueSessionCookie(w, r, cfg)
+		return
+	}
+
+	// ② 账密登录（可选后备）：只有配了密码才认，绝不"空密码即通过"。
+	if !cfg.PasswordEnabled() {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "未启用账密登录（config.panel.password 为空），请用密钥登录"})
+		return
+	}
 	userOK := subtle.ConstantTimeCompare(
 		[]byte(strings.TrimSpace(body.Username)), []byte(cfg.EffectiveUsername())) == 1
 	passOK := config.VerifyPanelPassword(cfg, body.Password)
@@ -215,7 +260,16 @@ func (p *Panel) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.clearFail(ip)
+	p.issueSessionCookie(w, r, cfg)
+}
 
+// issueSessionCookie 下发 HttpOnly 会话 cookie（密钥登录 / 账密登录共用）。
+//
+// 密钥登录也走会话，而不是"每个请求都带明文 Key"：
+//   - 浏览器侧：明文只在登录那一次出现，之后由 HttpOnly cookie 代理
+//     （XSS 拿不到；localStorage 里也不留长期凭据）；
+//   - 服务端：撤销密钥只需改配置重启，会话的 TTL 到期即止（12h 后可再收紧）。
+func (p *Panel) issueSessionCookie(w http.ResponseWriter, r *http.Request, cfg config.Panel) {
 	ttl := time.Duration(cfg.EffectiveSessionHours()) * time.Hour
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
@@ -226,7 +280,9 @@ func (p *Panel) handleLogin(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(ttl.Seconds()),
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expires_in_s": int(ttl.Seconds())})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "method": "session", "expires_in_s": int(ttl.Seconds()),
+	})
 }
 
 func (p *Panel) handleLogout(w http.ResponseWriter, r *http.Request) {

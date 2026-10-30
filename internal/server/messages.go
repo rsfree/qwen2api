@@ -57,7 +57,7 @@ type anthropicUsage struct {
 // handleMessages `POST /v1/messages`。
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	var req anthropicRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "请求体解析失败: "+err.Error())
 		return
 	}
@@ -210,7 +210,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 // 不做假精确 —— 真实用量由上游 usage 在正式响应里给出。
 func (s *Server) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	var req anthropicRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "请求体解析失败: "+err.Error())
 		return
 	}

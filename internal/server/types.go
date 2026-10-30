@@ -6,6 +6,14 @@ import (
 	"strings"
 )
 
+// maxRequestBody 单个请求体上限（字节）。
+//
+// 为什么 32MB：多模态是 base64 内联的，一张 8MB 的图编码后约 10.7MB，
+// 原来 chat 16MB / images 1MB 的上限会把"发三四张截图"这种正常用法直接挡死
+// （images 那条 1MB 连一张手机照片都放不下）。部署侧 nginx 是
+// client_max_body_size 64m，这里取一半留出 JSON 与网关缓冲的余量。
+const maxRequestBody = 32 << 20
+
 // ChatRequest OpenAI /v1/chat/completions 请求体（只声明用得到的字段；
 // 其余字段解析后忽略 —— 网关不假装支持上游没有的采样参数）。
 type ChatRequest struct {

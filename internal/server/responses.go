@@ -29,7 +29,7 @@ type responsesRequest struct {
 // handleResponses `POST /v1/responses`。
 func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	var req responsesRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "请求体解析失败: "+err.Error())
 		return
 	}
