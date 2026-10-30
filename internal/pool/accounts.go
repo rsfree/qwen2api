@@ -9,6 +9,7 @@ package pool
 import (
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/yuanjie-ai/qwen2api/internal/config"
@@ -156,9 +157,11 @@ func (p *Pool) WarmCandidates(target int, window time.Duration, limit int) []str
 		return nil
 	}
 	type row struct {
-		name   string
-		served int64
-		exp    time.Time
+		name     string
+		served   int64
+		inflight int32
+		lastUsed time.Time
+		exp      time.Time
 	}
 	p.mu.RLock()
 	rows := make([]row, 0, len(p.accounts))
@@ -166,16 +169,24 @@ func (p *Pool) WarmCandidates(target int, window time.Duration, limit int) []str
 		if a.authDead || a.RefreshToken == "" {
 			continue
 		}
-		rows = append(rows, row{name: a.Name, served: a.served, exp: a.tokenExp})
+		rows = append(rows, row{
+			name: a.Name, served: a.served, exp: a.tokenExp,
+			inflight: atomic.LoadInt32(&a.inflight), lastUsed: a.lastUsed,
+		})
 	}
 	p.mu.RUnlock()
 
-	// 与选号同序：用得最少的排前面。
-	sort.Slice(rows, func(i, j int) bool {
+	// 🔴 必须与 pick 用**完全一样的排序**，否则预热到的不是下一步要用的那批
+	// （踩过：这里按名字排、选号按插入顺序排，结果热号和冷号完全错位）。
+	// SliceStable + 只按 served/inflight/lastUsed ⇒ 同分时保持插入顺序，与 pick 一致。
+	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].served != rows[j].served {
 			return rows[i].served < rows[j].served
 		}
-		return rows[i].name < rows[j].name
+		if rows[i].inflight != rows[j].inflight {
+			return rows[i].inflight < rows[j].inflight
+		}
+		return rows[i].lastUsed.Before(rows[j].lastUsed)
 	})
 	if target > len(rows) {
 		target = len(rows)
@@ -207,9 +218,11 @@ func (p *Pool) AdoptCandidates(target, limit int) []string {
 		return nil
 	}
 	type row struct {
-		name   string
-		served int64
-		exp    time.Time
+		name     string
+		served   int64
+		inflight int32
+		lastUsed time.Time
+		exp      time.Time
 	}
 	p.mu.RLock()
 	rows := make([]row, 0, len(p.accounts))
@@ -217,15 +230,22 @@ func (p *Pool) AdoptCandidates(target, limit int) []string {
 		if a.authDead || a.RefreshToken != "" || a.Password == "" {
 			continue
 		}
-		rows = append(rows, row{name: a.Name, served: a.served, exp: a.tokenExp})
+		rows = append(rows, row{
+			name: a.Name, served: a.served, exp: a.tokenExp,
+			inflight: atomic.LoadInt32(&a.inflight), lastUsed: a.lastUsed,
+		})
 	}
 	p.mu.RUnlock()
 
-	sort.Slice(rows, func(i, j int) bool {
+	// 与 pick / WarmCandidates 同序（见上面那条注释）。
+	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].served != rows[j].served {
 			return rows[i].served < rows[j].served
 		}
-		return rows[i].name < rows[j].name
+		if rows[i].inflight != rows[j].inflight {
+			return rows[i].inflight < rows[j].inflight
+		}
+		return rows[i].lastUsed.Before(rows[j].lastUsed)
 	})
 	if target > len(rows) {
 		target = len(rows)

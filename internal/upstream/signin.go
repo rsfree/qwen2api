@@ -81,12 +81,14 @@ func (c *Client) SignInSession(ctx context.Context, email, password string) (acc
 	// 🔴 第二段不能省：signin 签发的 cookie token **只能读、不能写** ——
 	// 用它打 /api/v2/chats/new 会得到 Unauthorized（2026-10-28 实测），
 	// 而 /api/v2/models/ 却正常。写端点要的是 refresh 换来的 access_token。
-	session = ModeCookie + ":" + token
-	at, err := c.Refresh(ctx, session)
+	// 🔴 refresh_token 在 **refresh 响应**里（Set-Cookie），不在 signin 响应里。
+	// 第一版把 signin 的 token cookie 当成 session 返回，结果一个 refresh_token
+	// 都存不下来，每个号 15 分钟后仍要重登（2026-10-30 线上实测）。
+	at, refreshToken, err := c.doRefresh(ctx, "token="+token)
 	if err != nil {
 		return "", "", err
 	}
-	return ModeBearer + ":" + at, session, nil
+	return ModeBearer + ":" + at, refreshToken, nil
 }
 
 // Refresh 用 cookie 凭据换 access_token（Bearer 形态）。
