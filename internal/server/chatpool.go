@@ -26,9 +26,14 @@ type ChatPool struct {
 	per int           // 每号每类型最多缓存几个（0 = 关闭预建）
 	ttl time.Duration // 超过这个年龄的会话丢弃
 	now func() time.Time
-	// hit / miss 命中率观测。命中=省掉一次 2.4s 的 chats/new；
+	// hit / miss 命中率观测。命中=省掉一次 chats/new；
 	// 如果 miss 很高，说明预热覆盖的号与实际选号错位（要看 warmTarget/HotNames）。
 	hit, miss int64
+	// buildN / buildUS 现建会话的耗时样本（微秒累计）——
+	// 用来回答"命中到底省了多少"：独立 curl 测出 2.4s，但那是含 TLS 握手的；
+	// 网关用长连接，真实成本可能低一个量级。
+	buildN  int64
+	buildUS int64
 }
 
 type chatEntry struct {
@@ -132,6 +137,15 @@ func (p *ChatPool) Put(account, chatType, id string) bool {
 	return true
 }
 
+// RecordBuild 记录一次"现建会话"的真实耗时（走网关自己的长连接）。
+func (p *ChatPool) RecordBuild(d time.Duration) {
+	if p == nil || d <= 0 {
+		return
+	}
+	atomic.AddInt64(&p.buildN, 1)
+	atomic.AddInt64(&p.buildUS, int64(d/time.Microsecond))
+}
+
 // Short 该号该类型还差几个（0 = 已够，不需要补）。
 func (p *ChatPool) Short(account, chatType string) int {
 	if !p.Enabled() {
@@ -193,9 +207,11 @@ type ChatPoolStat struct {
 	Per    int            `json:"per"`     // 每号每类型目标数
 	TTLS   int            `json:"ttl_s"`   // 缓存上限（秒）
 	Ready  int            `json:"ready"`   // 当前可用的会话总数
-	Hit    int64          `json:"hit"`     // 命中次数（每次省 2~2.8s）
+	Hit    int64          `json:"hit"`     // 命中次数（省掉一次 chats/new）
 	Miss   int64          `json:"miss"`    // 未命中次数（只能现建）
 	HitPct float64        `json:"hit_pct"` // 命中率（%）
+	BuildMS float64       `json:"build_ms_avg"` // 现建会话的平均耗时（ms）
+	BuildN  int64         `json:"build_n"`      // 现建样本数
 	ByName map[string]int `json:"by_type"` // 按会话类型分布
 }
 
@@ -213,6 +229,11 @@ func (p *ChatPool) Stat() ChatPoolStat {
 	out.Miss = atomic.LoadInt64(&p.miss)
 	if total := out.Hit + out.Miss; total > 0 {
 		out.HitPct = float64(out.Hit) * 100 / float64(total)
+	}
+	n := atomic.LoadInt64(&p.buildN)
+	if n > 0 {
+		out.BuildN = n
+		out.BuildMS = float64(atomic.LoadInt64(&p.buildUS)) / 1000 / float64(n)
 	}
 	for _, byType := range p.m {
 		for typ, list := range byType {

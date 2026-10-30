@@ -267,7 +267,13 @@ func (s *Server) takeChat(ctx context.Context, acctName, cred, model, chatType s
 		}
 		return id, nil
 	}
+	// 记下现建的真实耗时：这是"命中能省多少"的唯一可信来源
+	// （独立 curl 测的 2.4s 含 TLS 握手，网关是长连接）。
+	t0 := time.Now()
 	id, err := s.up.NewChatTyped(ctx, cred, model, chatType)
+	if err == nil {
+		s.chats.RecordBuild(time.Since(t0))
+	}
 	if err != nil {
 		return "", err
 	}
