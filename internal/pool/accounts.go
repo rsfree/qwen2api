@@ -54,6 +54,9 @@ func (p *Pool) Add(a config.Account) (*Account, bool) {
 	if exp, ok := expireOf(a.Token); ok {
 		acc.tokenExp = exp
 	}
+	if exp, ok := expireOf(a.RefreshToken); ok {
+		acc.refreshExp = exp
+	}
 	p.accounts = append(p.accounts, acc)
 	p.mu.Unlock()
 	p.save()
@@ -125,6 +128,11 @@ func (p *Pool) SetRefresh(name, refreshToken string) bool {
 		return false
 	}
 	a.RefreshToken = strings.TrimSpace(refreshToken)
+	if exp, ok := expireOf(a.RefreshToken); ok {
+		a.refreshExp = exp
+	} else {
+		a.refreshExp = time.Time{}
+	}
 	p.mu.Unlock()
 	p.save()
 	return true
@@ -271,4 +279,59 @@ func (p *Pool) AdoptCandidates(target, limit int) []string {
 		}
 	}
 	return out
+}
+
+// RefreshExpiring 返回 refresh_token 快到期（window 以内）的账号名，
+// 按到期时间升序（最急的先保养）。
+//
+// 为什么要它：refresh_token TTL 是 30 天，到期后 refresh 直接失效、只能密码重登。
+// 在它到期前用密码换一张新的，就把"突然集体失效"变成了平滑的后台任务
+// （全池 3000 个号摊到 30 天 ≈ 每天 100 次）。
+func (p *Pool) RefreshExpiring(window time.Duration, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	type row struct {
+		name string
+		exp  time.Time
+	}
+	p.mu.RLock()
+	rows := make([]row, 0, len(p.accounts))
+	for _, a := range p.accounts {
+		if a.authDead || a.RefreshToken == "" || a.Password == "" {
+			continue
+		}
+		if a.refreshExp.IsZero() {
+			continue // 过期时间未知：不动它，等真正失效时走重登兜底
+		}
+		rows = append(rows, row{name: a.Name, exp: a.refreshExp})
+	}
+	p.mu.RUnlock()
+
+	sort.Slice(rows, func(i, j int) bool { return rows[i].exp.Before(rows[j].exp) })
+	deadline := time.Now().Add(window)
+	out := make([]string, 0, limit)
+	for _, r := range rows {
+		if r.exp.After(deadline) {
+			break
+		}
+		out = append(out, r.name)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// MissingRefresh 统计"还没有 refresh_token"的账号数（给预热速率自适应用）。
+func (p *Pool) MissingRefresh() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	n := 0
+	for _, a := range p.accounts {
+		if !a.authDead && a.RefreshToken == "" && a.Password != "" {
+			n++
+		}
+	}
+	return n
 }

@@ -29,6 +29,14 @@ const (
 	keepAliveBatch = 8
 	// keepAliveParallel 单个批次内的并发。
 	keepAliveParallel = 4
+	// keepAliveAdoptBatch 单轮最多补几个"还没 refresh_token"的号。
+	// 12/轮 = 36/分钟 ⇒ 3000 个号约 80 分钟补完；补完之后每号 30 天只需保养一次。
+	keepAliveAdoptBatch = 12
+	// refreshMaintainWindow refresh_token 剩余不到这个时间就提前换新。
+	// 它 TTL 是 30 天，留 3 天余量足够吸收停机/抖动。
+	refreshMaintainWindow = 3 * 24 * time.Hour
+	// refreshMaintainBatch 单轮最多保养几个（到期最急的先做）。
+	refreshMaintainBatch = 2
 )
 
 // KeepAlive 后台保活循环（由 main 启动，测试里不跑）。
@@ -53,6 +61,7 @@ func (s *Server) KeepAlive(ctx context.Context) {
 
 	changed := s.adoptOnce(ctx)
 	changed = s.warmOnce(ctx) || changed
+	changed = s.maintainRefresh(ctx) || changed
 	saveIfDue(changed)
 	for {
 		select {
@@ -65,6 +74,7 @@ func (s *Server) KeepAlive(ctx context.Context) {
 		case <-t.C:
 			changed := s.adoptOnce(ctx)
 			changed = s.warmOnce(ctx) || changed
+			changed = s.maintainRefresh(ctx) || changed
 			saveIfDue(changed)
 		}
 	}
@@ -75,7 +85,7 @@ func (s *Server) KeepAlive(ctx context.Context) {
 // 只补"接下来会被用到的那批"（served 升序），单轮 6 个、并发 2 ——
 // 目的是把一次性的 3000 次登录摊成后台小流量，而不是再打一次批量登录。
 func (s *Server) adoptOnce(ctx context.Context) bool {
-	names := s.pool.AdoptCandidates(s.warmTarget(), 6)
+	names := s.pool.AdoptCandidates(s.warmTarget(), keepAliveAdoptBatch)
 	if len(names) == 0 {
 		return false
 	}
@@ -97,6 +107,28 @@ func (s *Server) adoptOnce(ctx context.Context) bool {
 		}(n)
 	}
 	wg.Wait()
+	return changed
+}
+
+// maintainRefresh 给"refresh_token 快到期"的号续一张。
+//
+// refresh_token 的 TTL 是 30 天；到期后 refresh 会失效，只能密码重登。
+// 在到期前用密码换新的，就把"某天整批突然失效"摊成了平滑的后台任务：
+// 3000 个号 ÷ 30 天 ≈ 每天 100 次，每轮 2 个绰绰有余。
+func (s *Server) maintainRefresh(ctx context.Context) bool {
+	names := s.pool.RefreshExpiring(refreshMaintainWindow, refreshMaintainBatch)
+	if len(names) == 0 {
+		return false
+	}
+	changed := false
+	for _, n := range names {
+		if s.adoptOne(ctx, n) { // 同一个动作：signin 换新 access + refresh_token
+			changed = true
+		}
+	}
+	if changed {
+		log.Printf("[qwen2api] refresh_token 保养 %d 个（剩余不足 3 天）", len(names))
+	}
 	return changed
 }
 

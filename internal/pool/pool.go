@@ -37,6 +37,9 @@ type Account struct {
 	// tokenExp 当前 access token 的过期时刻（从 JWT 的 exp 解出）。
 	// 零值 = 未知（配置里手写的长期凭据）—— 不参与"快过期"判断。
 	tokenExp time.Time
+	// refreshExp refresh_token 的过期时刻（实测 TTL 30 天）。
+	// 到期后 refresh 会失效、只能密码重登 —— 所以要在它到期前主动"保养"。
+	refreshExp time.Time
 
 	inflight int32
 	// imageDay / imageCount 是"本地每日出图配额"：跨天自动清零。
@@ -93,6 +96,9 @@ type View struct {
 	TokenKnown bool `json:"token_known"`
 	// HasRefresh 是否已经拿到 refresh_token（没有就只能用密码重登）。
 	HasRefresh bool `json:"has_refresh"`
+	// RefreshLeftS refresh_token 还剩多少秒（RefreshKnown=false 时无意义）。
+	RefreshLeftS int  `json:"refresh_left_s"`
+	RefreshKnown bool `json:"refresh_known"`
 }
 
 // Pool 账号池（并发安全）。
@@ -120,6 +126,10 @@ func New(cfg config.Pool, accounts []config.Account, stateFile string) *Pool {
 		// 不需要"先跑一次请求才知道这张票还能不能用"。
 		if exp, ok := expireOf(a.Token); ok {
 			acc.tokenExp = exp
+		}
+		// 重启时从文件恢复 refresh_token 的到期时间，保养任务才不会"重新计时"。
+		if exp, ok := expireOf(a.RefreshToken); ok {
+			acc.refreshExp = exp
 		}
 		p.accounts = append(p.accounts, acc)
 	}
@@ -760,6 +770,10 @@ func (p *Pool) Snapshot() []View {
 		if !a.tokenExp.IsZero() {
 			v.TokenKnown = true
 			v.TokenLeftS = int(time.Until(a.tokenExp).Seconds())
+		}
+		if !a.refreshExp.IsZero() {
+			v.RefreshKnown = true
+			v.RefreshLeftS = int(time.Until(a.refreshExp).Seconds())
 		}
 		switch {
 		case a.authDead:

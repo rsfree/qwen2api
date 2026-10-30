@@ -162,3 +162,56 @@ func TestExportKeepsRefreshToken(t *testing.T) {
 		t.Fatal("重启后应保留 refresh_token")
 	}
 }
+
+func TestSetRefreshParsesExpiry(t *testing.T) {
+	// refresh_token 的 30 天到期时间也从 JWT 解出来，保养任务靠它排序。
+	exp := time.Now().Add(30 * 24 * time.Hour).Unix()
+	rt := fakeJWT(t, exp)
+
+	p := New(config.Default().Pool, []config.Account{{Name: "a"}}, "")
+	p.SetRefresh("a", rt)
+	views := p.Snapshot()
+	if len(views) != 1 || !views[0].RefreshKnown || views[0].RefreshLeftS <= 29*86400 {
+		t.Fatalf("refresh 到期时间没解析出来: %+v", views)
+	}
+}
+
+func TestRefreshExpiringPicksSoonest(t *testing.T) {
+	soon := fakeJWT(t, time.Now().Add(24*time.Hour).Unix())
+	later := fakeJWT(t, time.Now().Add(10*24*time.Hour).Unix())
+	far := fakeJWT(t, time.Now().Add(60*24*time.Hour).Unix())
+	p := New(config.Default().Pool, []config.Account{
+		{Name: "later", Password: "p"},
+		{Name: "soon", Password: "p"},
+		{Name: "far", Password: "p"},
+	}, "")
+	p.SetRefresh("later", later)
+	p.SetRefresh("soon", soon)
+	p.SetRefresh("far", far)
+
+	// 3 天窗口内只有 soon；排序按到期时间。
+	got := p.RefreshExpiring(3*24*time.Hour, 10)
+	if len(got) != 1 || got[0] != "soon" {
+		t.Fatalf("应只保养 soon，实际 %v", got)
+	}
+	// 窗口放大到 15 天：soon 在前、later 在后，far 仍不进。
+	got = p.RefreshExpiring(15*24*time.Hour, 10)
+	if len(got) != 2 || got[0] != "soon" || got[1] != "later" {
+		t.Fatalf("应按到期时间升序 [soon later]，实际 %v", got)
+	}
+	// limit 生效
+	if got := p.RefreshExpiring(15*24*time.Hour, 1); len(got) != 1 {
+		t.Fatalf("limit 未生效: %v", got)
+	}
+}
+
+func TestMissingRefresh(t *testing.T) {
+	p := New(config.Default().Pool, []config.Account{
+		{Name: "a", Password: "p"},
+		{Name: "b", Password: "p", RefreshToken: "rt"},
+		{Name: "c"}, // 没有密码：补不了，也不算缺口
+	}, "")
+	if got := p.MissingRefresh(); got != 1 {
+		t.Fatalf("缺口应只有 a，实际 %d", got)
+	}
+}

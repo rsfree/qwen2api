@@ -165,10 +165,41 @@ button.xs { white-space:nowrap; }
 #toast div.ok { border-left-color:var(--ok); } #toast div.err { border-left-color:var(--bad); }
 @keyframes slide { from { transform:translateX(20px); opacity:0; } }
 
-/* ── 调试台 ─────────────────────────────────────────────────────────── */
-.debug { display:grid; gap:10px; }
-.debug textarea { min-height:74px; }
-.out { background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:11px; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-word; min-height:60px; max-height:320px; overflow:auto; }
+/* ── 对话框调试 ─────────────────────────────────────────────────────── */
+.chat { display:flex; flex-direction:column; height:min(66vh,700px); }
+.chat-log { flex:1; overflow:auto; padding:14px; display:flex; flex-direction:column; gap:13px; background:var(--surface-2); }
+.chat-empty { margin:auto; text-align:center; color:var(--ink-3); font-size:12.5px; line-height:2; }
+.chat-empty b { color:var(--ink-2); font-weight:600; }
+.turn { display:flex; flex-direction:column; }
+.turn.user { align-items:flex-end; }
+.bub { border:1px solid var(--line); background:var(--surface); border-radius:12px; padding:10px 13px; max-width:min(88%,780px); }
+.turn.user .bub { background:var(--accent-soft); border-color:transparent; }
+.bub .who { font-size:11px; color:var(--ink-3); margin-bottom:5px; display:flex; gap:7px; align-items:center; flex-wrap:wrap; }
+.bub .txt { white-space:pre-wrap; word-break:break-word; font-size:13px; }
+.bub.pending .txt:empty::after { content:'▍'; color:var(--accent); animation:blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity:0; } }
+.bub details.reason { margin:2px 0 8px; padding:7px 10px; border-left:2px solid var(--line); background:var(--surface-2); border-radius:0 6px 6px 0; }
+.bub details.reason summary { cursor:pointer; font-size:11.5px; color:var(--ink-3); }
+.bub details.reason pre { margin-top:6px; font-family:var(--mono); font-size:11.5px; line-height:1.65; color:var(--ink-3); white-space:pre-wrap; max-height:180px; overflow:auto; }
+.io { margin-top:9px; border-top:1px dashed var(--line-soft); padding-top:7px; }
+.io summary { cursor:pointer; font-size:11.5px; color:var(--ink-3); user-select:none; }
+.io summary:hover { color:var(--accent); }
+.io pre { margin-top:6px; background:var(--surface-2); border:1px solid var(--line-soft); border-radius:6px; padding:8px 10px; font-family:var(--mono); font-size:11.5px; line-height:1.62; max-height:240px; overflow:auto; white-space:pre-wrap; word-break:break-all; }
+.grid { display:flex; flex-wrap:wrap; gap:8px; margin-top:4px; }
+.grid a { display:block; border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--surface-2); }
+.grid img { display:block; width:216px; height:216px; object-fit:cover; }
+.grid .err { font-size:11.5px; color:var(--bad); padding:9px 11px; }
+.thumbs { display:flex; gap:6px; margin-top:7px; }
+.thumbs img { width:58px; height:58px; object-fit:cover; border-radius:6px; border:1px solid var(--line); }
+.chat-bar { border-top:1px solid var(--line-soft); padding:10px 14px 12px; display:grid; gap:9px; background:var(--surface); }
+.chat-bar .row { display:flex; gap:9px; align-items:center; flex-wrap:wrap; }
+.chat-input { display:flex; gap:8px; align-items:flex-end; }
+.chat-input textarea { min-height:54px; max-height:150px; }
+.chat-input button { height:34px; flex:none; }
+.pill { display:inline-flex; align-items:center; gap:5px; font-size:11.5px; padding:1px 8px; border-radius:999px; background:var(--surface-2); color:var(--ink-3); }
+.pill.ok { background:var(--ok-soft); color:var(--ok); }
+.pill.bad { background:var(--bad-soft); color:var(--bad); }
+.pill.warn { background:var(--warn-soft); color:var(--warn); }
 
 /* ── 手机 ───────────────────────────────────────────────────────────── */
 @media (max-width:900px) {
@@ -354,16 +385,37 @@ button.xs { white-space:nowrap; }
         </div>
       </div>
       <div class="box">
-        <header><h3>在线调试</h3><span class="hint">直接打 /v1/chat/completions（流式），会消耗真实额度</span></header>
-        <div class="pad debug">
-          <div style="display:flex;gap:9px;flex-wrap:wrap">
-            <label class="sel-note">模型<select id="dbgModel" style="min-width:230px"></select></label>
-            <label class="sel-note">思考<select id="dbgGear"><option value="fast">fast</option><option value="auto">auto</option><option value="thinking">thinking</option></select></label>
+        <header>
+          <h3>对话框调试</h3>
+          <span class="hint">文本 / 图片 / 视频 · 每轮可展开看请求体与响应 · 会消耗真实额度</span>
+          <span class="grow"></span>
+          <span class="tag muted mono" id="dbgEndpoint">/v1/chat/completions</span>
+          <button class="xs ghost" id="dbgClear">清空对话</button>
+        </header>
+        <div class="chat" id="dbgChat">
+          <div class="chat-log" id="dbgLog">
+            <div class="chat-empty" id="dbgEmpty"><b>支持三类模型</b><br>文本（流式多轮）· 图片（文生图 / 图生图）· 视频（提交后自动轮询）<br>每轮都能展开看请求体与响应</div>
           </div>
-          <textarea id="dbgPrompt" placeholder="输入 prompt，回车发送（Shift+回车换行）">只回复两个字：在线</textarea>
-          <div style="display:flex;gap:9px"><button class="primary" id="dbgSend">发送</button><button id="dbgClear">清空输出</button></div>
-          <div class="out" id="dbgOut">（输出会实时追加在这里）</div>
+          <div class="chat-bar">
+            <div class="row">
+              <label class="sel-note">模型<select id="dbgModel" style="min-width:210px"></select></label>
+              <label class="sel-note" data-for="text">思考<select id="dbgGear"><option value="fast">fast</option><option value="auto" selected>auto</option><option value="thinking">thinking</option></select></label>
+              <label class="sel-note" data-for="image">画幅<select id="dbgSize"><option value="">默认</option><option value="1:1">1:1</option><option value="4:3">4:3</option><option value="3:4">3:4</option><option value="16:9">16:9</option><option value="9:16">9:16</option><option value="auto">auto</option></select></label>
+              <label class="sel-note" data-for="image">张数<select id="dbgN"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
+              <label class="sel-note" data-for="image">返回<select id="dbgFmt"><option value="url">url</option><option value="b64_json">b64_json</option></select></label>
+              <label class="sel-note" data-for="image"><button class="xs ghost" id="dbgPick" type="button">参考图</button><span class="note" id="dbgRefName"></span></label>
+              <label class="sel-note" data-for="video">画幅<select id="dbgVSize"><option>16:9</option><option>9:16</option><option>1:1</option></select></label>
+              <label class="sel-note" data-for="video">分辨率<select id="dbgRes"><option>720P</option><option>1080P</option></select></label>
+              <label class="sel-note" data-for="video">时长<select id="dbgDur"><option>5</option><option>10</option><option>15</option></select></label>
+              <label class="sel-note" data-for="video">音轨<select id="dbgAudio"><option value="1">有</option><option value="0">无</option></select></label>
+            </div>
+            <div class="chat-input">
+              <textarea id="dbgPrompt" rows="2" placeholder="输入消息，Enter 发送 / Shift+Enter 换行"></textarea>
+              <button class="primary" id="dbgSend">发送</button>
+            </div>
+          </div>
         </div>
+        <input type="file" id="dbgFile" accept="image/*" hidden>
       </div>
     </section>
 
@@ -689,6 +741,10 @@ function renderAccounts() {
     // 凭据剩余寿命：未知（非 JWT 的长期凭据）显示 -；已过期标红。
     const tk = !a.token_known ? '-' :
       (a.token_left_s <= 0 ? '<span class="tag bad">过期</span>' : (Math.floor(a.token_left_s / 60) + 'm'));
+    // 悬停看 refresh_token 还剩几天（30 天保养一次，不足 3 天标黄）。
+    const rtLeft = !a.refresh_known ? 'refresh_token 未知'
+      : ('refresh_token 还剩 ' + Math.max(0, Math.floor(a.refresh_left_s / 86400)) + ' 天'
+         + (a.refresh_left_s < 3 * 86400 ? '（待保养）' : ''));
     return `<tr data-name="${esc(a.name)}">
       <td class="c-chk"><input type="checkbox" class="rowchk" ${S.sel.has(a.name) ? 'checked' : ''} style="width:auto"></td>
       <td><div class="acc-name">${esc(a.name)}</div><div class="acc-sub">${esc(a.email || '-')}${a.note ? ' · ' + esc(a.note) : ''}</div></td>
@@ -698,7 +754,7 @@ function renderAccounts() {
       <td class="num">${vid}</td>
       <td class="num">${a.served || 0} / ${a.failures || 0}</td>
       <td class="num">${a.inflight || 0}</td>
-      <td class="num">${tk}</td>
+      <td class="num" title="${esc(rtLeft)}">${tk}</td>
       <td class="note">${a.last_used ? fmtTime(a.last_used) : '-'}</td>
       <td class="c-acts"><div class="acts">
         <button class="xs" data-act="test">重登</button>
@@ -854,12 +910,8 @@ async function renderModels() {
       <td class="note">${esc(m.notes || '')}</td>
     </tr>`;
   }).join('') || `<tr><td colspan="6" style="text-align:center;color:var(--ink-3);padding:26px">没有模型</td></tr>`;
-  // 调试台只打 /v1/chat/completions ⇒ 只列文本模型，否则一选就 400。
-  const textModels = list.filter(m => (m.media || 'text') === 'text');
-  const sel = $('#dbgModel');
-  if (sel.options.length !== textModels.length) {
-    sel.innerHTML = textModels.map(m => `<option value="${esc(m.id)}">${esc(m.title || m.id)}</option>`).join('');
-  }
+  // 对话框调试：文本 / 图片 / 视频三类一起列，选中项决定走哪个端点。
+  renderDebugModels(list);
 }
 
 /* ═══════════════ 配置 ═══════════════ */
@@ -1008,56 +1060,393 @@ async function doImport() {
   }
 }
 
-/* ═══════════════ 调试台 ═══════════════ */
+/* ═══════════════ 对话框调试 ═══════════════ */
+// 三类模型共用一条对话框：文本走 SSE，图片/视频走各自的 JSON 端点。
+//
+// 🔴 所有请求都打 /panel/api/debug/*：这条路先过**面板会话**，再由服务端以内部身份
+// 调前门 handler。老版直接 fetch('/v1/chat/completions')，用密码登录时浏览器里
+// 没有 API Key ⇒ 必然 401（线上就是这么挂的）。把 Key 塞回浏览器是最差的修法。
+const DBG_BASE = '/panel/api/debug';
+const DBG_EP = {
+  text: '/v1/chat/completions',
+  image: '/v1/images/generations',
+  video: '/v1/videos/generations',
+};
+const DBG = { media: 'text', mediaOf: new Map(), busy: false, ref: null, history: [] };
+
+function dbgNode(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+
+// 请求/响应回显：长字符串（b64_json 动辄 8MB）必须折叠，否则一展开面板就卡死。
+function dbgJSON(v) {
+  try {
+    return JSON.stringify(v, (k, val) => {
+      if (typeof val === 'string' && val.length > 600) {
+        return val.slice(0, 120) + '…（已折叠 ' + (val.length / 1048576).toFixed(2) + 'MB）';
+      }
+      return val;
+    }, 2);
+  } catch (e) { return String(v); }
+}
+
+function dbgIO(label, text, isResp) {
+  const d = dbgNode('details', 'io');
+  if (isResp) d.dataset.resp = '1';
+  d.append(dbgNode('summary', '', label), dbgNode('pre', '', text));
+  return d;
+}
+
+function dbgSetResp(turn, label, text) {
+  const old = turn.bub.querySelector('details.io[data-resp]');
+  if (old) old.remove();
+  turn.bub.append(dbgIO(label, text, true));
+}
+
+function dbgNewTurn(prompt, media) {
+  const log = $('#dbgLog');
+  const empty = $('#dbgEmpty');
+  if (empty) empty.remove();
+
+  const u = dbgNode('div', 'turn user');
+  const ub = dbgNode('div', 'bub');
+  ub.append(dbgNode('div', 'who', '你'), dbgNode('div', 'txt', prompt));
+  if (media === 'image' && DBG.ref) {
+    const th = dbgNode('div', 'thumbs');
+    const im = dbgNode('img');
+    im.src = DBG.ref.dataURI;
+    im.alt = DBG.ref.name || '参考图';
+    th.append(im);
+    ub.append(th);
+  }
+  u.append(ub);
+
+  const b = dbgNode('div', 'turn bot');
+  const bb = dbgNode('div', 'bub pending');
+  const who = dbgNode('div', 'who');
+  who.append(
+    dbgNode('span', 'pill', { text: '文本', image: '图片', video: '视频' }[media]),
+    dbgNode('span', 'note', DBG_EP[media]),
+  );
+  const body = dbgNode('div', 'txt', '');
+  bb.append(who, body);
+  b.append(bb);
+
+  log.append(u, b);
+  log.scrollTop = log.scrollHeight;
+  return { bub: bb, body, who, t0: performance.now(), media };
+}
+
+function dbgDone(turn) {
+  turn.bub.classList.remove('pending');
+  turn.who.append(dbgNode('span', 'note', ' · ' + ((performance.now() - turn.t0) / 1000).toFixed(1) + 's'));
+}
+
+function dbgFail(turn, status, text) {
+  turn.bub.classList.remove('pending');
+  turn.who.append(dbgNode('span', 'pill bad', status ? 'HTTP ' + status : '失败'));
+  turn.body.textContent = '';
+  const err = dbgNode('div', 'txt', text || '请求失败');
+  err.style.color = 'var(--bad)';
+  turn.bub.append(err);
+}
+
+// 带鉴权地取回媒体。密码登录走 cookie；Key 登录时 <img>/<video> 带不上 header，
+// 所以统一 fetch 成 blob —— 两种登录方式都不会裂图。
+async function dbgBlobURL(url) {
+  const r = await fetch(url, { headers: hdrs() });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return URL.createObjectURL(await r.blob());
+}
+
+async function dbgFillImg(img, url) {
+  try { img.src = await dbgBlobURL(url); }
+  catch (e) {
+    const box = dbgNode('div', 'err', '取图失败：' + e.message);
+    img.replaceWith(box);
+  }
+}
+
+/* ---- 文本（SSE） ---- */
+async function dbgSendText(turn, model, prompt) {
+  const msgs = DBG.history.slice();
+  msgs.push({ role: 'user', content: prompt });
+  const payload = { model, thinking: $('#dbgGear').value, stream: true, messages: msgs };
+  turn.bub.append(dbgIO('请求体', dbgJSON(payload)));
+
+  const r = await fetch(DBG_BASE + '/v1/chat/completions', {
+    method: 'POST',
+    headers: hdrs({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) { dbgFail(turn, r.status, (await r.text()).slice(0, 1200)); return; }
+
+  const rd = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '', raw = '', reasoning = '', content = '', usage = null;
+  const rdet = dbgNode('details', 'reason');
+  const rpre = dbgNode('pre', '');
+  rdet.append(dbgNode('summary', '', '思考过程（流式）'), rpre);
+
+  while (true) {
+    const chunk = await rd.read();
+    if (chunk.done) break;
+    const text = dec.decode(chunk.value, { stream: true });
+    raw += text;
+    if (raw.length > 24000) raw = raw.slice(-12000); // 只留尾段，够看形态
+    buf += text;
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      const s = line.trim();
+      if (!s.startsWith('data:')) continue;
+      const p = s.slice(5).trim();
+      if (!p || p === '[DONE]') continue;
+      let j = null;
+      try { j = JSON.parse(p); } catch (e) { continue; }
+      if (j.usage) usage = j.usage;
+      const d = j.choices && j.choices[0] && j.choices[0].delta;
+      if (!d) continue;
+      if (d.reasoning_content) {
+        reasoning += d.reasoning_content;
+        rpre.textContent = reasoning;
+        if (!rdet.isConnected) turn.bub.insertBefore(rdet, turn.body);
+      }
+      if (d.content) { content += d.content; turn.body.textContent = content; }
+      $('#dbgLog').scrollTop = $('#dbgLog').scrollHeight;
+    }
+  }
+
+  DBG.history.push({ role: 'user', content: prompt }, { role: 'assistant', content });
+  const tail = raw.length >= 12000 ? '…（前段省略，仅留尾部）\n' + raw.slice(-6000) : raw;
+  dbgSetResp(turn, '响应（SSE 原始' + (usage ? ' · ' + (usage.total_tokens || '-') + ' tok' : '') + '）', tail);
+}
+
+/* ---- 图片 ---- */
+async function dbgSendImage(turn, model, prompt) {
+  const payload = { model, prompt, response_format: $('#dbgFmt').value };
+  const size = $('#dbgSize').value;
+  if (size) payload.size = size;
+  const n = Number($('#dbgN').value) || 1;
+  if (n > 1) payload.n = n;
+  if (DBG.ref) payload.image = DBG.ref.dataURI;
+
+  const echo = Object.assign({}, payload);
+  if (echo.image) echo.image = '（data URI，' + Math.round(payload.image.length / 1024) + 'KB）';
+  turn.bub.append(dbgIO('请求体', dbgJSON(echo)));
+
+  const r = await fetch(DBG_BASE + '/v1/images/generations', {
+    method: 'POST',
+    headers: hdrs({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload),
+  });
+  const txt = await r.text();
+  let j = null;
+  try { j = JSON.parse(txt); } catch (e) { /* 非 JSON 走失败分支 */ }
+  if (!r.ok || !j) { dbgFail(turn, r.status, (txt || '空响应').slice(0, 1200)); return; }
+
+  const grid = dbgNode('div', 'grid');
+  (j.data || []).forEach(d => {
+    const a = dbgNode('a');
+    a.target = '_blank';
+    a.rel = 'noopener';
+    const im = dbgNode('img');
+    if (d.b64_json) {
+      im.src = 'data:image/png;base64,' + d.b64_json;
+      a.href = im.src;
+    } else if (d.url) {
+      a.href = d.url;
+      dbgFillImg(im, DBG_BASE + '/media?url=' + encodeURIComponent(d.url));
+    } else {
+      return;
+    }
+    a.append(im);
+    grid.append(a);
+  });
+  if (!grid.children.length) { dbgFail(turn, r.status, '返回 200 但没有可用图片'); return; }
+  turn.body.append(grid);
+  turn.who.append(dbgNode('span', 'pill ok', (j.data || []).length + ' 张'));
+
+  const resp = Object.assign({}, j, {
+    data: (j.data || []).map(d => Object.assign({}, d, {
+      b64_json: d.b64_json ? '（' + Math.round(d.b64_json.length / 1024) + 'KB base64）' : undefined,
+    })),
+  });
+  dbgSetResp(turn, '响应', dbgJSON(resp));
+}
+
+/* ---- 视频（提交 + 轮询） ---- */
+async function dbgSendVideo(turn, model, prompt) {
+  const payload = {
+    model, prompt,
+    size: $('#dbgVSize').value,
+    resolution: $('#dbgRes').value,
+    duration: Number($('#dbgDur').value),
+    audio: $('#dbgAudio').value === '1',
+  };
+  turn.bub.append(dbgIO('请求体', dbgJSON(payload)));
+
+  const r = await fetch(DBG_BASE + '/v1/videos/generations', {
+    method: 'POST',
+    headers: hdrs({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload),
+  });
+  const txt = await r.text();
+  let j = null;
+  try { j = JSON.parse(txt); } catch (e) { /* 走失败分支 */ }
+  if (!r.ok || !j) { dbgFail(turn, r.status, (txt || '空响应').slice(0, 1200)); return; }
+
+  const id = j.id;
+  turn.who.append(dbgNode('span', 'pill warn', '排队中'));
+  turn.body.textContent = '任务 ' + id + '（上游 ' + (j.upstream_id || '-') + '）';
+  dbgSetResp(turn, '响应（提交）', dbgJSON(j));
+
+  const bar = dbgNode('div', 'bar');
+  const fill = dbgNode('i');
+  bar.style.marginTop = '9px';
+  bar.append(fill);
+  turn.body.append(bar);
+
+  for (let i = 0; i < 240; i++) {
+    await new Promise(res => setTimeout(res, 3000));
+    let pr = null;
+    try {
+      const rr = await fetch(DBG_BASE + '/v1/videos/' + encodeURIComponent(id), { headers: hdrs() });
+      pr = await rr.json();
+    } catch (e) { continue; }
+    if (!pr) continue;
+    const pill = turn.who.querySelector('.pill:last-of-type');
+
+    if (pr.status === 'completed') {
+      pill.className = 'pill ok';
+      pill.textContent = '完成';
+      fill.style.width = '100%';
+      const v = dbgNode('video');
+      v.controls = true;
+      v.style.cssText = 'max-width:100%;margin-top:9px;border-radius:8px;border:1px solid var(--line)';
+      turn.body.append(v);
+      try { v.src = await dbgBlobURL(DBG_BASE + '/v1/videos/' + encodeURIComponent(id) + '/content'); }
+      catch (e) { turn.body.append(dbgNode('div', 'err', '取回成片失败：' + e.message)); }
+      if (pr.url) {
+        const a = dbgNode('a', 'note', '原始 CDN 直链（客户端需自带 Referer）');
+        a.href = pr.url;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.style.display = 'block';
+        a.style.marginTop = '7px';
+        turn.body.append(a);
+      }
+      dbgSetResp(turn, '响应（完成）', dbgJSON(pr));
+      return;
+    }
+    if (pr.status === 'failed') {
+      pill.className = 'pill bad';
+      pill.textContent = '失败';
+      turn.bub.classList.remove('pending');
+      dbgSetResp(turn, '响应（失败）', dbgJSON(pr));
+      return;
+    }
+    pill.className = 'pill warn';
+    pill.textContent = pr.status === 'in_progress' ? '生成中 ' + (pr.progress || 0) + '%' : '排队中';
+    fill.style.width = Math.max(4, pr.progress || 0) + '%';
+    dbgSetResp(turn, '响应（轮询）', dbgJSON(pr));
+  }
+  turn.bub.classList.remove('pending');
+  dbgFail(turn, 0, '轮询超时（12 分钟）');
+}
+
+/* ---- 发送入口 ---- */
 async function debugSend() {
+  if (DBG.busy) return;
   const model = $('#dbgModel').value;
   const prompt = $('#dbgPrompt').value.trim();
   if (!model) { toast('模型清单还没加载好，稍等一下再发', 'err'); return; }
-  if (!prompt) return;
-  const out = $('#dbgOut');
-  out.textContent = '';
+  if (!prompt) { $('#dbgPrompt').focus(); return; }
+
+  DBG.busy = true;
   const btn = $('#dbgSend');
   btn.disabled = true;
-  const t0 = performance.now();
+  btn.textContent = '发送中';
+  const media = DBG.media;
+  const turn = dbgNewTurn(prompt, media);
+  $('#dbgPrompt').value = '';
   try {
-    const r = await fetch('/v1/chat/completions', {
-      method: 'POST',
-      headers: hdrs({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ model, thinking: $('#dbgGear').value, stream: true, messages: [{ role: 'user', content: prompt }] }),
-    });
-    if (!r.ok) {
-      out.textContent = 'HTTP ' + r.status + '\n' + (await r.text()).slice(0, 800);
-      return;
-    }
-    const rd = r.body.getReader(), dec = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const chunk = await rd.read();
-      if (chunk.done) break;
-      buf += dec.decode(chunk.value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        const s = line.trim();
-        if (!s.startsWith('data:')) continue;
-        const payload = s.slice(5).trim();
-        if (payload === '[DONE]') continue;
-        try {
-          const j = JSON.parse(payload);
-          const d = j.choices && j.choices[0] && j.choices[0].delta;
-          if (d && (d.reasoning_content || d.content)) {
-            out.textContent += (d.reasoning_content || '') + (d.content || '');
-            out.scrollTop = out.scrollHeight;
-          }
-        } catch (e) { /* 忽略非 JSON 帧 */ }
-      }
-    }
-    out.textContent += `\n\n—— ${Math.round(performance.now() - t0)}ms`;
+    if (media === 'text') await dbgSendText(turn, model, prompt);
+    else if (media === 'image') await dbgSendImage(turn, model, prompt);
+    else await dbgSendVideo(turn, model, prompt);
+    dbgDone(turn);
   } catch (e) {
-    out.textContent += '\n请求失败: ' + e.message;
+    dbgFail(turn, 0, e.message || String(e));
   } finally {
+    DBG.busy = false;
     btn.disabled = false;
+    btn.textContent = '发送';
+    $('#dbgLog').scrollTop = $('#dbgLog').scrollHeight;
   }
+}
+
+/* ---- 控件联动 ---- */
+function dbgSyncMedia() {
+  const model = $('#dbgModel').value;
+  DBG.media = DBG.mediaOf.get(model) || 'text';
+  $$('#dbgChat [data-for]').forEach(el => { el.hidden = el.dataset.for !== DBG.media; });
+  $('#dbgEndpoint').textContent = DBG_EP[DBG.media];
+  $('#dbgPrompt').placeholder = {
+    text: '输入消息，Enter 发送 / Shift+Enter 换行',
+    image: '描述画面；选了参考图就是图生图（约 50~120s）',
+    video: '描述镜头与动作（提交后自动轮询，约 3~15 分钟）',
+  }[DBG.media];
+}
+
+function dbgPickRef(file) {
+  if (!file) return;
+  if (!/^image\//.test(file.type)) { toast('只支持图片文件', 'err'); return; }
+  if (file.size > 8 * 1024 * 1024) { toast('参考图别超过 8MB（base64 还要再涨 33%）', 'err'); return; }
+  const fr = new FileReader();
+  fr.onload = () => {
+    DBG.ref = { name: file.name, dataURI: String(fr.result) };
+    $('#dbgRefName').textContent = file.name + ' · ' + Math.round(file.size / 1024) + 'KB';
+  };
+  fr.readAsDataURL(file);
+}
+
+function dbgClearAll() {
+  if (DBG.busy) { toast('等这一轮跑完再清', 'err'); return; }
+  DBG.history = [];
+  DBG.ref = null;
+  $('#dbgRefName').textContent = '';
+  const log = $('#dbgLog');
+  log.innerHTML = '';
+  const e = dbgNode('div', 'chat-empty');
+  e.id = 'dbgEmpty';
+  e.innerHTML = '<b>支持三类模型</b><br>文本（流式多轮）· 图片（文生图 / 图生图）· 视频（提交后自动轮询）<br>每轮都能展开看请求体与响应';
+  log.append(e);
+}
+
+// 模型下拉按 media 分组：文本 / 图片 / 视频。选谁决定走哪个端点。
+function renderDebugModels(list) {
+  const sel = $('#dbgModel');
+  DBG.mediaOf.clear();
+  const groups = [['text', '文本'], ['image', '图片'], ['video', '视频']];
+  const html = groups.map(([k, label]) => {
+    const items = (list || []).filter(m => (m.media || 'text') === k);
+    if (!items.length) return '';
+    items.forEach(m => DBG.mediaOf.set(m.id, k));
+    return '<optgroup label="' + label + '">' +
+      items.map(m => '<option value="' + esc(m.id) + '">' + esc(m.title || m.id) + '</option>').join('') +
+      '</optgroup>';
+  }).join('');
+  const prev = sel.value;
+  if (sel.dataset.built !== html) {
+    sel.innerHTML = html;
+    sel.dataset.built = html;
+  }
+  if (prev && DBG.mediaOf.has(prev)) sel.value = prev;
+  else if (sel.options.length) sel.selectedIndex = 0;
+  dbgSyncMedia();
 }
 
 /* ═══════════════ 事件绑定 ═══════════════ */
@@ -1206,7 +1595,13 @@ function bind() {
   $('#dbgPrompt').addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); debugSend(); }
   });
-  $('#dbgClear').addEventListener('click', () => { $('#dbgOut').textContent = ''; });
+  $('#dbgClear').addEventListener('click', dbgClearAll);
+  $('#dbgModel').addEventListener('change', dbgSyncMedia);
+  $('#dbgPick').addEventListener('click', () => $('#dbgFile').click());
+  $('#dbgFile').addEventListener('change', e => {
+    dbgPickRef(e.target.files && e.target.files[0]);
+    e.target.value = '';
+  });
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') { $('#importVeil').hidden = true; $('#navDrawer').classList.remove('open'); }

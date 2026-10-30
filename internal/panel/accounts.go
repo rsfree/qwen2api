@@ -29,6 +29,8 @@ type acctStats struct {
 	RefreshKnown int `json:"refresh_known"`
 	// TokenFresh 当前 access token 仍未过期的账号数（看保活是否在跑）。
 	TokenFresh int `json:"token_fresh"`
+	// RefreshExpiring refresh_token 剩余不足 3 天、待保养的账号数。
+	RefreshExpiring int `json:"refresh_expiring"`
 }
 
 // acctStatusOf 与前端 acctStatus 同口径：额度用尽算独立状态。
@@ -81,6 +83,9 @@ func summarize(views []pool.View, videoMin int) acctStats {
 		}
 		if v.TokenLeftS > 0 {
 			st.TokenFresh++
+		}
+		if v.RefreshKnown && v.RefreshLeftS < 3*86400 {
+			st.RefreshExpiring++
 		}
 	}
 	return st
