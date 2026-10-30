@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yuanjie-ai/qwen2api/internal/pool"
 	"github.com/yuanjie-ai/qwen2api/internal/reqlog"
 	"github.com/yuanjie-ai/qwen2api/internal/upstream"
 )
@@ -264,10 +265,26 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		usedAcct string
 	)
 	for i := 0; i < req.N; i++ {
-		imgs, revised, acct, err := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, ratio, s.blobBase(r))
-		// 🔴 失败也要记账号：否则流水里 acct= 空，既定位不到号、也带不出出口 IP
-		// （2026-10-30 线上出现过一条 acct= 空的 502，白查了一轮）。
-		usedAcct = acct
+		var (
+			imgs    []string
+			revised string
+			acct    string
+			err     error
+		)
+		for attempt := 0; attempt < maxImageAttempts; attempt++ {
+			imgs, revised, acct, err = s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, ratio, s.blobBase(r))
+			// 🔴 失败也要记账号：否则流水里 acct= 空，既定位不到号、也带不出出口 IP
+			// （2026-10-30 线上出现过一条 acct= 空的 502，白查了一轮）。
+			usedAcct = acct
+			if err == nil {
+				break
+			}
+			if !shouldRetryImage(err, r.Context().Err() != nil) {
+				break
+			}
+			s.retryImageAfterTimeout(s.pool.Get(acct), attempt)
+			entry.Degraded = joinDegraded(entry.Degraded, "零产物超时，已换号重试")
+		}
 		if err != nil {
 			lastErr = err
 			break
@@ -323,20 +340,51 @@ const maxInputImages = 20
 // "额度将尽 or 上游抖动"这种判断只对运维有意义，对调用方只剩"过会儿再来"。
 var errUpstreamTimeout = errors.New("上游在时间预算内没有任何产物（只发心跳）")
 
-// imageTimeout 单次出图的时间预算（按参考图数量放宽）。
+// imageTimeout 单次**尝试**的时间预算（按参考图数量放宽）。
 //
-// 依据（2026-10-30 生产实测）：1 张 47.8s / 2 张 69.9s / 3 张 83.4s。
-// 基线 180s 覆盖无参考图与单图；每多一张加 30s（实测增量 18s + 抖动余量），
-// 上限 300s —— nginx 那边 900s，不会抢在网关前面回 504。
+// 依据（2026-10-30 生产实测）：1 张 47.8s / 2 张 69.9s / 3 张 83.4s，
+// 历史上最慢一次双参考图 136.7s。基线 150s 留足余量；每多一张加 20s，
+// 上限 240s。之所以不再给到 180s+：超时会**换号重试一次**，
+// 单次预算太大等于让用户干等 6 分钟（见 maxImageAttempts）。
 func imageTimeout(refs int) time.Duration {
-	d := 180 * time.Second
+	d := 150 * time.Second
 	if refs > 1 {
-		d += time.Duration(refs-1) * 30 * time.Second
+		d += time.Duration(refs-1) * 20 * time.Second
 	}
-	if d > 300*time.Second {
-		d = 300 * time.Second
+	if d > 240*time.Second {
+		d = 240 * time.Second
 	}
 	return d
+}
+
+// maxImageAttempts 生图最多试几个账号。
+//
+// 🔴 只有"零产物超时"才重试：上游只发心跳说明它**没受理**（没计费），
+// 换号是安全的；而 internal_error / 400 这类可能已受理，重试等于赌重复扣费
+// （文档里"计费动作不重试"说的是那类）。实测这条超时里 100% 的表现是
+// "额度将尽/被限的号"，换一个号通常 50~80s 就出图。
+const maxImageAttempts = 2
+
+// shouldRetryImage 这次失败是否值得**换号再试**。
+//
+// 只有"零产物超时"算：上游只发心跳说明请求没被受理（没计费），换号安全；
+// internal_error / 400 这类可能已受理，重试等于赌重复扣费。
+// 客户端已断开也别再浪费一个号（重试出来的图没人收）。
+func shouldRetryImage(err error, clientGone bool) bool {
+	return err != nil && !clientGone && errors.Is(err, errUpstreamTimeout)
+}
+
+// retryImageAfterTimeout 记录一次"超时换号"，并给这个号一段软冷却。
+//
+// 冷却的意义：这类号再被选中大概率还是只发心跳，白等 2.5 分钟。
+// 600s 后放出来（额度是按天恢复的，太短会反复踩）。
+func (s *Server) retryImageAfterTimeout(a *pool.Account, attempt int) {
+	if a == nil {
+		return
+	}
+	s.pool.MarkRateLimit(a, "image: 只发心跳、零产物（疑似额度将尽/被限）", 600)
+	log.Printf("[qwen2api] 生图超时（%s 零产物），已冷却 10 分钟并换号重试（第 %d 次）",
+		a.Name, attempt+1)
 }
 
 // generateImage 跑一次图片生成：选号 → （有参考图时）上传 → 建会话 → 提交 → 读流。
@@ -591,7 +639,20 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entry.RefImages = len(refs)
-	imgs, revised, acct, genErr := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, "", s.blobBase(r))
+	var (
+		imgs    []string
+		revised string
+		acct    string
+		genErr  error
+	)
+	for attempt := 0; attempt < maxImageAttempts; attempt++ {
+		imgs, revised, acct, genErr = s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, "", s.blobBase(r))
+		if !shouldRetryImage(genErr, r.Context().Err() != nil) {
+			break
+		}
+		s.retryImageAfterTimeout(s.pool.Get(acct), attempt)
+		entry.Degraded = joinDegraded(entry.Degraded, "零产物超时，已换号重试")
+	}
 	if genErr != nil {
 		code := httpStatusFor(genErr)
 		entry.Account = acct

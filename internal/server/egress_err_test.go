@@ -8,6 +8,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -185,8 +186,8 @@ func TestImageTimeoutScalesWithRefs(t *testing.T) {
 		refs int
 		want time.Duration
 	}{
-		{0, 180 * time.Second}, {1, 180 * time.Second}, {2, 210 * time.Second},
-		{3, 240 * time.Second}, {5, 300 * time.Second}, {20, 300 * time.Second},
+		{0, 150 * time.Second}, {1, 150 * time.Second}, {2, 170 * time.Second},
+		{3, 190 * time.Second}, {6, 240 * time.Second}, {20, 240 * time.Second},
 	}
 	for _, c := range cases {
 		if got := imageTimeout(c.refs); got != c.want {
@@ -254,5 +255,46 @@ func TestChatFailureRecordsAccount(t *testing.T) {
 	}
 	if rows[0].EgressIP != "198.51.100.9" {
 		t.Fatalf("失败也要带出口 IP，得到 %q", rows[0].EgressIP)
+	}
+}
+
+// 只有"零产物超时"才换号重试（其它错误可能已受理，重试=赌重复扣费）。
+func TestShouldRetryImage(t *testing.T) {
+	if !shouldRetryImage(errUpstreamTimeout, false) {
+		t.Fatal("零产物超时应重试")
+	}
+	if !shouldRetryImage(fmt.Errorf("%w（预算 150s）", errUpstreamTimeout), false) {
+		t.Fatal("包装后的超时也应重试")
+	}
+	if shouldRetryImage(errUpstreamTimeout, true) {
+		t.Fatal("客户端已断开不该重试")
+	}
+	if shouldRetryImage(errors.New("upstream error"), false) {
+		t.Fatal("普通上游错误不该重试（可能已受理）")
+	}
+	if shouldRetryImage(nil, false) {
+		t.Fatal("没有错误当然不重试")
+	}
+}
+
+// 超时后要给这个号软冷却，否则下一轮还会选中它、再白等一轮。
+func TestImageTimeoutCoolsAccount(t *testing.T) {
+	cfg := config.Default()
+	cfg.StateFile = ""
+	cfg.Accounts = []config.Account{{Name: "a0", Token: "tok-0"}}
+	p := pool.New(cfg.Pool, cfg.Accounts, "")
+	s := New(cfg, p, upstream.New(cfg.Upstream), reqlog.New(5), "test")
+
+	a := p.Get("a0")
+	s.retryImageAfterTimeout(a, 0)
+
+	state := ""
+	for _, v := range p.Snapshot() {
+		if v.Name == "a0" {
+			state = v.State
+		}
+	}
+	if state == "ready" {
+		t.Fatalf("超时的号应进入冷却，实际状态 %q", state)
 	}
 }
