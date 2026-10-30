@@ -166,11 +166,6 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 选号前把余额刷一遍（TTL 60s，并发只跑一轮）。
-	// 没有这一步，"够不够"只能靠配置里的预算猜 —— 而真实余额是账号级的：
-	// 免费号 40、会员号 270、昨天剩 10 都可能（2026-10-29 实测 alt 号只有 10）。
-	s.refreshStaleCredits(r.Context(), creditTTL)
-
 	spec := upstream.VideoSpec(size, resolution, duration, audio, rootModel)
 
 	var (
@@ -194,6 +189,20 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 			lastErr = errNoAccount
 			break
 		}
+		// 余额是这个号"能不能做这一步"的唯一依据。选号之后只刷**它**：
+		// 池子 3000+ 号时全池刷新既慢又没意义（绝大多数号根本不参与这次请求）。
+		// 刷不到就退回不拦，由上游 insufficient_quota 兜底。
+		if _, known := s.pool.CreditBalance(a.Name); !known {
+			s.refreshOneCredit(r.Context(), a.Name)
+		}
+		if bal, known := s.pool.CreditBalance(a.Name); known && needCredits > 0 && bal < needCredits {
+			// 🔴 先 Release 再 continue：Pick 已经把 inflight +1，
+			// 漏掉这一步这个号会被永久算作"在途"，再也选不中（静默掉号）。
+			s.pool.Release(a)
+			// 余额已写进池子，下一轮 PickForVideo 会自动跳过它。
+			continue
+		}
+
 		cred := s.pool.Credential(a.Name)
 		actx := upstream.WithAccount(r.Context(), a.Name)
 		chatID, err := s.up.NewChatTyped(actx, cred, chatModel, spec.ChatType)

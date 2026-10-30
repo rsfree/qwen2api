@@ -19,9 +19,6 @@ import (
 )
 
 const (
-	// creditTTL 余额缓存有效期。视频请求才会触发刷新，所以这个值决定
-	// "一个号花完钱后多久被发现" —— 60s 足够，且把第三方域名的调用摊薄。
-	creditTTL = 60 * time.Second
 	// creditTTLStats /stats（面板）用的更长 TTL：人看数据不需要 60s 级实时，
 	// 但它会定时轮询，别让轮询把三方域名打热。
 	creditTTLStats = 2 * time.Minute
@@ -116,8 +113,30 @@ func (s *Server) RefreshCredits(ctx context.Context, force bool) {
 	ttl := creditTTLStats
 	if force {
 		ttl = 0
+		// 用户主动点「刷新余额」＝要立刻看到新数字，这里同步等结果。
+		s.refreshStaleCredits(ctx, ttl)
+		return
 	}
-	s.refreshStaleCredits(ctx, ttl)
+	// 🔴 轮询路径**必须异步**：3000+ 账号时一轮刷新最坏等满 10s 超时，
+	// 而面板 5s 就轮询一次 —— 同步会直接把请求叠起来（实测 overview 10.7s）。
+	// refreshStaleCredits 内部 TryLock，重复触发不会堆叠。
+	go s.refreshStaleCredits(context.Background(), ttl)
+}
+
+// refreshOneCredit 只刷一个账号的余额，返回是否拿到了值。
+//
+// 视频路径用：选号之后才知道是哪个号，没必要为了一个号把 32 个都刷一遍。
+func (s *Server) refreshOneCredit(ctx context.Context, name string) bool {
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	c, err := s.up.Credits(upstream.WithAccount(ctx, name), s.pool.Credential(name))
+	if err != nil {
+		s.noteCreditErr(name, err)
+		s.pool.SetCreditBalance(name, -1)
+		return false
+	}
+	s.pool.SetCreditBalance(name, c.Total)
+	return true
 }
 
 // noteCreditErr 余额读取失败只记一次日志（否则一次网络抖动会刷满屏幕）。

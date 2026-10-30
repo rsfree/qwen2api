@@ -197,3 +197,38 @@ func TestVideoTierPricingMatchesModelVersion(t *testing.T) {
 		t.Fatalf("默认 root_model 变了（%s）⇒ 价格表要跟着换", cfg.Video.RootModel)
 	}
 }
+
+// TestVideoBalanceShortReleasesInflight 余额不足跳过账号时**必须 Release**。
+//
+// 这条钉的是一个静默 bug：Pick 已把 inflight +1，若 continue 前不释放，
+// 这个号会被永久算作"在途"，之后再也选不中 —— 池子越大越难发现
+// （只是可用号变少，日志里没有任何报错）。
+func TestVideoBalanceShortReleasesInflight(t *testing.T) {
+	up := newVideoUpstream(t, 0) // 余额 0，720P 5s 需要 30
+	h := newVideoServer(t, up, nil)
+
+	rec := postVideo(h, `{"prompt":"a cat","resolution":"720P","duration":5}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("余额 0 时视频应 429，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	if up.submitCount() != 0 {
+		t.Fatalf("余额不足不该提交上游，实际提交 %d 次", up.submitCount())
+	}
+
+	// 在途数必须回到 0（否则该账号被永久排除在选号之外）。
+	srec := httptest.NewRecorder()
+	h.ServeHTTP(srec, httptest.NewRequest(http.MethodGet, "/stats", nil))
+	var st struct {
+		Pool []struct {
+			Inflight int `json:"inflight"`
+		} `json:"pool"`
+	}
+	if err := json.Unmarshal(srec.Body.Bytes(), &st); err != nil {
+		t.Fatalf("解析 /stats 失败: %v", err)
+	}
+	for _, a := range st.Pool {
+		if a.Inflight != 0 {
+			t.Fatalf("余额不足跳过后 inflight 应归零，实际 %d", a.Inflight)
+		}
+	}
+}
