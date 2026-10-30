@@ -169,8 +169,27 @@ func (s *Server) UpdateConfig(patch map[string]any) (applied, needRestart []stri
 		return nil, nil, fmt.Errorf("写临时文件失败：%w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
+		// 🔴 容器里 config.json 常是**单文件 bind mount**（-v .../config.json:/app/config.json），
+		// 这种挂载点是内核层面的"设备节点"，rename 上去会报
+		// `device or resource busy`（2026-10-31 线上实测）。
+		// 降级：先备份，再原地覆盖写（文件本身可写，只是不能换 inode）。
 		_ = os.Remove(tmp)
-		return nil, nil, fmt.Errorf("替换配置文件失败：%w", err)
+		bak := path + ".bak"
+		if b, e := os.ReadFile(path); e == nil {
+			_ = os.WriteFile(bak, b, 0o600)
+		}
+		f, e := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		if e != nil {
+			return nil, nil, fmt.Errorf("写配置文件失败（rename 与覆盖写都失败：%v / %w）", err, e)
+		}
+		if _, e = f.Write(out); e != nil {
+			f.Close()
+			return nil, nil, fmt.Errorf("写配置文件失败：%w", e)
+		}
+		if e = f.Close(); e != nil {
+			return nil, nil, fmt.Errorf("写配置文件失败：%w", e)
+		}
+		log.Printf("[qwen2api] 配置文件是单文件挂载，已改用覆盖写（备份在 %s）", bak)
 	}
 
 	// 用新文件重建快照：从当前配置拷贝一份再 unmarshal —— 文件里没有的字段

@@ -263,13 +263,15 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		datums   []ImageDatum
 		lastErr  error
 		usedAcct string
+		usedChat string
 	)
 	for i := 0; i < req.N; i++ {
 		// 换号重试在 generateImage 内部（按"是否受理"判定），这里只管 n 张的串行。
-		imgs, revised, acct, err := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, ratio, s.blobBase(r))
+		imgs, revised, acct, chatID, err := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, ratio, s.blobBase(r))
 		// 🔴 失败也要记账号：否则流水里 acct= 空，既定位不到号、也带不出出口 IP
 		// （2026-10-30 线上出现过一条 acct= 空的 502，白查了一轮）。
 		usedAcct = acct
+		usedChat = chatID
 		if err != nil {
 			lastErr = err
 			break
@@ -299,6 +301,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 			code = http.StatusBadGateway
 		}
 		entry.Account = usedAcct
+		entry.ChatID = usedChat
 		entry.Status = code
 		entry.Error = lastErr.Error()
 		entry.DurationMS = time.Since(start).Milliseconds()
@@ -310,6 +313,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ImageResponse{Created: time.Now().Unix(), Data: datums})
 
 	entry.Account = usedAcct
+	entry.ChatID = usedChat
 	entry.Status = http.StatusOK
 	entry.Chars = len(datums)
 	entry.DurationMS = time.Since(start).Milliseconds()
@@ -384,7 +388,7 @@ func (s *Server) coolAfterImageTimeout(a *pool.Account) {
 // imageModel 是"图片内核"（extra.meta.model），与建会话用的 chat 模型分开：
 // 上游模型表里没有图片模型 id，把它当 chat 模型发会 Bad_Request。
 func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking, prompt string,
-	refs []string, ratio, blobBase string) (imgs []string, revised, acct string, err error) {
+	refs []string, ratio, blobBase string) (imgs []string, revised, acct, chatID string, err error) {
 
 	budget := imageTimeout(len(refs))
 	timeoutRetried := false
@@ -404,7 +408,7 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 					err = errNoAccount
 				}
 			}
-			return nil, "", acct, err
+			return nil, "", acct, chatID, err
 		}
 		// 选号即起出口探测：出图要 50~90s，落库时足够探完。
 		s.egressOf(a.Name)
@@ -414,7 +418,7 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 		actx, cancel := context.WithTimeout(ctx, budget)
 		actx = upstream.WithAccount(actx, a.Name)
 		attemptStart := time.Now()
-		imgs, revised, err = s.generateOnAccount(actx, a, model, imageModel, thinking,
+		imgs, revised, chatID, err = s.generateOnAccount(actx, a, model, imageModel, thinking,
 			prompt, refs, ratio, blobBase, budget)
 		took := time.Since(attemptStart)
 		cancel()
@@ -422,7 +426,7 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 		acct = a.Name
 
 		if err == nil {
-			return imgs, revised, acct, nil
+			return imgs, revised, acct, chatID, nil
 		}
 		s.noteFailure(a, err)
 		// 客户端断开就别再浪费账号了（画出来也没人收）。
@@ -437,7 +441,7 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 		case errors.Is(err, errUpstreamTimeout):
 			// 慢失败：每次 2.5 分钟，只允许再试一次。
 			if timeoutRetried {
-				return nil, "", acct, err
+				return nil, "", acct, chatID, err
 			}
 			timeoutRetried = true
 			s.coolAfterImageTimeout(a)
@@ -449,7 +453,7 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 			log.Printf("[qwen2api] 生图快速失败（%s，%s）：换号重试", a.Name, took.Round(time.Millisecond))
 		}
 	}
-	return nil, "", acct, err
+	return nil, "", acct, chatID, err
 }
 
 // generateOnAccount 在指定账号上跑完整一轮：转图 → 建会话 → 提交 → 读流。
@@ -458,7 +462,7 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 // 上游会判"无权访问该文件"（而且是静默的坏结果）。
 func (s *Server) generateOnAccount(ctx context.Context, a *pool.Account,
 	model, imageModel, thinking, prompt string, refs []string, ratio, blobBase string,
-	budget time.Duration) (imgs []string, revised string, err error) {
+	budget time.Duration) (imgs []string, revised, chatID string, err error) {
 
 	cred := s.pool.Credential(a.Name)
 
@@ -471,7 +475,7 @@ func (s *Server) generateOnAccount(ctx context.Context, a *pool.Account,
 		// 蓝底黑字 HELLO42（宽高比与原图一致，证明是真编辑不是 t2i 重画）。
 		files, upErr := s.visionFiles(ctx, blobBase, refs)
 		if upErr != nil {
-			return nil, "", upErr
+			return nil, "", "", upErr
 		}
 		spec = upstream.ImageEditSpec(files)
 	} else {
@@ -479,32 +483,52 @@ func (s *Server) generateOnAccount(ctx context.Context, a *pool.Account,
 		spec = upstream.ImageSpec(imageModel, ratio)
 	}
 
-	chatID, _, _, err := s.takeChat(ctx, a.Name, cred, model, spec.ChatType)
+	// 不能 := —— chatID 是命名返回值：它要在失败路径上带出去（流水可查）。
+	cid, _, _, err := s.takeChat(ctx, a.Name, cred, model, spec.ChatType)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
+	chatID = cid
 	body := upstream.BuildSubmitSpec(chatID, "", model, prompt, thinking, spec, time.Now())
 	st, err := s.up.OpenChat(ctx, cred, body)
 	if err != nil {
-		return nil, "", err
+		// 提交流都没建起来 ⇒ 上游没受理，但会话已经存在，id 仍要带出去（可查）。
+		return nil, "", chatID, err
 	}
 	defer st.Close()
 
 	for {
 		ev, more, err := st.Next()
 		if err != nil {
+			// 🔴 断流 ≠ 没画成（2026-10-31 线上 img-ace1f950：25.8s 时
+			// `chat 流读取: unexpected EOF` ⇒ 502 + 零张，而上游多半已经出图）。
+			// 图片帧是**原子产物**：断点之前拿到的 URL 就是可用的图，
+			// 所以先认产物、再认错误 —— 早先这里直接 return，把图一起丢了。
+			if len(imgs) > 0 {
+				log.Printf("[qwen2api] 生图流中断（%v），但已收到 %d 张产物 ⇒ 按成功返回",
+					err, len(imgs))
+				break
+			}
+			// 一张都没收到：图可能已经落进上游会话历史，只是这一帧没送到。
+			// 这是流式生图唯一的"事后取证"通道（见 upstream.LatestChatImages）。
+			if rec := s.recoverImages(ctx, cred, chatID); len(rec) > 0 {
+				imgs = rec
+				log.Printf("[qwen2api] 生图流失败（%v），从会话历史补回 %d 张（chat=%s）",
+					err, len(rec), chatID)
+				break
+			}
 			if ctx.Err() == context.DeadlineExceeded {
 				// ⚠️ 挂起是**双义**的（2026-10-28 实测两种都遇到）：
 				//   · 额度将尽的前兆 —— 再发一次会拿到明确的 insufficient_quota；
 				//   · 上游临时故障 —— 等几分钟同一账号又能出图。
 				// 所以文案不能断言"额度用完"，只能说"两种可能 + 怎么区分"。
 				// 🔴 这段中文只进流水/容器日志；客户端拿到的是 504 + "upstream timeout"。
-				return nil, "", fmt.Errorf("%w（预算 %s，垫图 %d 张）。两种可能："+
+				return nil, "", chatID, fmt.Errorf("%w（预算 %s，垫图 %d 张）。两种可能："+
 					"①该账号今日生图额度将尽（再发一次通常返回 insufficient_quota 确认）；"+
 					"②上游临时故障（等几分钟重试往往恢复，多垫图时更慢）。建议换号或稍后重试",
 					errUpstreamTimeout, budget, len(refs))
 			}
-			return nil, "", err
+			return nil, "", chatID, err
 		}
 		if !more {
 			break
@@ -517,7 +541,7 @@ func (s *Server) generateOnAccount(ctx context.Context, a *pool.Account,
 				msg = "上游额度已用完（未给出具体文案）"
 			}
 			s.pool.MarkOK(a)
-			return nil, "", fmt.Errorf("%w：%s", upstream.ErrQuota, msg)
+			return nil, "", chatID, fmt.Errorf("%w：%s", upstream.ErrQuota, msg)
 		}
 		if ev.ImagePrompt != "" {
 			revised = ev.ImagePrompt
@@ -535,7 +559,30 @@ func (s *Server) generateOnAccount(ctx context.Context, a *pool.Account,
 		// 只记成功张数：挂起/失败不占额度（实测挂起不扣上游配额）。
 		s.pool.MarkImageDone(a)
 	}
-	return imgs, revised, nil
+	return imgs, revised, chatID, nil
+}
+
+// recoverImages 从上游会话历史里补捞产物 —— 流断/超时之后的最后一条路。
+//
+// 只在"一张图都没有"时才值得调：历史里的图与流里的是同一批，
+// 已经拿到图再查一遍只是白花一次往返。
+//
+// 🔴 用 WithoutCancel：这条路径恰恰是"本次预算已耗尽/流已断"的时候，
+// 继承原 ctx 会立刻失败，等于白写。只保留其中的账号与出口信息（value 不受影响）。
+// 客户端主动断开（Canceled）则不补 —— 补回来也没人收。
+func (s *Server) recoverImages(ctx context.Context, cred, chatID string) []string {
+	if chatID == "" || errors.Is(ctx.Err(), context.Canceled) {
+		return nil
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 25*time.Second)
+	defer cancel()
+
+	found, err := s.up.LatestChatImages(rctx, cred, chatID)
+	if err != nil {
+		log.Printf("[qwen2api] 会话历史补捞失败（chat=%s）: %v", chatID, err)
+		return nil
+	}
+	return found
 }
 
 // downloadAsBase64 把直链图片转成 base64（b64_json 用）。
@@ -669,10 +716,11 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entry.RefImages = len(refs)
-	imgs, revised, acct, genErr := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, "", s.blobBase(r))
+	imgs, revised, acct, chatID, genErr := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, "", s.blobBase(r))
 	if genErr != nil {
 		code := httpStatusFor(genErr)
 		entry.Account = acct
+		entry.ChatID = chatID
 		entry.Status = code
 		entry.Error = genErr.Error()
 		entry.DurationMS = time.Since(start).Milliseconds()
@@ -682,6 +730,7 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(imgs) == 0 {
 		entry.Account = acct
+		entry.ChatID = chatID
 		entry.Status = http.StatusBadGateway
 		entry.Error = "上游没有返回任何图片"
 		entry.DurationMS = time.Since(start).Milliseconds()
@@ -706,6 +755,7 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 
 	entry.Model = requested
 	entry.Account = acct
+	entry.ChatID = chatID
 	entry.Status = http.StatusOK
 	entry.Chars = len(datums)
 	entry.DurationMS = time.Since(start).Milliseconds()

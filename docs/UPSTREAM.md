@@ -40,6 +40,8 @@ GET  {auth}/api/v2/auths/refresh            → 刷新登录态（Set-Cookie）
 | `GET` | `{auth}/api/v2/auths/` | 账号资料（id/email/name/role） | ✅ |
 | `GET` | `{auth}/api/v2/auths/refresh` | 用 cookie 换 `access_token`（Bearer） | ✅ |
 | `POST` | `/api/v2/users/status` | 登录态探活（`data: true`） | ✅ |
+| `GET` | `/api/v2/chats/?page=1&page_size=50` | 会话列表（含 `chat_type`） | ✅ 2026-10-31 |
+| `GET` | `/api/v2/chats/<chat_id>?direction=up&limit=10` | 会话历史（**产物补捞**） | ✅ 2026-10-31 |
 
 - `{auth}` = `https://auth.qwen.ai` —— **鉴权域已与业务域 `chat.qwen.ai` 分离**（旧契约里两者同域）。
 - 旧契约的 `GET /api/models` 已不存在，现在是 `/api/v2/models/`，且响应体多包了一层 `data`
@@ -460,6 +462,37 @@ HTTP 200、SSE 正常收流、`phase` 是普通的 `answer`。识别标志只有
 
 > 这三条来自 image-adapter 的既有结论 + 本次复现：同一账号同一 URL，18:26 下 404、
 > 19:11 下 200 且 8.5MB —— 不是签名失效，是转存延迟。
+
+### 4.5.7 断流后的补捞：产物其实落库在会话历史里（✅ 2026-10-31 实测）
+
+流断一次就没了，但产物在上游是**落库**的 —— 会话历史能把它取回来。
+
+```
+GET /api/v2/chats/<chat_id>?direction=up&limit=10
+→ data.chat.history.messages     // 🔴 **map**，键是消息 id，不是数组
+```
+
+```json
+{"success":true,"data":{"chat":{"history":{"messages":{
+  "<msg-id>":{"role":"assistant","timestamp":1793208968,
+    "content_list":[{"content":"https://cdn.qwenlm.ai/output/<uid>/t2i/<rid>/<ts>.png?key=…",
+                     "phase":"image_gen","status":"finished"}]}}}}}}
+```
+
+| 事实 | 细节 |
+|---|---|
+| 图片位置 | `content_list[].content` —— **不是** SSE 那套 `extra.image_list` |
+| 两处都收 | 历史是"展示态"，个别形态仍给 `extra.image_list` / `tool_result`，合并去重 |
+| 必带 referer | `https://chat.qwen.ai/c/<chat_id>`（少了按无权访问处理） |
+| 计费 | **只读，不扣额度**（实测 0.25s / 9.4KB） |
+| 失败会话 | 没有 `content_list`，只有 `error.code=internal_error` ⇒ 补不到图是正确的 |
+
+🔴 **时效**：2 天前的历史链接实测 `404`（Tengine 直出）。结合 §4.5.6 的"转存延迟"结论，
+这条通道只能**当场补**（流断后立刻查），不能当长期存档 —— 别把它当对象存储用。
+
+📌 因此网关的处置顺序是：① 断点前已收到的图片帧直接按成功返回；② 一张都没有才查一次历史；
+③ 都没有就照原错误返回（绝不返回空 `data`）。实现见 `upstream.LatestChatImages`
+与 `server.recoverImages`。
 
 ## 4.6 图生图 / 图片编辑：先上传，再 `image_edit`（✅ 2026-10-28 本仓实测）
 

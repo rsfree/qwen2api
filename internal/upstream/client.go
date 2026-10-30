@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -320,6 +321,9 @@ type Stream struct {
 	LastEventID string
 	// rawFrames 最近若干条原始帧（截断），只在"一字未出"时用于取证。
 	rawFrames []string
+	// broken 「意外断流」错误：尾帧已经先交出去，等 pending 消费完才报。
+	// 上层因此能"先收产物、再认失败"（见 Next）。
+	broken error
 }
 
 // RawFrames 返回最近原始帧副本（排查形态漂移用）。
@@ -376,21 +380,39 @@ func (s *Stream) Next() (Event, bool, error) {
 			}
 			return ev, true, nil
 		}
+		// pending 已空、但上一次是「意外断流」：现在才把错误报出去。
+		// 顺序是刻意的 —— 先交付尾帧里的产物，再认失败。
+		if s.broken != nil {
+			err := s.broken
+			s.broken = nil
+			return Event{}, false, err
+		}
 		n, readErr := s.body.Read(s.buf)
 		if n > 0 {
 			s.pending = append(s.pending, s.frames.Push(s.buf[:n])...)
 			continue
 		}
-		switch readErr {
-		case nil:
+		if readErr == nil {
 			continue
-		case io.EOF:
-			s.pending = append(s.pending, s.frames.Flush()...)
-			if len(s.pending) == 0 {
-				return Event{}, false, nil
-			}
-		default:
+		}
+		// 🔴 chunked 流被掐断时 Read 返回的是 io.ErrUnexpectedEOF ——
+		// 它与 io.EOF **不是同一个值**，errors.Is 也判不出来。早先的 switch
+		// 只匹配 io.EOF，于是直接落进 default，连底下的 Flush 都没跑：
+		// 断流前最后那条"没以空行收尾"的帧（往往正是产物帧）被默默丢掉。
+		unexpected := errors.Is(readErr, io.ErrUnexpectedEOF)
+		if !unexpected && !errors.Is(readErr, io.EOF) {
 			return Event{}, false, transportErr("chat 流读取", readErr)
+		}
+		s.pending = append(s.pending, s.frames.Flush()...)
+		if len(s.pending) == 0 {
+			if unexpected {
+				return Event{}, false, transportErr("chat 流读取", readErr)
+			}
+			return Event{}, false, nil
+		}
+		if unexpected {
+			// 尾帧先交出，等它被消费完再把"意外断流"报出来。
+			s.broken = transportErr("chat 流读取", readErr)
 		}
 	}
 }

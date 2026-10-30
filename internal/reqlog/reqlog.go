@@ -29,8 +29,8 @@ type Entry struct {
 	DurationMS   int64     `json:"duration_ms"`
 	Error        string    `json:"error,omitempty"`
 	Degraded     string    `json:"degraded,omitempty"`
-	ClientIP string `json:"client_ip,omitempty"`
-	UserAgent string `json:"user_agent,omitempty"`
+	ClientIP     string    `json:"client_ip,omitempty"`
+	UserAgent    string    `json:"user_agent,omitempty"`
 	// ChatHit 本次是否命中了预建会话（命中省掉一次 chats/new）。
 	ChatHit bool `json:"chat_hit,omitempty"`
 	// ChatMS 建会话耗时（毫秒）：命中为 0，未命中为真实值。
@@ -42,6 +42,9 @@ type Entry struct {
 	// EgressIP 本次用的出口公网 IP（账号对应 socks5 的实测出口，空 = 还没探到）。
 	// 与 ClientIP 是两件事：ClientIP 是"谁调我们"，EgressIP 是"我们从哪个 IP 访问上游"。
 	EgressIP string `json:"egress_ip,omitempty"`
+	// ChatID 上游会话 id。**失败也记** —— acct 只说明"哪个号"，
+	// chat_id 才说明"哪个会话"，是事后去上游会话历史里补捞产物的唯一线索。
+	ChatID string `json:"chat_id,omitempty"`
 }
 
 // Stats 汇总。
@@ -138,6 +141,9 @@ func (l *Log) Add(e Entry) {
 			line += " chat=cached"
 		} else if e.ChatMS > 0 {
 			line += fmt.Sprintf(" chat=%dms", e.ChatMS)
+		}
+		if e.ChatID != "" {
+			line += " chat_id=" + e.ChatID
 		}
 		if e.Error != "" {
 			line += " err=" + e.Error
