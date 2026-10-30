@@ -1245,10 +1245,19 @@ function bind() {
     }
     return;
   }
-  setInterval(async () => {
-    if (document.hidden) return;
-    try { await loadOverview(); } catch (e) { /* 轮询失败静默 */ }
-  }, 5000);
+  // 轮询间隔按池子规模自适应：3000+ 账号时 overview 有 800KB+，
+  // 固定 5s 拉一次等于每分钟十几 MB（跨洋实测一次要 5s 才传完）。
+  const pollDelay = () => {
+    const n = ((S.ov && S.ov.accounts) || []).length;
+    return n > 1000 ? 30000 : n > 200 ? 15000 : 5000;
+  };
+  const pollLoop = async () => {
+    if (!document.hidden) {
+      try { await loadOverview(); } catch (e) { /* 轮询失败静默 */ }
+    }
+    setTimeout(pollLoop, pollDelay());
+  };
+  setTimeout(pollLoop, pollDelay());
 })();
 </script>
 </body>
