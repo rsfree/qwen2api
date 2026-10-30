@@ -524,3 +524,25 @@ func TestBinaryFileStillUsesOSS(t *testing.T) {
 		t.Fatal("json 应识别为文本")
 	}
 }
+
+// 余额轮询只挑 token 新鲜的号（过期号刷了也白刷，还会刷一条 NOT_LOGIN 日志）。
+func TestCreditRefreshSkipsStaleTokens(t *testing.T) {
+	cfg := config.Default()
+	cfg.StateFile = ""
+	cfg.Accounts = nil
+	p := pool.New(cfg.Pool, cfg.Accounts, "")
+	up := newFakeUpstream(t, 0)
+	cfg.Upstream.BaseURL = up.srv.URL
+	s := New(cfg, p, upstream.New(cfg.Upstream), reqlog.New(5), "test")
+
+	exp := time.Now().Add(time.Hour).Unix()
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, exp)))
+	fresh := "bearer:eyJhbGciOiJub25lIn0." + payload + "."
+	p.Add(config.Account{Name: "fresh", Token: fresh})
+	p.Add(config.Account{Name: "stale", Token: "not-a-jwt"})
+
+	got := s.freshNames([]string{"fresh", "stale", "ghost"})
+	if len(got) != 1 || got[0] != "fresh" {
+		t.Fatalf("只应留下 fresh，实际 %v", got)
+	}
+}

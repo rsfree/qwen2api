@@ -51,6 +51,16 @@ func (s *Server) refreshStaleCredits(ctx context.Context, ttl time.Duration) {
 	}
 	defer creditRefreshMu.Unlock()
 
+	// 🔴 跳过 access 已过期的号（2026-10-30）：
+	// 余额接口对过期 Bearer 回的是 HTTP 200 + `{"errorCode":"NOT_LOGIN"}`，
+	// 既读不到余额，还会每轮刷一条看着像报错的日志（实测 30 分钟 4 条）。
+	// 这类号的余额本来就要等它被选中、401 续期之后才有意义 —— 那时再刷。
+	// 放在轮转之前：否则一轮 32 个里可能大半被过滤，等于白转。
+	names = s.freshNames(names)
+	if len(names) == 0 {
+		return
+	}
+
 	// 大池子限流 + 轮转：不加这一步，3000 个账号会让面板轮询每 2 分钟
 	// 触发 3000 次上游调用（实测首次导入后就是这样起风暴的）。
 	if len(names) > maxCreditRefreshesPerRound {
@@ -78,6 +88,20 @@ func (s *Server) refreshStaleCredits(ctx context.Context, ttl time.Duration) {
 		}(n)
 	}
 	wg.Wait()
+}
+
+// freshNames 只留 access token 还新鲜的账号（供余额轮询挑候选）。
+//
+// 抽成函数是为了能被单测钉住：余额接口对过期 Bearer 回 200 + NOT_LOGIN，
+// 这类号刷了也白刷，还会每轮刷一条像报错的日志。
+func (s *Server) freshNames(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if s.tokenFresh(n, time.Minute) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // rotateWindow 从 names 里取 [cursor, cursor+n) 的窗口（越界环绕），
@@ -129,7 +153,14 @@ func (s *Server) RefreshCredits(ctx context.Context, force bool) {
 func (s *Server) refreshOneCredit(ctx context.Context, name string) bool {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	c, err := s.up.Credits(upstream.WithAccount(ctx, name), s.pool.Credential(name))
+	actx := upstream.WithAccount(ctx, name)
+	cred := s.pool.Credential(name)
+	// 与后台轮询不同：这里不能跳过过期凭据 —— 这个号**紧接着就要被用来提交**，
+	// 余额读不到就只能"不拦"，而窗口里本来可以顺手续期把余额读准。
+	if a := s.pool.Get(name); a != nil {
+		cred = s.ensureFresh(actx, a, cred)
+	}
+	c, err := s.up.Credits(actx, cred)
 	if err != nil {
 		s.noteCreditErr(name, err)
 		s.pool.SetCreditBalance(name, -1)
