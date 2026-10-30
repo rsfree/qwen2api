@@ -274,6 +274,40 @@ func TestMessagesStreamEvents(t *testing.T) {
 	}
 }
 
+// 401 时**同一个号**续期后重试（不是换号逃逸）：
+// 假上游第一次回 401，refresh_token 换回 fresh-access，第二次应带它成功。
+func TestChatRenewsSameAccountOn401(t *testing.T) {
+	up := newFakeUpstream(t, 1) // 第一次调用 401
+	cfg := config.Default()
+	cfg.Upstream.BaseURL = up.srv.URL
+	cfg.Upstream.AuthBaseURL = up.srv.URL
+	cfg.StateFile = ""
+	cfg.Accounts = []config.Account{{Name: "a0", Token: "stale-not-a-jwt"}}
+	p := pool.New(cfg.Pool, cfg.Accounts, "")
+	p.SetRefresh("a0", "rt-0")
+	s := New(cfg, p, upstream.New(cfg.Upstream), reqlog.New(10), "test")
+	h := s.Handler()
+
+	body := `{"model":"qwen3.7-plus","messages":[{"role":"user","content":"hi"}]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+
+	if rec.Code != 200 {
+		t.Fatalf("续期后应成功，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	if up.gotRefresh == 0 {
+		t.Fatal("401 后应先用 refresh_token 续期")
+	}
+	// 只换凭据、不换号：账号池里仍只有 a0，且它现在是新鲜凭据。
+	if p.Len() != 1 {
+		t.Fatalf("不该发生换号，池大小 %d", p.Len())
+	}
+	// 凭据确实换成了 refresh 下发的那一张（假 token 不是 JWT，不能解 exp）。
+	if got := p.Credential("a0"); !strings.Contains(got, "fresh-access") {
+		t.Fatalf("续期后凭据未更新: %q", got)
+	}
+}
+
 // newTestServerWithServer 返回 *Server（需要直接摸 store 的测试用）。
 func newTestServerWithServer(t *testing.T, up *fakeUpstream, accounts int) *Server {
 	t.Helper()
