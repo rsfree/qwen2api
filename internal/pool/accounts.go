@@ -194,3 +194,54 @@ func (p *Pool) WarmCandidates(target int, window time.Duration, limit int) []str
 	}
 	return out
 }
+
+// AdoptCandidates 返回"还没拿到 refresh_token、且凭据已过期"的账号名，
+// 按 served 升序（与选号同序）。
+//
+// 为什么要这一步：导入时存的是 access token（15 分钟）和 refresh_token。
+// 老版本导入的 3000 个号没有 refresh_token 字段 —— 它们只能靠密码重登，
+// 而重登是整条链路最贵的一步。后台按"接下来要用的顺序"慢慢补上，
+// 之后就能一直用 refresh 续期了。
+func (p *Pool) AdoptCandidates(target, limit int) []string {
+	if target <= 0 || limit <= 0 {
+		return nil
+	}
+	type row struct {
+		name   string
+		served int64
+		exp    time.Time
+	}
+	p.mu.RLock()
+	rows := make([]row, 0, len(p.accounts))
+	for _, a := range p.accounts {
+		if a.authDead || a.RefreshToken != "" || a.Password == "" {
+			continue
+		}
+		rows = append(rows, row{name: a.Name, served: a.served, exp: a.tokenExp})
+	}
+	p.mu.RUnlock()
+
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].served != rows[j].served {
+			return rows[i].served < rows[j].served
+		}
+		return rows[i].name < rows[j].name
+	})
+	if target > len(rows) {
+		target = len(rows)
+	}
+	now := time.Now()
+	out := make([]string, 0, limit)
+	for _, r := range rows[:target] {
+		// 凭据还够用就先不登（少一次 signin 就少一次 WAF 暴露）。
+		// exp 未知视为"可能过期"，值得补一次 refresh_token。
+		if !r.exp.IsZero() && now.Before(r.exp.Add(-5*time.Minute)) {
+			continue
+		}
+		out = append(out, r.name)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}

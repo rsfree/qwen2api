@@ -35,34 +35,116 @@ const (
 func (s *Server) KeepAlive(ctx context.Context) {
 	t := time.NewTicker(keepAliveTick)
 	defer t.Stop()
+	// 启动就先跑一轮：重启后整池凭据都过期，等 20 秒才热身会让首批请求很慢。
+	// 新凭据（access + refresh_token）必须落盘，否则重启后又要全量重登。
+	// 用"最多两分钟写一次"折中：2000+ 账号的 accounts.json 有几百 KB，
+	// 每个 tick 都写是浪费，而丢两分钟的续期结果无所谓（重新续一次就好）。
+	lastSave := time.Now()
+	saveIfDue := func(changed bool) {
+		if !changed || time.Since(lastSave) < 2*time.Minute {
+			return
+		}
+		if err := s.saveAccounts(); err != nil {
+			log.Printf("[qwen2api] 保存续期结果失败: %v", err)
+			return
+		}
+		lastSave = time.Now()
+	}
+
+	changed := s.adoptOnce(ctx)
+	changed = s.warmOnce(ctx) || changed
+	saveIfDue(changed)
 	for {
 		select {
 		case <-ctx.Done():
+			// 退出前把最后一批续期结果写掉（重启后不用重登）。
+			if err := s.saveAccounts(); err != nil {
+				log.Printf("[qwen2api] 退出前保存续期结果失败: %v", err)
+			}
 			return
 		case <-t.C:
-			s.warmOnce(ctx)
+			changed := s.adoptOnce(ctx)
+			changed = s.warmOnce(ctx) || changed
+			saveIfDue(changed)
 		}
 	}
 }
 
-// warmOnce 跑一轮预热。
-func (s *Server) warmOnce(ctx context.Context) {
-	names := s.pool.WarmCandidates(s.warmTarget(), keepAliveWindow, keepAliveBatch)
+// adoptOnce 给"还没 refresh_token 的号"补一张（用密码登录一次）。
+//
+// 只补"接下来会被用到的那批"（served 升序），单轮 6 个、并发 2 ——
+// 目的是把一次性的 3000 次登录摊成后台小流量，而不是再打一次批量登录。
+func (s *Server) adoptOnce(ctx context.Context) bool {
+	names := s.pool.AdoptCandidates(s.warmTarget(), 6)
 	if len(names) == 0 {
-		return
+		return false
 	}
-	sem := make(chan struct{}, keepAliveParallel)
+	sem := make(chan struct{}, 2)
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	changed := false
 	for _, n := range names {
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			s.refreshTokenOnly(ctx, name)
+			if s.adoptOne(ctx, name) {
+				mu.Lock()
+				changed = true
+				mu.Unlock()
+			}
 		}(n)
 	}
 	wg.Wait()
+	return changed
+}
+
+// adoptOne 登录一次并把 access + refresh_token 都存下来。
+func (s *Server) adoptOne(ctx context.Context, name string) bool {
+	a := s.pool.Get(name)
+	if a == nil || a.Password == "" {
+		return false
+	}
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	access, refresh, err := s.up.SignInSession(upstream.WithAccount(cctx, name), a.Email, a.Password)
+	if err != nil {
+		s.noteRefreshErr(name, err)
+		return false
+	}
+	s.pool.SetToken(name, access)
+	if refresh != "" {
+		s.pool.SetRefresh(name, refresh)
+	}
+	return true
+}
+
+// warmOnce 跑一轮预热。
+func (s *Server) warmOnce(ctx context.Context) bool {
+	names := s.pool.WarmCandidates(s.warmTarget(), keepAliveWindow, keepAliveBatch)
+	if len(names) == 0 {
+		return false
+	}
+	sem := make(chan struct{}, keepAliveParallel)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	changed := false
+	for _, n := range names {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if s.refreshTokenOnly(ctx, name) {
+				mu.Lock()
+				changed = true
+				mu.Unlock()
+			}
+		}(n)
+	}
+	wg.Wait()
+	return changed
 }
 
 // warmTarget 估算"要随时保持可用的账号数"。

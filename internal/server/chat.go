@@ -163,23 +163,35 @@ func (s *Server) openUpstreamSpec(ctx context.Context, model, gear, prompt strin
 		cred := s.pool.Credential(acct.Name)
 		// 出口跟着账号走：带上账号标记，代理路由据此选固定 IP。
 		actx := upstream.WithAccount(ctx, acct.Name)
-		chatID, err := s.up.NewChatTyped(actx, cred, model, spec.ChatType)
-		if err == nil {
-			body := upstream.BuildSubmitSpec(chatID, "", model, prompt, gear, spec, time.Now())
-			var st *upstream.Stream
-			st, err = s.up.OpenChat(actx, cred, body)
-			if err == nil {
-				return &opened{acct: acct, stream: st, chatID: chatID}, nil
+
+		// 内层循环只做一件事：凭据过期时**续期后重试同一个号**。
+		// 🔴 不能像以前那样 continue 到外层：外层是"换号"，会把重登一次
+		// 当成一次换号 —— 3000 个冷号时，一次请求连登 4 个号就把预算用光，
+		// 直接返回 503「没有可用账号」（2026-10-30 实测踩到）。
+		var err error
+		for retried := false; ; retried = true {
+			chatID, cerr := s.up.NewChatTyped(actx, cred, model, spec.ChatType)
+			if cerr == nil {
+				body := upstream.BuildSubmitSpec(chatID, "", model, prompt, gear, spec, time.Now())
+				var st *upstream.Stream
+				st, cerr = s.up.OpenChat(actx, cred, body)
+				if cerr == nil {
+					return &opened{acct: acct, stream: st, chatID: chatID}, nil
+				}
 			}
+			err = cerr
+			// 只在"凭据失效 + 还没重试过 + 有密码或 refresh_token"时续期一次。
+			renewable := acct.Password != "" || s.pool.RefreshToken(acct.Name) != ""
+			if retried || upstream.KindOf(err) != upstream.KindAuth || !renewable {
+				break
+			}
+			if !s.relogin(ctx, acct) {
+				break
+			}
+			cred = s.pool.Credential(acct.Name)
 		}
+
 		s.pool.Release(acct)
-		// 凭据失效且配了密码 ⇒ 自动重登一次，然后**重试同一个号**
-		// （不消耗换号预算：这不是"这个号不行"，是"这张票过期了"）。
-		if upstream.KindOf(err) == upstream.KindAuth && acct.Password != "" {
-			if s.relogin(ctx, acct) {
-				continue
-			}
-		}
 		s.noteFailure(acct, err)
 		lastErr = err
 		if !upstream.RetrySafe(err) {
