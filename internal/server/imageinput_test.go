@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -147,42 +148,110 @@ func TestImageRefsIgnoreNonImageParts(t *testing.T) {
 	}
 }
 
-// 端到端：图片请求必须真的走 STS 上传链，而不是"静默丢图去聊"。
-// 假上游在 getstsToken 处返回 500 —— 断言错误落在上传这一步，且 completions 未被调用。
-func TestChatImageGoesThroughUploadChain(t *testing.T) {
+// 端到端：URL 形态的图片**原样**进 files[]（上游自己去拉），不碰 getstsToken。
+func TestChatImageURLPassthrough(t *testing.T) {
 	up := newFakeUpstream(t, 0)
 	h := newTestServer(t, up, 1, nil)
 
 	body := `{"model":"qwen3.7-plus","messages":[{"role":"user","content":[
-		{"type":"text","text":"这张图是什么颜色？"},
-		{"type":"image_url","image_url":{"url":"data:image/png;base64,` + onePixelPNG + `"}}]}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		{"type":"text","text":"这张图什么颜色"},
+		{"type":"image_url","image_url":"https://cdn.example.com/a.png"}]}]}`
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
 
-	if rec.Code == http.StatusBadRequest {
-		t.Fatalf("图片不该再被当成不支持: %s", rec.Body.String())
+	if rec.Code != 200 {
+		t.Fatalf("应成功，得到 %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("上传失败应 502，得到 %d: %s", rec.Code, rec.Body.String())
+	if len(up.gotSTS) != 0 {
+		t.Fatalf("URL 形态不该调 getstsToken（实测该端点被 WAF 挑战）: %+v", up.gotSTS)
 	}
-	if !strings.Contains(rec.Body.String(), "上传失败") {
-		t.Fatalf("错误应指明上传环节: %s", rec.Body.String())
+	files := submitFiles(t, up.gotSubmit)
+	if len(files) != 1 {
+		t.Fatalf("files 数量: %d", len(files))
 	}
-	// 上传确实发生了，且按图片类型申请（filetype=image 决定上游的 vision 通道）。
-	if len(up.gotSTS) != 1 {
-		t.Fatalf("getstsToken 应调用 1 次，实际 %d 次", len(up.gotSTS))
+	if files[0]["url"] != "https://cdn.example.com/a.png" {
+		t.Fatalf("url 应为原样外链: %+v", files[0])
 	}
-	if up.gotSTS[0]["filetype"] != "image" {
-		t.Fatalf("filetype 应为 image: %+v", up.gotSTS[0])
+	if files[0]["file_class"] != "vision" || files[0]["showType"] != "image" {
+		t.Fatalf("vision 标记不对: %+v", files[0])
 	}
-	if name, _ := up.gotSTS[0]["filename"].(string); !strings.HasSuffix(name, ".png") {
-		t.Fatalf("文件名应带 .png 后缀（魔数嗅探结果）: %+v", up.gotSTS[0])
+	// 图片不参与文本拍平（否则 prompt 里会多出一堆 URL）。
+	msg := up.gotSubmit["messages"].([]any)[0].(map[string]any)
+	if msg["content"] != "这张图什么颜色" {
+		t.Fatalf("prompt 被图片污染: %q", msg["content"])
 	}
-	// 上传失败就绝不能提交对话（否则模型看不到图还照常作答）。
-	if up.gotSubmit != nil {
-		t.Fatalf("上传失败后仍提交了对话: %+v", up.gotSubmit)
+}
+
+// data URI / 裸 base64：落本地 blob，给上游一个自己能拉的 URL，并验证该 URL 真能取回字节。
+func TestChatImageBase64GoesToBlob(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	h := newTestServer(t, up, 1, nil)
+
+	body := `{"model":"qwen3.7-plus","messages":[{"role":"user","content":[
+		{"type":"text","text":"看图"},
+		{"type":"image_url","image_url":{"url":"data:image/png;base64,` + onePixelPNG + `"}}]}]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+
+	if rec.Code != 200 {
+		t.Fatalf("应成功，得到 %d: %s", rec.Code, rec.Body.String())
 	}
+	files := submitFiles(t, up.gotSubmit)
+	if len(files) != 1 {
+		t.Fatalf("files 数量: %d", len(files))
+	}
+	rawURL, _ := files[0]["url"].(string)
+	u, err := url.Parse(rawURL)
+	if err != nil || !strings.HasPrefix(u.Path, "/v1/blobs/") {
+		t.Fatalf("url 应指向本地 blob: %q", rawURL)
+	}
+	if !strings.HasSuffix(u.Path, ".png") {
+		t.Fatalf("blob 路径应带 .png 后缀: %q", u.Path)
+	}
+	// blob 端点免鉴权可读（上游取图不带我们的 Key）。
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, u.Path, nil))
+	if rec2.Code != 200 {
+		t.Fatalf("blob 取图失败: %d %s", rec2.Code, rec2.Body.String())
+	}
+	if rec2.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("Content-Type 不对: %q", rec2.Header().Get("Content-Type"))
+	}
+	if got := rec2.Body.Bytes(); len(got) == 0 || string(got[:4]) != "\x89PNG" {
+		t.Fatalf("blob 内容不是 PNG（前 4 字节 %q，共 %d 字节）", string(got[:min(4, len(got))]), len(got))
+	}
+}
+
+// 未知 blob id → 404（不能回空图让上游以为成功）。
+func TestBlobUnknownIs404(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	h := newTestServer(t, up, 1, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/blobs/deadbeef.png", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("未知 blob 应 404，得到 %d", rec.Code)
+	}
+}
+
+// submitFiles 取提交体里的 files[]（fake 上游记录的是 map）。
+func submitFiles(t *testing.T, submit map[string]any) []map[string]any {
+	t.Helper()
+	if submit == nil {
+		t.Fatal("上游未收到提交")
+	}
+	msgs, _ := submit["messages"].([]any)
+	if len(msgs) == 0 {
+		t.Fatal("提交里没有 messages")
+	}
+	first, _ := msgs[0].(map[string]any)
+	raw, _ := first["files"].([]any)
+	out := make([]map[string]any, 0, len(raw))
+	for _, f := range raw {
+		if m, ok := f.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func TestChatImageTooManyRejected(t *testing.T) {
@@ -260,22 +329,19 @@ func TestMergeAttachmentsOrder(t *testing.T) {
 	}
 }
 
-// 🔴 过期凭据下上传图片：必须先续期（refresh_token），再用新 token 上传。
-//
-// 2026-10-30 实测的坑：getstsToken 对过期 Bearer 返回 200 + WAF 挑战页（不是 401），
-// 所以"401 才续期"的兜底在这条路径上完全失效，还会把好号误冷却。
-func TestChatImageRenewsStaleTokenBeforeUpload(t *testing.T) {
+// 图片走 url 直通/本地 blob 后，**完全不再碰凭据链**：
+// 不调 getstsToken、不做上传前续期（那条 ensureFresh 现在只服务 image_edit）。
+func TestChatImageDoesNotTouchUploadChain(t *testing.T) {
 	up := newFakeUpstream(t, 0)
 	cfg := config.Default()
 	cfg.Upstream.BaseURL = up.srv.URL
-	cfg.Upstream.AuthBaseURL = up.srv.URL // refresh 也落到假上游
+	cfg.Upstream.AuthBaseURL = up.srv.URL
 	cfg.StateFile = ""
-	// token 不是 JWT ⇒ TokenExpiry 未知 ⇒ 视为不新鲜（正是生产里的常态）。
+	// token 不是 JWT ⇒ 寿命未知；若还在走"上传前续期"，这里必然打 refresh。
 	cfg.Accounts = []config.Account{{Name: "a0", Token: "stale-not-a-jwt"}}
 	p := pool.New(cfg.Pool, cfg.Accounts, "")
 	p.SetRefresh("a0", "rt-0")
-	cli := upstream.New(cfg.Upstream)
-	s := New(cfg, p, cli, reqlog.New(10), "test")
+	s := New(cfg, p, upstream.New(cfg.Upstream), reqlog.New(10), "test")
 	h := s.Handler()
 
 	body := `{"model":"qwen3.7-plus","messages":[{"role":"user","content":[
@@ -284,44 +350,14 @@ func TestChatImageRenewsStaleTokenBeforeUpload(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
 
-	if up.gotRefresh == 0 {
-		t.Fatalf("上传前应先续期，refresh 未被调用（状态 %d）: %s", rec.Code, rec.Body.String())
+	if rec.Code != 200 {
+		t.Fatalf("应成功，得到 %d: %s", rec.Code, rec.Body.String())
 	}
-	if len(up.stsAuth) == 0 {
-		t.Fatalf("getstsToken 未被调用: %s", rec.Body.String())
+	if len(up.gotSTS) != 0 {
+		t.Fatalf("不该再调 getstsToken: %+v", up.gotSTS)
 	}
-	if up.stsAuth[0] != "Bearer fresh-access" {
-		t.Fatalf("上传用的不是续期后的新 token: %q", up.stsAuth[0])
-	}
-}
-
-// token 新鲜时不该白白多打一次 refresh。
-func TestChatImageDoesNotRefreshFreshToken(t *testing.T) {
-	up := newFakeUpstream(t, 0)
-	cfg := config.Default()
-	cfg.Upstream.BaseURL = up.srv.URL
-	cfg.Upstream.AuthBaseURL = up.srv.URL
-	cfg.StateFile = ""
-	cfg.Accounts = nil
-	p := pool.New(cfg.Pool, cfg.Accounts, "")
-	// 造一个 1 小时后才过期的合法 JWT（只需要 payload.exp 可解析）。
-	exp := time.Now().Add(time.Hour).Unix()
-	payload := base64.RawURLEncoding.EncodeToString([]byte(
-		fmt.Sprintf(`{"exp":%d}`, exp)))
-	jwt := "eyJhbGciOiJub25lIn0." + payload + "."
-	p.Add(config.Account{Name: "a0", Token: "bearer:" + jwt})
-	p.SetRefresh("a0", "rt-0")
-	cli := upstream.New(cfg.Upstream)
-	s := New(cfg, p, cli, reqlog.New(10), "test")
-	h := s.Handler()
-
-	body := `{"model":"qwen3.7-plus","messages":[{"role":"user","content":[
-		{"type":"image_url","image_url":"data:image/png;base64,` + onePixelPNG + `"}]}]}`
-	h.ServeHTTP(httptest.NewRecorder(),
-		httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
-
 	if up.gotRefresh != 0 {
-		t.Fatalf("token 还新鲜却续期了 %d 次", up.gotRefresh)
+		t.Fatalf("图片路径不该触发续期，实际 %d 次", up.gotRefresh)
 	}
 }
 

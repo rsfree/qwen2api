@@ -202,6 +202,25 @@ button.xs { white-space:nowrap; }
 .pill.bad { background:var(--bad-soft); color:var(--bad); }
 .pill.warn { background:var(--warn-soft); color:var(--warn); }
 
+/* ── 日志（终端质感）──────────────────────────────────────────────── */
+.logbox { background:var(--surface-2); height:min(46vh,420px); overflow:auto; font-family:var(--mono); font-size:11.5px; line-height:1.75; padding:8px 0; }
+.logbox .ln { display:flex; gap:10px; padding:1px 14px; white-space:pre-wrap; word-break:break-word; }
+.logbox .ln:hover { background:var(--surface); }
+.logbox .ts { color:var(--ink-3); flex:none; }
+.logbox .tx { color:var(--ink-2); min-width:0; }
+.logbox .ln.req .tx { color:var(--accent); }
+.logbox .ln.bad .tx { color:var(--bad); }
+.logbox .ln.warn .tx { color:var(--warn); }
+.logbox .empty { color:var(--ink-3); padding:0 14px; }
+
+/* ── 令牌 / 接入片段 ────────────────────────────────────────────────── */
+.keyrow { display:flex; align-items:center; gap:9px; padding:10px 14px; border-bottom:1px solid var(--line-soft); flex-wrap:wrap; }
+.keyrow:last-child { border-bottom:0; }
+.keyrow code { font-family:var(--mono); font-size:12.5px; color:var(--ink); background:var(--surface-2); border:1px solid var(--line-soft); border-radius:6px; padding:3px 8px; word-break:break-all; }
+.keyrow .grow { flex:1; }
+.codebox { background:var(--surface-2); border:1px solid var(--line-soft); border-radius:8px; padding:10px 12px; font-family:var(--mono); font-size:11.5px; line-height:1.7; white-space:pre-wrap; word-break:break-all; color:var(--ink-2); }
+.warnbox { border-left:3px solid var(--warn); background:var(--warn-soft); color:var(--warn); border-radius:8px; padding:9px 12px; font-size:12.5px; }
+
 /* ── 手机 ───────────────────────────────────────────────────────────── */
 @media (max-width:900px) {
   .shell { grid-template-columns:1fr; }
@@ -230,6 +249,9 @@ button.xs { white-space:nowrap; }
       <li><a href="#usage" data-view="usage">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12"/><path d="M4.5 13.5V8.2M8 13.5V3.5M11.5 13.5v-3"/></svg>
         用量</a></li>
+      <li><a href="#logs" data-view="logs">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7"/></svg>
+        日志</a></li>
       <li><a href="#capacity" data-view="capacity">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12M3 11l3-3 2.5 2L13 4.5"/><path d="M10 4.5h3v3"/></svg>
         容量</a></li>
@@ -338,7 +360,7 @@ button.xs { white-space:nowrap; }
         <div class="stat"><div class="v" id="uStream">-</div><div class="k">流式请求</div></div>
       </div>
       <div class="box">
-        <header><h3>请求流水</h3><span class="hint">最近 80 条 · 进程内累计，重启归零</span></header>
+        <header><h3>请求流水</h3><span class="hint">最近 80 条 · 进程内累计，重启归零 · 完整筛选与运行日志见「日志」</span></header>
         <div class="tbl-wrap">
           <table>
             <thead><tr><th>时间</th><th>路径</th><th>模型</th><th>账号</th><th>状态</th><th class="num">tok 入/出</th><th class="num">首字节</th><th class="num">耗时</th><th>说明</th></tr></thead>
@@ -352,6 +374,64 @@ button.xs { white-space:nowrap; }
           <div><div class="hint" style="margin-bottom:6px">按模型</div><table><tbody id="byModelBody"></tbody></table></div>
           <div><div class="hint" style="margin-bottom:6px">按账号</div><table><tbody id="byAccountBody"></tbody></table></div>
         </div>
+      </div>
+    </section>
+
+    <!-- ══════════ 日志 ══════════ -->
+    <section class="view" id="view-logs" hidden>
+      <div class="box">
+        <header>
+          <h3>请求日志</h3>
+          <span class="hint">进程内环形缓冲 · 重启归零 · 只记元数据，不落 prompt/响应原文</span>
+          <span class="grow"></span>
+          <span class="note" id="reqNote">-</span>
+          <button class="xs ghost" id="btnReqCopy" title="复制当前筛选结果（TSV，可直接贴进表格）">复制</button>
+        </header>
+        <div class="tools">
+          <div class="row">
+            <div class="search">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.4"/><path d="M10.4 10.4 14 14" stroke-linecap="round"/></svg>
+              <input id="reqQ" type="search" placeholder="搜索 路径 / 模型 / 账号 / IP / 请求 ID / 错误" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="chips" id="reqChips">
+              <button data-outcome="all" class="on">全部</button>
+              <button data-outcome="ok">成功</button>
+              <button data-outcome="failed">失败</button>
+            </div>
+            <span class="grow"></span>
+            <label class="sel-note">条数<select id="reqLimit">
+              <option value="100">100</option>
+              <option value="200" selected>200</option>
+              <option value="500">500</option>
+            </select></label>
+            <label class="sel-note"><input type="checkbox" id="reqAuto" checked style="width:auto"> 自动刷新</label>
+            <button class="xs" id="btnReqReload">刷新</button>
+          </div>
+        </div>
+        <div class="tbl-wrap" style="max-height:52vh">
+          <table>
+            <thead><tr><th>时间</th><th>路径</th><th>模型</th><th>账号</th><th>状态</th><th class="num">tok 入/出</th><th class="num">首字节</th><th class="num">耗时</th><th>来源</th><th>说明</th></tr></thead>
+            <tbody id="reqBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>运行日志</h3>
+          <span class="hint">stdout / stderr 镜像：启动、上游报错、请求流水行</span>
+          <span class="grow"></span>
+          <div class="chips" id="runChips">
+            <button data-ch="all" class="on">全部</button>
+            <button data-ch="req">请求</button>
+            <button data-ch="err">异常</button>
+          </div>
+          <label class="sel-note">行数<select id="runLimit"><option value="200">200</option><option value="400" selected>400</option><option value="1200">全部</option></select></label>
+          <label class="sel-note"><input type="checkbox" id="runPin" checked style="width:auto"> 自动滚动</label>
+          <button class="xs ghost" id="btnRunCopy">复制</button>
+          <button class="xs" id="btnRunReload">刷新</button>
+        </header>
+        <div class="logbox" id="runBody"><div class="empty">加载中…</div></div>
       </div>
     </section>
 
@@ -422,6 +502,27 @@ button.xs { white-space:nowrap; }
 
     <!-- ══════════ 配置 ══════════ -->
     <section class="view" id="view-config" hidden>
+      <div class="box" id="keyBox">
+        <header>
+          <h3>调用接入（Token）</h3>
+          <span class="hint">调模型时 Authorization: Bearer 后面那串，就是这里的 key</span>
+          <span class="grow"></span>
+          <span class="note" id="keySrc">-</span>
+          <button class="xs primary" id="btnKeyNew">生成新 Key</button>
+        </header>
+        <div class="pad" id="keyWarn" hidden></div>
+        <div id="keyRows"><div class="pad hint">加载中…</div></div>
+        <div class="pad" style="border-top:1px solid var(--line-soft)">
+          <div class="hint" style="margin-bottom:6px">Base URL（OpenAI 兼容：/v1/chat/completions · /v1/images/generations · /v1/videos/generations）</div>
+          <div class="codebox" id="keyBase">-</div>
+          <div class="hint" style="margin:12px 0 6px">最小可用示例（key 放环境变量，别写死在脚本里）</div>
+          <div class="codebox" id="keyCurl">-</div>
+          <div class="hint" style="margin-top:10px">
+            托管文件：<span class="mono" id="keyPath">apikeys.json</span>。该文件一旦存在就<b>完全接管</b> config.json 的 api_keys；
+            面板里生成的 key <b>立即生效</b>，撤销的 <b>立即失效</b>（不用重启）。首次生成会把当前生效的 key 一并写入，老客户端不会断。
+          </div>
+        </div>
+      </div>
       <div class="box">
         <header><h3>服务</h3><span class="grow"></span><span class="note" id="cfgVer"></span></header>
         <div class="pad" style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))" id="cfgService"></div>
@@ -496,6 +597,24 @@ wang@example.com|密码3|备用号"></textarea>
       <span class="note" id="importCount"></span>
       <button class="primary" id="importGo">开始导入</button>
     </footer>
+  </div>
+</div>
+
+<!-- 生成新 Key -->
+<div class="veil" id="newKeyVeil" hidden>
+  <div class="dlg" style="width:560px">
+    <header><h3>生成新 Key</h3><span class="grow"></span><button class="xs ghost" id="newKeyClose">关闭</button></header>
+    <div class="body">
+      <div class="field">
+        <label>备注（给谁用：脚本名 / 客户端名 —— 以后撤销时能一眼认出）</label>
+        <input id="newKeyNote" placeholder="例如：mac 上的 Cherry Studio">
+      </div>
+      <div class="hint">生成后立即生效，并写入托管的 apikeys.json；首次生成会把当前生效的 key 一起写入，老客户端不会断。</div>
+      <div class="state" id="newKeyHint" hidden></div>
+      <div class="codebox" id="newKeyOut" hidden style="margin-top:10px"></div>
+      <div id="newKeyCopyWrap" hidden style="margin-top:9px"><button class="xs" id="newKeyCopy">复制这串 key</button></div>
+    </div>
+    <footer><span class="grow"></span><button class="primary" id="newKeyGo">生成</button></footer>
   </div>
 </div>
 
@@ -924,7 +1043,9 @@ function renderConfig() {
     kv('监听', esc(c.listen || '-')),
     kv('默认模型', esc(c.default_model || '-')),
     kv('默认思考档', esc(c.default_thinking || '-')),
-    kv('API Key', c.api_key_required ? '<span class="tag ok">已启用</span>' : '<span class="tag bad">未启用</span>'),
+    kv('API Key', c.api_key_required
+      ? '<span class="tag ok">已启用 ' + (c.api_keys_count || 1) + ' 把</span>' + (c.api_keys_managed ? ' <span class="tag muted">面板托管</span>' : '')
+      : '<span class="tag bad">未启用</span>'),
     kv('reasoning 透出', c.reasoning ? '开' : '关'),
   ].join('');
   const u = c.upstream || {};
@@ -957,16 +1078,175 @@ function renderConfig() {
   const sf = c.state_file || '';
   $('#cfgAccountsPath').textContent = sf ? sf.replace(/\/[^/]*$/, '/accounts.json') : 'accounts.json';
   $('#cfgAccountsSrc').textContent = `当前 ${((S.ov.pool_stats || {}).total || 0)} 个账号在池 —— 启动日志里「账号清单由面板托管」那行说明是不是来自 accounts.json`;
+  // key 列表单独取：它带明文，不塞进 5s 轮询的 overview（也没必要每 5 秒重传一遍）。
+  loadKeys().catch(() => {});
+}
+
+/* ═══════════════ 日志 ═══════════════ */
+// 两块数据：请求流水（结构化、可筛）与运行日志（纯文本、终端形态）。
+// 都是"进程内、重启归零"，所以不做时间范围选择 —— 它只有"最近"。
+const LOGS = {
+  q: '', outcome: 'all', limit: 200, auto: true,
+  ch: 'all', runLimit: 400, pin: true,
+  reqs: [], reqTotal: 0, lines: [], runEnabled: true, loaded: false,
+};
+
+async function loadRequests() {
+  const qs = new URLSearchParams({
+    q: LOGS.q, outcome: LOGS.outcome, limit: String(LOGS.limit),
+  });
+  const d = await api('/panel/api/requests?' + qs.toString());
+  LOGS.reqs = d.items || [];
+  LOGS.reqTotal = d.total || 0;
+  renderReqTable();
+}
+
+function renderReqTable() {
+  const rows = LOGS.reqs || [];
+  $('#reqNote').textContent = rows.length + ' 条' + (LOGS.reqTotal > rows.length ? ' / 缓存 ' + LOGS.reqTotal : '');
+  $('#reqBody').innerHTML = rows.length ? rows.map(r => {
+    const code = r.status || 0;
+    const cls = code >= 400 ? 'bad' : (code >= 300 ? 'warn' : 'ok');
+    const note = r.error || (r.degraded ? '降级: ' + r.degraded : '');
+    return `<tr title="${esc(r.id || '')} · ${esc(r.user_agent || '')}">
+      <td class="note">${fmtTime(r.time)}</td>
+      <td class="mono">${esc(r.path || '-')}</td>
+      <td class="mono">${esc(r.model || '-')}</td>
+      <td class="mono">${esc(r.account || '-')}</td>
+      <td><span class="tag ${cls}">${code || '-'}</span>${r.stream ? ' <span class="tag muted">流</span>' : ''}</td>
+      <td class="num">${r.prompt_tokens || 0} / ${r.output_tokens || 0}</td>
+      <td class="num">${r.first_byte_ms ? r.first_byte_ms + 'ms' : '-'}</td>
+      <td class="num">${r.duration_ms ? r.duration_ms + 'ms' : '-'}</td>
+      <td class="note">${esc(r.client_ip || '-')}</td>
+      <td class="note" title="${esc(note)}">${esc((note || '-').slice(0, 60))}</td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="10" style="text-align:center;color:var(--ink-3);padding:26px">没有匹配的请求</td></tr>`;
+}
+
+async function loadRunLog() {
+  const d = await api('/panel/api/runlog?lines=' + LOGS.runLimit);
+  LOGS.lines = d.lines || [];
+  LOGS.runEnabled = d.enabled !== false;
+  renderRunLog();
+}
+
+// 行的语义分类：请求流水行统一以 [req] 开头（见 reqlog.Echo）。
+function runClass(t) {
+  if (!t) return '';
+  if (t.indexOf('[req]') === 0) return 'req';
+  if (/错误|失败|panic|fatal|error|ERROR|⚠️/.test(t)) return 'bad';
+  if (/冷却|风控|warn|WARN|限流/.test(t)) return 'warn';
+  return '';
+}
+
+function runFiltered() {
+  return (LOGS.lines || []).filter(l => {
+    if (LOGS.ch === 'all') return true;
+    const c = runClass(l.text);
+    return LOGS.ch === 'req' ? c === 'req' : c === 'bad';
+  });
+}
+
+function renderRunLog() {
+  const box = $('#runBody');
+  if (!LOGS.runEnabled) {
+    box.innerHTML = '<div class="empty">运行日志未启用（服务端没有挂缓冲）</div>';
+    return;
+  }
+  const rows = runFiltered();
+  box.innerHTML = rows.length ? rows.map(l => {
+    const c = runClass(l.text);
+    const d = new Date(l.time);
+    const ts = isNaN(d) ? '--:--:--' : d.toLocaleTimeString('zh-CN', { hour12: false });
+    return `<div class="ln ${c}"><span class="ts">${ts}</span><span class="tx">${esc(l.text)}</span></div>`;
+  }).join('') : '<div class="empty">暂无日志</div>';
+  if (LOGS.pin) box.scrollTop = box.scrollHeight;
+}
+
+// force=true 重新拉数据；false 只重绘缓存（overview 每 5s 触发的那次）。
+async function renderLogs(force) {
+  if (!force && LOGS.loaded) { renderReqTable(); renderRunLog(); return; }
+  LOGS.loaded = true;
+  await Promise.all([loadRequests(), loadRunLog()]);
+}
+
+function copyText(txt, msg) {
+  const done = () => toast(msg || '已复制', 'ok');
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(txt).then(done).catch(() => fallbackCopy(txt, done));
+  } else {
+    fallbackCopy(txt, done);
+  }
+}
+function fallbackCopy(txt, done) {
+  // 内网 IP 直连（非 HTTPS）时 clipboard API 不可用，退回 textarea + execCommand。
+  const ta = document.createElement('textarea');
+  ta.value = txt;
+  ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); done(); } catch (e) { toast('复制失败，请手动选择', 'err'); }
+  ta.remove();
+}
+
+/* ═══════════════ 前门令牌（Token）═══════════════ */
+const KEYS = { data: null, shown: new Set() };
+
+async function loadKeys() {
+  const d = await api('/panel/api/keys');
+  KEYS.data = d;
+  renderKeys();
+}
+
+function renderKeys() {
+  const d = KEYS.data;
+  if (!d) return;
+  const keys = d.keys || [];
+  const base = d.base_url || location.origin;
+  $('#keySrc').textContent = d.managed ? '托管 · ' + (d.path || 'apikeys.json') : '来自 config.json / 环境变量';
+  $('#keyPath').textContent = d.path || 'apikeys.json';
+  $('#keyBase').textContent = base + '/v1';
+
+  const warn = $('#keyWarn');
+  if (!d.auth_required) {
+    warn.hidden = false;
+    warn.innerHTML = '<div class="warnbox">当前<b>没有任何 key</b>：前门不鉴权，任何拿到地址的人都能烧你的账号额度。点右上角「生成新 Key」立刻补上。</div>';
+  } else {
+    warn.hidden = true;
+  }
+
+  $('#keyRows').innerHTML = keys.length ? keys.map(k => {
+    const shown = KEYS.shown.has(k.key);
+    const created = k.created ? new Date(k.created).toLocaleDateString('zh-CN') : '';
+    return `<div class="keyrow" data-key="${esc(k.key)}">
+      <code>${esc(shown ? k.key : k.mask)}</code>
+      <button class="xs ghost" data-act="toggle">${shown ? '隐藏' : '显示'}</button>
+      <button class="xs ghost" data-act="copy">复制</button>
+      <span class="grow"></span>
+      <span class="note">${esc(k.note || '无备注')}${created ? ' · ' + created : ''}</span>
+      <button class="xs danger" data-act="del">撤销</button>
+    </div>`;
+  }).join('') : '<div class="pad hint">还没有 key（前门不鉴权）</div>';
+
+  const model = (S.ov && S.ov.config && S.ov.config.default_model) || 'qwen3.7-plus';
+  const curl = [
+    'export QWEN2API_KEY=sk-qwen-…        # 换成上面任意一把',
+    'curl -s ' + base + '/v1/chat/completions \\',
+    '  -H "Authorization: Bearer $QWEN2API_KEY" -H "Content-Type: application/json" \\',
+    '  -d \'{"model":"' + model + '","messages":[{"role":"user","content":"你好"}]}\'',
+  ];
+  $('#keyCurl').textContent = curl.join('\n');
 }
 
 /* ═══════════════ 视图切换 ═══════════════ */
-const TITLES = { accounts: '账号池', usage: '用量', capacity: '容量', models: '模型与调试', config: '配置' };
+const TITLES = { accounts: '账号池', usage: '用量', logs: '日志', capacity: '容量', models: '模型与调试', config: '配置' };
 function renderCurrent() {
   if (!S.ov) return;
   if (S.view === 'accounts') renderAccounts();
   else if (S.view === 'usage') renderUsage();
   else if (S.view === 'capacity') renderCapacity();
   else if (S.view === 'models') renderModels();
+  else if (S.view === 'logs') renderLogs(false).catch(() => {});
   else if (S.view === 'config') renderConfig();
 }
 function go(view) {
@@ -981,6 +1261,8 @@ function go(view) {
   if (S.ov) renderCurrent();
   // 切回账号视图时立刻拉一次当前页（列表不在 overview 里了）。
   if (S.ov && view === 'accounts') loadAccounts(S.page).catch(() => {});
+  // 日志页同理：进页面就要看到最新数据，而不是等下一轮轮询。
+  if (S.ov && view === 'logs') renderLogs(true).catch(() => {});
 }
 
 /* ═══════════════ 导入 ═══════════════ */
@@ -1611,8 +1893,134 @@ function bind() {
     e.target.value = '';
   });
 
+  // ---- 日志页 ----
+  let reqTimer = null;
+  $('#reqQ').addEventListener('input', e => {
+    LOGS.q = e.target.value;
+    clearTimeout(reqTimer);
+    reqTimer = setTimeout(() => loadRequests().catch(() => {}), 250);
+  });
+  $('#reqChips').addEventListener('click', e => {
+    const b = e.target.closest('[data-outcome]');
+    if (!b) return;
+    LOGS.outcome = b.dataset.outcome;
+    $$('#reqChips button').forEach(x => x.classList.toggle('on', x === b));
+    loadRequests().catch(() => {});
+  });
+  $('#reqLimit').addEventListener('change', e => {
+    LOGS.limit = Number(e.target.value) || 200;
+    loadRequests().catch(() => {});
+  });
+  $('#reqAuto').addEventListener('change', e => { LOGS.auto = e.target.checked; });
+  $('#btnReqReload').addEventListener('click', () => {
+    loadRequests().catch(err => toast('刷新失败: ' + err.message, 'err'));
+  });
+  $('#btnReqCopy').addEventListener('click', () => {
+    const rows = LOGS.reqs || [];
+    if (!rows.length) { toast('没有可复制的行', 'err'); return; }
+    const head = ['时间', '路径', '模型', '账号', '状态', 'tok入', 'tok出', '首字节ms', '耗时ms', '来源IP', '说明', '请求ID'];
+    const body = rows.map(r => [
+      r.time, r.path, r.model, r.account, r.status, r.prompt_tokens || 0, r.output_tokens || 0,
+      r.first_byte_ms || 0, r.duration_ms || 0, r.client_ip || '', (r.error || r.degraded || ''), r.id || '',
+    ].join('\t'));
+    copyText([head.join('\t')].concat(body).join('\n'), '已复制 ' + rows.length + ' 条');
+  });
+  $('#runChips').addEventListener('click', e => {
+    const b = e.target.closest('[data-ch]');
+    if (!b) return;
+    LOGS.ch = b.dataset.ch;
+    $$('#runChips button').forEach(x => x.classList.toggle('on', x === b));
+    renderRunLog();
+  });
+  $('#runLimit').addEventListener('change', e => {
+    LOGS.runLimit = Number(e.target.value) || 400;
+    loadRunLog().catch(() => {});
+  });
+  $('#runPin').addEventListener('change', e => {
+    LOGS.pin = e.target.checked;
+    if (LOGS.pin) renderRunLog();
+  });
+  $('#btnRunReload').addEventListener('click', () => {
+    loadRunLog().catch(err => toast('刷新失败: ' + err.message, 'err'));
+  });
+  $('#btnRunCopy').addEventListener('click', () => {
+    const rows = runFiltered();
+    if (!rows.length) { toast('没有可复制的行', 'err'); return; }
+    copyText(rows.map(l => l.text).join('\n'), '已复制 ' + rows.length + ' 行');
+  });
+
+  // ---- 前门令牌 ----
+  $('#keyRows').addEventListener('click', async e => {
+    const row = e.target.closest('.keyrow');
+    const btn = e.target.closest('[data-act]');
+    if (!row || !btn) return;
+    const k = row.dataset.key;
+    if (btn.dataset.act === 'toggle') {
+      if (KEYS.shown.has(k)) KEYS.shown.delete(k); else KEYS.shown.add(k);
+      renderKeys();
+    } else if (btn.dataset.act === 'copy') {
+      copyText(k, 'Key 已复制');
+    } else if (btn.dataset.act === 'del') {
+      if (!confirm('撤销这把 key？\n\n用它的客户端会立刻 401，且无法恢复（只能重新生成）。')) return;
+      try {
+        await api('/panel/api/keys/delete', { method: 'POST', body: JSON.stringify({ key: k }) });
+        KEYS.shown.delete(k);
+        toast('已撤销', 'ok');
+        await loadKeys();
+        await loadOverview();
+      } catch (err) { toast('撤销失败: ' + err.message, 'err'); }
+    }
+  });
+  $('#btnKeyNew').addEventListener('click', () => {
+    $('#newKeyVeil').hidden = false;
+    $('#newKeyHint').hidden = true;
+    $('#newKeyOut').hidden = true;
+    $('#newKeyCopyWrap').hidden = true;
+    $('#newKeyNote').value = '';
+    $('#newKeyGo').textContent = '生成';
+    setTimeout(() => $('#newKeyNote').focus(), 30);
+  });
+  $('#newKeyClose').addEventListener('click', () => { $('#newKeyVeil').hidden = true; });
+  $('#newKeyVeil').addEventListener('click', e => { if (e.target.id === 'newKeyVeil') $('#newKeyVeil').hidden = true; });
+  $('#newKeyCopy').addEventListener('click', () => copyText($('#newKeyOut').textContent, 'Key 已复制'));
+  $('#newKeyGo').addEventListener('click', async () => {
+    const btn = $('#newKeyGo');
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = '生成中…';
+    try {
+      const d = await api('/panel/api/keys', {
+        method: 'POST',
+        body: JSON.stringify({ note: $('#newKeyNote').value.trim() }),
+      });
+      KEYS.shown.add(d.key);
+      $('#newKeyOut').textContent = d.key;
+      $('#newKeyOut').hidden = false;
+      $('#newKeyCopyWrap').hidden = false;
+      const h = $('#newKeyHint');
+      h.className = 'state ok';
+      h.textContent = '已生成并立即生效（已写入托管文件）。这串就是调用模型用的 token，点「复制这串 key」保存。';
+      h.hidden = false;
+      btn.textContent = '再生成一把';
+      await loadKeys();
+      await loadOverview();
+    } catch (e) {
+      const h = $('#newKeyHint');
+      h.className = 'state err';
+      h.textContent = '生成失败：' + e.message;
+      h.hidden = false;
+      btn.textContent = label;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { $('#importVeil').hidden = true; $('#navDrawer').classList.remove('open'); }
+    if (e.key === 'Escape') {
+      $('#importVeil').hidden = true;
+      $('#newKeyVeil').hidden = true;
+      $('#navDrawer').classList.remove('open');
+    }
   });
 }
 
@@ -1662,6 +2070,10 @@ function bind() {
   const pollLoop = async () => {
     if (!document.hidden) {
       try { await loadOverview(); } catch (e) { /* 轮询失败静默 */ }
+      // 日志页的「自动刷新」只管自己：关掉之后就不能再偷偷重绘/重拉。
+      if (S.view === 'logs' && LOGS.auto) {
+        try { await renderLogs(true); } catch (e) { /* 静默 */ }
+      }
     }
     setTimeout(pollLoop, pollDelay());
   };

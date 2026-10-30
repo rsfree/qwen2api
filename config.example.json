@@ -8,6 +8,7 @@
   "// default_thinking": "auto = 自动（前端默认）/ thinking = 强制思考 / fast = 关闭思考（首字最快）",
   "default_thinking": "auto",
   "// image_model": "图片内核：写进 extra.meta.model。它也会作为 media=image 的模型出现在 /v1/models（endpoint=/v1/images/generations）。上游模型表里没有这个 id，别把它当 chat 模型发给 chats/new —— 网关会替你翻译",
+  "blob_base_url": "https://qwen2api.example.com",
   "image_model": "qwen-image-3.0",
   "// video": "文生视频默认参数，写进 extra.meta.biz_data（字符串化 JSON）",
   "video": {

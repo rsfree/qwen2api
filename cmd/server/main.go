@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/yuanjie-ai/qwen2api/internal/panel"
 	"github.com/yuanjie-ai/qwen2api/internal/pool"
 	"github.com/yuanjie-ai/qwen2api/internal/reqlog"
+	"github.com/yuanjie-ai/qwen2api/internal/runlog"
 	"github.com/yuanjie-ai/qwen2api/internal/server"
 	"github.com/yuanjie-ai/qwen2api/internal/upstream"
 )
@@ -55,6 +57,12 @@ func main() {
 		return
 	}
 
+	// 运行日志镜像：容器里 `docker logs` 能看，浏览器里看不到。
+	// 这里把标准 log（stderr）同时写进内存环形缓冲，面板「日志」页直接读它。
+	// 必须在任何业务日志之前挂上，否则启动阶段的报错（配置加载失败等）看不到。
+	runLog := runlog.New(1200)
+	log.SetOutput(io.MultiWriter(os.Stderr, runLog))
+
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		log.Fatalf("[qwen2api] 配置加载失败: %v", err)
@@ -73,6 +81,22 @@ func main() {
 		log.Printf("[qwen2api] 账号清单由面板托管：%s（%d 个）", accPath, len(accs))
 	}
 
+	// 面板托管的 API Key（apikeys.json）：同样**存在即完全接管** api_keys。
+	// 这一层是"调用模型的 token"在哪改的答案：面板里生成/撤销，落这个文件，立即生效。
+	keyPath := config.APIKeysFile(cfg.StateFile)
+	activeKeys := make([]config.APIKey, 0, len(cfg.APIKeys))
+	for _, k := range cfg.APIKeys {
+		activeKeys = append(activeKeys, config.APIKey{Key: k, Note: "来自配置文件"})
+	}
+	keysManaged := false
+	if ks, err := config.LoadAPIKeysOverride(keyPath); err != nil {
+		log.Printf("[qwen2api] ⚠️ %v —— 本次仍用 config.json 的 api_keys，但面板里撤销过的 key 可能在重启后复活", err)
+	} else if ks != nil {
+		activeKeys = ks
+		keysManaged = true
+		log.Printf("[qwen2api] API Key 由面板托管：%s（%d 把）", keyPath, len(ks))
+	}
+
 	// 配置来源必须打出来。没有这一行时，"--config 没传对 / 环境变量没生效"
 	// 的表现是：服务正常启动、但账号列表和 api_keys 都是空的（静默用默认值），
 	// 排查时只能靠猜。2026-10-29 容器部署实测踩过。
@@ -85,8 +109,9 @@ func main() {
 		log.Printf("[qwen2api] ⚠️ 未配置任何账号（config.accounts / QWEN2API_ACCOUNTS）—— " +
 			"服务会启动，但所有生成请求将返回 503（用 -config 或 QWEN2API_CONFIG 指路）")
 	}
-	if len(cfg.APIKeys) == 0 {
-		log.Printf("[qwen2api] ⚠️ 未配置 api_keys —— 前门不鉴权，请只在可信网络内暴露")
+	if len(activeKeys) == 0 {
+		log.Printf("[qwen2api] ⚠️ 没有任何 API Key（config.api_keys / QWEN2API_API_KEYS / apikeys.json）—— " +
+			"前门不鉴权，请只在可信网络内暴露")
 	}
 
 	pool := pool.New(cfg.Pool, cfg.Accounts, cfg.StateFile)
@@ -95,8 +120,12 @@ func main() {
 	// 这两步都是一次只读请求，换来的是"第一个用户请求不用替我们试错"。
 	bootstrapAccounts(cfg, pool, up)
 	reqLog := reqlog.New(500)
+	// 请求流水行同样镜一份进运行日志：面板「日志」页把"谁打了什么"与进程日志放在一屏里。
+	reqLog.Out = io.MultiWriter(os.Stdout, runLog)
 
 	srv := server.New(cfg, pool, up, reqLog, version)
+	srv.SetAPIKeys(activeKeys, keyPath, keysManaged)
+	srv.SetRunLog(runLog)
 	srv.SetPanel(panel.New(srv))
 
 	// 账号保活：后台提前把"接下来要用的那批"凭据换新（access 只有 15 分钟）。

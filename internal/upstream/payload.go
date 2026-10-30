@@ -176,6 +176,40 @@ func ImageEditSpec(files []FileRef) ChatSpec {
 	return ChatSpec{ChatType: "image_edit", SubChatType: "image_edit", Files: files}
 }
 
+// VisionFileEntry 图片附件条目（file_class=vision）。
+//
+// 🔴 **只要 url 就能让模型看见图**（2026-10-30 实测：外链 placehold.co 的纯红图
+// 答"红色"、白底黑字图答"HELLO42"）。所以这条路径**不需要** getstsToken ——
+// 恰好绕开了被阿里云 WAF 全局挑战的上传端点（见 docs/UPSTREAM.md §6.1）。
+//
+// id/itemId 是前端渲染用的占位（实验证明造一个假 id 不影响取图）；
+// size 用于 UI 显示，外链图未知时给 0。
+func VisionFileEntry(url, name, mime string, size int) FileRef {
+	if name == "" {
+		name = "image.png"
+	}
+	if mime == "" {
+		mime = "image/png"
+	}
+	return map[string]any{
+		"type":            "image",
+		"file":            map[string]any{},
+		"id":              "img-" + UUID(),
+		"url":             url,
+		"name":            name,
+		"collection_name": "",
+		"progress":        100,
+		"status":          "uploaded",
+		"greenNet":        "success",
+		"size":            size,
+		"error":           "",
+		"itemId":          "img-" + UUID(),
+		"file_type":       mime,
+		"showType":        "image",
+		"file_class":      "vision",
+	}
+}
+
 // VideoSpec 文生视频。
 //
 // biz_data 是**字符串化的 JSON**（不是对象）—— 这是上游的形态，写成对象会 Bad_Request。

@@ -18,6 +18,7 @@ import (
 	"github.com/yuanjie-ai/qwen2api/internal/config"
 	"github.com/yuanjie-ai/qwen2api/internal/pool"
 	"github.com/yuanjie-ai/qwen2api/internal/reqlog"
+	"github.com/yuanjie-ai/qwen2api/internal/runlog"
 	"github.com/yuanjie-ai/qwen2api/internal/upstream"
 )
 
@@ -53,6 +54,24 @@ func (s *stubBackend) DeleteAccount(string) (bool, error)        { return false,
 func (s *stubBackend) TestAccount(context.Context, string) error { return nil }
 func (s *stubBackend) Models(context.Context) any                { return []string{} }
 func (s *stubBackend) RefreshCredits(context.Context, bool)      {}
+
+// ---- 前门令牌（面板「令牌」页）：桩实现，测试只关心鉴权闸门 ----
+func (s *stubBackend) APIKeys() []config.APIKey {
+	out := make([]config.APIKey, 0, len(s.cfg.APIKeys))
+	for _, k := range s.cfg.APIKeys {
+		out = append(out, config.APIKey{Key: k})
+	}
+	return out
+}
+func (s *stubBackend) APIKeysManaged() bool { return false }
+func (s *stubBackend) APIKeysPath() string  { return "" }
+func (s *stubBackend) AddAPIKey(string) (config.APIKey, error) {
+	return config.APIKey{}, nil
+}
+func (s *stubBackend) DeleteAPIKey(string) error { return nil }
+
+// RunLog 桩：nil 表示未启用（logs.go 会回空态）。
+func (s *stubBackend) RunLog() *runlog.Buffer { return nil }
 
 // DebugHandler 桩：只回显"被调用了"，不碰真实前门。
 func (s *stubBackend) DebugHandler() http.Handler {

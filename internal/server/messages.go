@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -75,7 +76,20 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		model = s.cfg.DefaultModel
 	}
 
-	sd, err := s.openUpstream(r.Context(), model, s.cfg.DefaultThinking, flat.Prompt)
+	// 图片：content 里的 image 块 → 上游 files[]（vision）。坏引用一律 400。
+	imgRefs, imgErr := collectImageRefs(msgs)
+	if imgErr != nil {
+		writeErrorParam(w, http.StatusBadRequest, "invalid_request_error", imgErr.Error(), "image")
+		return
+	}
+	if len(imgRefs) > maxInputImages {
+		writeErrorParam(w, http.StatusBadRequest, "invalid_request_error",
+			fmt.Sprintf("图片最多 %d 张（本次 %d 张）", maxInputImages, len(imgRefs)), "image")
+		return
+	}
+	spec := upstream.TextSpec()
+	spec.ImageRefs = imgRefs
+	sd, err := s.openUpstream(r.Context(), s.blobBase(r), model, s.cfg.DefaultThinking, flat.Prompt, spec)
 	if err != nil {
 		writeError(w, httpStatusFor(err), errTypeFor(err), err.Error())
 		return

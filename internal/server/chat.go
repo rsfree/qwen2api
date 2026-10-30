@@ -136,7 +136,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	spec := upstream.TextSpec()
 	spec.Files = files
 	spec.ImageRefs = imgRefs
-	sd, err := s.openUpstreamSpec(r.Context(), model, gear, flat.Prompt, spec)
+	sd, err := s.openUpstreamSpec(r.Context(), s.blobBase(r), model, gear, flat.Prompt, spec)
 	if err != nil {
 		entry.Status = httpStatusFor(err)
 		entry.Error = err.Error()
@@ -159,14 +159,18 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 // openUpstream 选号 → 建会话 → 开流，失败按可重试性换号。
 //
+// blobBase 是图片托管的公网基址（无图片时可为空）。
+//
 // 🔴 换号必须发生在**写响应之前**：一旦开始向客户端写 SSE，就再也回不了
 // 正经 HTTP 状态，只能落成流内错误。
-func (s *Server) openUpstream(ctx context.Context, model, gear, prompt string) (*opened, error) {
-	return s.openUpstreamSpec(ctx, model, gear, prompt, upstream.TextSpec())
+func (s *Server) openUpstream(ctx context.Context, blobBase, model, gear, prompt string,
+	spec upstream.ChatSpec) (*opened, error) {
+	return s.openUpstreamSpec(ctx, blobBase, model, gear, prompt, spec)
 }
 
 // openUpstreamSpec 同上，带类型规格（t2i 的图片模型 / t2v 的 biz_data 在 spec 里）。
-func (s *Server) openUpstreamSpec(ctx context.Context, model, gear, prompt string, spec upstream.ChatSpec) (*opened, error) {
+func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear, prompt string,
+	spec upstream.ChatSpec) (*opened, error) {
 	var lastErr error
 	for attempt := 0; attempt < s.cfg.Pool.MaxRotate; attempt++ {
 		acct, ok := s.pool.Pick()
@@ -188,7 +192,7 @@ func (s *Server) openUpstreamSpec(ctx context.Context, model, gear, prompt strin
 		var err error
 		for retried := false; ; retried = true {
 			var o *opened
-			o, err = s.openOnce(actx, acct, cred, model, gear, prompt, spec)
+			o, err = s.openOnce(actx, acct, cred, model, gear, prompt, blobBase, spec)
 			if err == nil {
 				o.acct = acct
 				return o, nil
@@ -222,15 +226,14 @@ func (s *Server) openUpstreamSpec(ctx context.Context, model, gear, prompt strin
 // 🔴 图片上传必须在这里做，不能提到选号之前：file 条目是账号维度资源，
 // 用 A 号传的图让 B 号提交，上游会判"无权访问该文件"（且是静默的坏结果）。
 // 放在这里还有个附带好处：换号重试时会自动用新账号重传一遍。
-func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model, gear, prompt string,
+func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model, gear, prompt, blobBase string,
 	spec upstream.ChatSpec) (*opened, error) {
 
 	attempt := spec
 	if len(spec.ImageRefs) > 0 {
-		// 🔴 上传前必须确保凭据是新鲜的（见 ensureFresh 的注释：过期 Bearer 在
-		// getstsToken 上会伪装成 WAF 挑战页，401 兜底完全失效）。
-		cred = s.ensureFresh(actx, acct, cred)
-		files, err := s.uploadImageRefs(actx, cred, spec.ImageRefs)
+		// 🔴 不再走 getstsToken（该端点被阿里云 WAF 全局挑战）：URL 直给上游，
+		// data URI / 裸 base64 存本地 BlobStore 后给公网 URL。见 blobs.go。
+		files, err := s.visionFiles(actx, blobBase, spec.ImageRefs)
 		if err != nil {
 			return nil, err
 		}
@@ -247,6 +250,80 @@ func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model,
 		return nil, err
 	}
 	return &opened{stream: st, chatID: chatID}, nil
+}
+
+// visionFiles 把图片引用转成上游 files[] 条目。
+//
+// 两条来源：
+//   - http(s) URL ⇒ **原样**交给上游（它自己去拉），零下载、零上传；
+//   - data URI / 裸 base64 ⇒ 解码后存进本地 BlobStore，给一个我们自己的公网 URL。
+//
+// 为什么不做"先下载再上传 OSS"：getstsToken 已被 WAF 人机验证挡住（§6.1），
+// 而 files[].url 本来就支持外链（实测模型能准确读出颜色与文字）。
+func (s *Server) visionFiles(ctx context.Context, base string, refs []string) ([]upstream.FileRef, error) {
+	files := make([]upstream.FileRef, 0, len(refs))
+	for i, ref := range refs {
+		entry, err := s.visionFile(ctx, base, ref)
+		if err != nil {
+			return nil, fmt.Errorf("第 %d 张参考图: %w", i+1, err)
+		}
+		files = append(files, entry)
+	}
+	return files, nil
+}
+
+// visionFile 单张：URL 直通 / base64 落 blob。
+func (s *Server) visionFile(ctx context.Context, base, ref string) (upstream.FileRef, error) {
+	ref = strings.TrimSpace(ref)
+	if strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") {
+		// 不下载：省一次出网，也避开"本机拉不到 / 防盗链"的坑。
+		return upstream.VisionFileEntry(ref, "image"+extFromURL(ref), "image/png", 0), nil
+	}
+	data, mime, name, err := resolveImageRef(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	if base == "" {
+		return nil, errors.New("缺少公网基址：请配置 blob_base_url，或让反代带上 X-Forwarded-Proto/Host")
+	}
+	id, err := s.blobs.Put(data, mime)
+	if err != nil {
+		return nil, err
+	}
+	return upstream.VisionFileEntry(base+"/v1/blobs/"+id+extForMime(mime), name, mime, len(data)), nil
+}
+
+// extFromURL 从 URL 路径取扩展名（只认图片后缀，其余回 .png）。
+func extFromURL(raw string) string {
+	if i := strings.IndexByte(raw, '?'); i >= 0 {
+		raw = raw[:i]
+	}
+	if i := strings.LastIndexByte(raw, '.'); i >= 0 && len(raw)-i <= 5 {
+		switch strings.ToLower(raw[i:]) {
+		case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+			return strings.ToLower(raw[i:])
+		}
+	}
+	return ".png"
+}
+
+// blobBase 图片托管的公网基址：配置优先，否则用请求推断（反代场景）。
+func (s *Server) blobBase(r *http.Request) string {
+	if b := s.blobs.Base(); b != "" {
+		return b
+	}
+	host := r.Host
+	if host == "" {
+		return ""
+	}
+	proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if proto == "" {
+		proto = "http"
+		if r.TLS != nil {
+			proto = "https"
+		}
+	}
+	return proto + "://" + host
 }
 
 // ensureFresh 确保账号的 access token 至少还剩 1 分钟寿命，否则先续期。

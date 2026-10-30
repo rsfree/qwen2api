@@ -752,13 +752,31 @@ GET https://sg-entitlement.qwen.com/api/entitlement/credits/credits/history
 
 | 入口 | 落地方式 |
 |---|---|
-| `POST /v1/images/generations` 的 `image`（图生图） | `chat_type=image_edit` + `files[]` |
-| `POST /v1/files` → content 里引用 `file_id` | `t2t` + `files[]`（`file_class=document`） |
-| chat / messages / responses 的图片段 | `t2t` + `files[]`（`file_class=vision`） |
+| `POST /v1/images/generations` 的 `image`（图生图） | `chat_type=image_edit` + `files[]`（**要 OSS 条目**，见 §6.1 风险） |
+| `POST /v1/files` → content 里引用 `file_id` | `t2t` + `files[]`（`file_class=document`，走 OSS） |
+| chat / messages / responses 的图片段 | `t2t` + `files[]`（`file_class=vision`，**走 url 直通/本地托管**） |
 
 chat 的图片段三种写法全收（`image_url` / `input_image` / Anthropic `image.source`），
-引用形态三收（URL / data URI / 裸 base64）。**上传与提交必须同一个账号**，
-所以上传放在选号之后（`openOnce`），换号重试自动重传。
+引用形态三收（URL / data URI / 裸 base64）。
+
+### 6.1 🔴 `getstsToken` 已被阿里云 WAF 人机验证挡住（✅ 2026-10-30 实测）
+
+```
+POST /api/v2/files/getstsToken
+→ HTTP 200 + <!doctype html> … <meta name="aliyun_waf_aa" content="…">
+```
+
+同一出口、同一时刻，`GET /api/v2/models/` 正常 200；14 个不同代理出口 + 直连
+全部被挑战；`Bearer` / `Cookie: token=` / `Cookie: token+refresh_token` /
+带或不带 `bx-ua` / 预热拿 `acw_tc`+`x-ap` —— 9 种组合无一通过。
+**结论：端点级人机验证（滑块），不是凭据、不是 IP、不是头。**
+
+⇒ 凡是需要 `files[]` 里"真 OSS 条目"的功能（图生图 `image_edit`、`/v1/files`）
+目前都受影响。**但 vision 不需要**：实测 `files[].url` 直接给公网外链，
+模型能准确答出颜色（红图答"红色"）和图中文字（`HELLO42`）——
+所以 chat 图片走"URL 直通 / 网关自托管 blob"，见 README。
+
+⚠️ 若上游将来给 `url` 也加白名单，则需要回到 STS（那时得先过滑块）。
 
 ---
 

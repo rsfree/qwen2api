@@ -70,6 +70,9 @@ GREEN = png(96, 96, (20, 160, 20))
 
 ASK = "这张图的主色调是什么？只回答一个颜色词（中文或英文均可），不要解释。"
 
+# 带文字的图：让模型"读出字符"是最硬的多模态证据（猜不出来）。
+URL_OCR = os.environ.get("QWEN2API_URL_OCR", "https://placehold.co/240x120/ffffff/000000.png?text=HELLO42")
+
 
 def call(path, payload, timeout=TIMEOUT):
     """发一次请求，返回 (status, body_bytes, elapsed_ms)。"""
@@ -226,6 +229,27 @@ def case_responses():
     record(name, hit, "回答=%r" % text.strip()[:40], ms)
 
 
+def case_ocr():
+    """读图里的文字 —— 比"什么颜色"更难蒙对。"""
+    name = "G. URL 文字图（读字符）"
+    status, body, ms = call("/v1/chat/completions", {
+        "model": MODEL, "thinking": "fast", "stream": False,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "图里写的文字是什么？只回答那几个字符，不要解释。"},
+            {"type": "image_url", "image_url": {"url": URL_OCR}}]}],
+    })
+    if status != 200:
+        record(name, False, "HTTP %d %s" % (status, body[:160].decode("utf-8", "replace")), ms)
+        return
+    text, usage, err = chat_text(body)
+    if text is None:
+        record(name, False, "错误: " + (err or "无正文"), ms)
+        return
+    low = text.lower().replace(" ", "")
+    hit = "hello42" in low or "hello 42" in low
+    record(name, hit, "回答=%r tokens=%s" % (text.strip()[:40], (usage or {}).get("prompt_tokens")), ms)
+
+
 def case_negative():
     name = "F1. 坏引用 → 400"
     status, body, ms = call("/v1/chat/completions", {
@@ -293,6 +317,7 @@ def main():
             record(name, ok, "回答=%r tokens=%s" % (text.strip()[:60], (usage or {}).get("prompt_tokens")), ms)
 
     case_stream()
+    case_ocr()
     case_anthropic()
     case_responses()
     case_negative()

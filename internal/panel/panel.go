@@ -15,6 +15,7 @@ import (
 	"github.com/yuanjie-ai/qwen2api/internal/config"
 	"github.com/yuanjie-ai/qwen2api/internal/pool"
 	"github.com/yuanjie-ai/qwen2api/internal/reqlog"
+	"github.com/yuanjie-ai/qwen2api/internal/runlog"
 	"github.com/yuanjie-ai/qwen2api/internal/upstream"
 )
 
@@ -46,6 +47,17 @@ type Backend interface {
 	// DebugHandler 调试转发：面板会话鉴权后，由服务端以内部身份调用前门 handler。
 	// 只挂在 /panel/api/debug/* 下 —— 拿不到 API Key 也能调试，但不额外开一个公开入口。
 	DebugHandler() http.Handler
+
+	// ---- 前门令牌（调用模型用的 API Key）----
+	// 生效列表由 config.api_keys 或面板托管的 apikeys.json 决定，撤销立即生效。
+	APIKeys() []config.APIKey
+	APIKeysManaged() bool
+	APIKeysPath() string
+	AddAPIKey(note string) (config.APIKey, error)
+	DeleteAPIKey(key string) error
+
+	// RunLog 运行日志环形缓冲（stdout/stderr 镜像）；nil = 未启用。
+	RunLog() *runlog.Buffer
 }
 
 // Panel 面板 handler。
@@ -115,6 +127,28 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"data": p.b.Models(r.Context())})
+	case r.URL.Path == "/panel/api/keys" && r.Method == http.MethodGet:
+		if !p.authorized(r) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		p.handleKeys(w, r)
+	case r.URL.Path == "/panel/api/keys" && r.Method == http.MethodPost:
+		p.mustAuth(w, r, p.createKey)
+	case r.URL.Path == "/panel/api/keys/delete" && r.Method == http.MethodPost:
+		p.mustAuth(w, r, p.deleteKey)
+	case r.URL.Path == "/panel/api/requests":
+		if !p.authorized(r) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		p.handleRequests(w, r)
+	case r.URL.Path == "/panel/api/runlog":
+		if !p.authorized(r) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		p.handleRunLog(w, r)
 	case r.URL.Path == "/panel/api/accounts/import" && r.Method == http.MethodPost:
 		p.mustAuth(w, r, p.importAccounts)
 	case r.URL.Path == "/panel/api/accounts/delete" && r.Method == http.MethodPost:
@@ -238,12 +272,15 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	p.b.RefreshCredits(r.Context(), false)
 
 	cfg := p.b.Config()
+	keys := p.b.APIKeys()
 	// 只暴露"配置摘要"，不回显 token / api key。
 	summary := map[string]any{
 		"listen":           cfg.Listen,
 		"default_model":    cfg.DefaultModel,
 		"default_thinking": cfg.DefaultThinking,
-		"api_key_required": len(cfg.APIKeys) > 0,
+		"api_key_required": len(keys) > 0,
+		"api_keys_count":   len(keys),
+		"api_keys_managed": p.b.APIKeysManaged(),
 		"upstream": map[string]any{
 			"base_url":  cfg.Upstream.BaseURL,
 			"version":   cfg.Upstream.Version,

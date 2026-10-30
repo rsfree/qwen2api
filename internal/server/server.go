@@ -17,6 +17,7 @@ import (
 	"github.com/yuanjie-ai/qwen2api/internal/config"
 	"github.com/yuanjie-ai/qwen2api/internal/pool"
 	"github.com/yuanjie-ai/qwen2api/internal/reqlog"
+	"github.com/yuanjie-ai/qwen2api/internal/runlog"
 	"github.com/yuanjie-ai/qwen2api/internal/upstream"
 )
 
@@ -34,6 +35,8 @@ type Server struct {
 	videos *videoStore
 	// files 上传条目的暂存（内存 2h）。
 	files *FileStore
+	// blobs 图片外链托管（内存 2h）—— 给上游一个自己能拉的 URL，绕开 STS。
+	blobs *BlobStore
 	// 积分余额读取失败的日志去重（见 credits.go）。
 	creditErrMu sync.Mutex
 	creditErrAt time.Time
@@ -43,6 +46,15 @@ type Server struct {
 	creditCursor int
 	// refreshErrAt 预热续期的失败日志去重（账号名 → 上次记录时间）。
 	refreshErrAt map[string]time.Time
+	// keysMu 保护前门令牌（config.api_keys 或面板托管的 apikeys.json）。
+	// 每次 /v1 请求都要读它，所以读写必须轻（RLock + 切片拷贝）。
+	keysMu      sync.RWMutex
+	keys        []config.APIKey
+	keysPath    string
+	keysManaged bool
+	keysInit    bool
+	// runLog 运行日志环形缓冲（stdout/stderr 镜像），面板「日志」页读它。
+	runLog *runlog.Buffer
 }
 
 // New 构造前门。
@@ -57,6 +69,11 @@ func New(cfg config.Config, p *pool.Pool, up *upstream.Client, log *reqlog.Log, 
 		version: version,
 		videos:  newVideoStore(),
 		files:   NewFileStore(),
+		blobs:   NewBlobStore(),
+	}
+	// 配置了公网基址就固定下来（服务端到服务端取图时 Host 不是公网域名）。
+	if cfg.BlobBaseURL != "" {
+		s.blobs.SetBase(cfg.BlobBaseURL)
 	}
 	return s
 }
@@ -69,6 +86,12 @@ func (s *Server) Pool() *pool.Pool { return s.pool }
 
 // Log 暴露给面板。
 func (s *Server) Log() *reqlog.Log { return s.log }
+
+// SetRunLog 挂运行日志缓冲（stdout/stderr 镜像）。nil = 面板日志页只显示请求流水。
+func (s *Server) SetRunLog(b *runlog.Buffer) { s.runLog = b }
+
+// RunLog 暴露给面板。
+func (s *Server) RunLog() *runlog.Buffer { return s.runLog }
 
 // Upstream 暴露给面板。
 func (s *Server) Upstream() *upstream.Client { return s.up }
@@ -97,6 +120,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/videos/{id}/content", s.wrap("/v1/videos/{id}/content", s.handleVideoContent))
 	mux.HandleFunc("POST /v1/files", s.wrap("/v1/files", s.handleFiles))
 	mux.HandleFunc("GET /v1/files/{id}", s.wrap("/v1/files/{id}", s.handleFileGet))
+	// 🔴 免鉴权：上游来拉图时不会带我们的 API Key。
+	// 安全性靠"不可猜 ID + 2h TTL + 只读"，见 blobs.go 文件头。
+	mux.HandleFunc("GET /v1/blobs/{id}", s.handleBlob)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("GET /stats", s.wrap("/stats", s.handleStats))
@@ -123,9 +149,13 @@ func (s *Server) wrap(path string, h func(http.ResponseWriter, *http.Request)) h
 	}
 }
 
-// authorized 校验 API Key。api_keys 为空 = 不鉴权（本机/内网场景）。
+// authorized 校验 API Key。生效列表为空 = 不鉴权（本机/内网场景）。
+//
+// 列表来源是运行时快照（见 apikeys.go）：面板里撤销/生成 key 立即生效，
+// 不需要重启 —— 泄漏一把 key 时这一点比"少一次读锁"重要得多。
 func (s *Server) authorized(r *http.Request) bool {
-	if len(s.cfg.APIKeys) == 0 {
+	keys := s.keyStrings()
+	if len(keys) == 0 {
 		return true
 	}
 	token := ""
@@ -142,7 +172,7 @@ func (s *Server) authorized(r *http.Request) bool {
 	if token == "" {
 		return false
 	}
-	for _, k := range s.cfg.APIKeys {
+	for _, k := range keys {
 		if subtle.ConstantTimeCompare([]byte(k), []byte(token)) == 1 {
 			return true
 		}

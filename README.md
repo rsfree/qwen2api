@@ -163,14 +163,26 @@ curl -s localhost:8400/v1/chat/completions \
 引用内容三条都收：**URL / data URI / 裸 base64**（与 `/v1/images` 的 `image` 字段同一条解链；
 裸 base64 按魔数嗅探，不信声明）。单次最多 20 张，超了 400 并指向 `param=image`。
 
-上游链路：`POST /api/v2/files/getstsToken` → OSS V4 签名 PUT → `messages[0].files[]`
-（`file_type=image` / `showType=image` / `file_class=vision`），`chat_type` 仍是 **`t2t`**。
+链路（`chat_type` 仍是 **`t2t`**，条目带 `file_class=vision`）：
 
-> 🔴 **上传与提交必须同一个账号**：file 是账号维度资源，A 号传的图让 B 号提交会被判
-> 无权访问（且是静默的）。所以上传发生在**选号之后**（`openOnce`），换号重试会自动重传。
+| 引用形态 | 网关动作 |
+|---|---|
+| `http(s)://…` | **原样**写进 `files[].url`，上游自己来拉。不下载、不上传 |
+| `data:image/…;base64,…` / 裸 base64 | 解码后存进内存 `BlobStore`，改给 `https://<blob_base_url>/v1/blobs/<32hex>.png` |
+
+`/v1/blobs/<id>` 是**免鉴权**的只读端点（上游取图不带我们的 Key），安全性靠
+128 位随机 ID + 2 小时 TTL + 只读。
+
+> 🔴 **为什么不走 `getstsToken` 上传了**（2026-10-30 实测）：该端点已被阿里云 WAF
+> 加了人机验证（滑块页，HTTP 200 包 HTML）。Bearer / Cookie / 带 bx-ua / 不带 /
+> 预热 acw_tc+x-ap / 14 个不同出口 / 直连 —— 9 种组合全部被挑战；而同一出口的
+> `/api/v2/models/` 正常。**但 `files[].url` 给外链完全够用**：实测模型能准确答出
+> 纯红图的颜色、读出带字图里的 `HELLO42`。详见 `docs/UPSTREAM.md` §6.1。
 >
 > 🔴 任何一段图片引用解析失败都 **400**，绝不"跳过这张图继续聊"——
 > 那会让模型看不见图却照常作答，调用方以为多模态生效了。
+>
+> 📌 `blob_base_url` 必须配成公网域名（上游是从它自己的机房来拉图的，内网地址拉不到）。
 
 ### `POST /v1/images/generations`
 

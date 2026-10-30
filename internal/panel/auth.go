@@ -142,16 +142,26 @@ func (p *Panel) apiKeyOK(r *http.Request, keys []string) bool {
 	return false
 }
 
+// keyStrings 当前生效的前门令牌（面板与 /v1 认同一份，撤销后两边同时失效）。
+func (p *Panel) keyStrings() []string {
+	ks := p.b.APIKeys()
+	out := make([]string, 0, len(ks))
+	for _, k := range ks {
+		out = append(out, k.Key)
+	}
+	return out
+}
+
 // authMethod 返回本次请求的凭据来源：key / session / open / ""（未通过）。
 func (p *Panel) authMethod(r *http.Request) string {
-	cfg := p.b.Config()
-	if p.apiKeyOK(r, cfg.APIKeys) {
+	keys := p.keyStrings()
+	if p.apiKeyOK(r, keys) {
 		return "key"
 	}
 	if p.hasSession(r) {
 		return "session"
 	}
-	if !cfg.Panel.AuthEnabled() && len(cfg.APIKeys) == 0 {
+	if !p.b.Config().Panel.AuthEnabled() && len(keys) == 0 {
 		return "open"
 	}
 	return ""
@@ -167,7 +177,7 @@ func (p *Panel) handleSession(w http.ResponseWriter, r *http.Request) {
 		"authed":     p.authMethod(r) != "",
 		"method":     p.authMethod(r),
 		"username":   cfg.EffectiveUsername(),
-		"key_only":   !cfg.AuthEnabled() && len(p.b.Config().APIKeys) > 0,
+		"key_only":   !cfg.AuthEnabled() && len(p.keyStrings()) > 0,
 		"session_hr": cfg.EffectiveSessionHours(),
 	})
 }

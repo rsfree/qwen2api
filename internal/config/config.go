@@ -185,6 +185,14 @@ type Config struct {
 	NewChatPerRequest *bool `json:"new_chat_per_request"`
 	// StateFile 池状态落盘路径（空 = 不落盘）；重启后保留冷却/失败计数。
 	StateFile string `json:"state_file"`
+	// BlobBaseURL 图片托管的公网基址（如 https://qwen2api.1task.cn）。
+	//
+	// 🔴 为什么必须显式配：chat 的 data URI / 裸 base64 图片要先落到网关自己的
+	// /v1/blobs/<id>，再由**上游服务器**来拉取。上游拉取时 Host 是内网地址，
+	// 只有固定的公网域名才拉得到（2026-10-30 起 getstsToken 被 WAF 挑战，
+	// 这条本地托管通路是唯一可用的多模态链路）。
+	// 留空则用请求的 X-Forwarded-Proto/Host 推断（直连/调试场景够用）。
+	BlobBaseURL string `json:"blob_base_url,omitempty"`
 	// ImageModel 文生图用的**图片模型名**（写进 extra.meta.model）。
 	// 🔴 不传它时上游只是"聊图"，不保证出图（2026-10-28 实测）。
 	ImageModel string `json:"image_model"`
@@ -348,6 +356,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("QWEN2API_BASE_URL"); v != "" {
 		cfg.Upstream.BaseURL = v
+	}
+	if v := os.Getenv("QWEN2API_BLOB_BASE_URL"); v != "" {
+		cfg.BlobBaseURL = v
 	}
 	if v := os.Getenv("QWEN2API_VERSION"); v != "" {
 		cfg.Upstream.Version = v

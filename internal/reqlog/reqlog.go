@@ -7,6 +7,7 @@ package reqlog
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -63,6 +64,11 @@ type Log struct {
 	byAccount map[string]int
 	// Echo 同时打到 stdout（容器日志里能直接看流水）。
 	Echo bool
+	// Out Echo 的落点，nil = os.Stdout。
+	//
+	// 之所以可换：面板「日志」页要把流水行也镜一份进内存环形缓冲，
+	// 而 os.Stdout 一旦被进程内替换，所有 fmt.Print* 都会跟着变 —— 那是副作用更大的做法。
+	Out io.Writer
 }
 
 // New 构造流水，capacity<=0 回落 500。
@@ -117,7 +123,11 @@ func (l *Log) Add(e Entry) {
 		if e.Error != "" {
 			line += " err=" + e.Error
 		}
-		fmt.Fprintln(os.Stdout, line)
+		out := l.Out
+		if out == nil {
+			out = os.Stdout
+		}
+		fmt.Fprintln(out, line)
 	}
 }
 
