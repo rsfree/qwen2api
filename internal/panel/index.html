@@ -410,7 +410,7 @@ button.xs { white-space:nowrap; }
         </div>
         <div class="tbl-wrap" style="max-height:52vh">
           <table>
-            <thead><tr><th>时间</th><th>路径</th><th>模型</th><th>账号</th><th>状态</th><th class="num">tok 入/出</th><th class="num">首字节</th><th class="num">耗时</th><th>来源</th><th>说明</th></tr></thead>
+            <thead><tr><th>时间</th><th>路径</th><th>模型</th><th>账号</th><th>结果</th><th class="num">tok 入/出</th><th class="num">首字节</th><th class="num">耗时</th><th>来源</th><th>说明</th></tr></thead>
             <tbody id="reqBody"></tbody>
           </table>
         </div>
@@ -1101,19 +1101,33 @@ async function loadRequests() {
   renderReqTable();
 }
 
+// 结果语义（对齐 workbuddy2api）：只看 HTTP 码会把"流内错误"误报成成功 ——
+// 上游的错误常常是 200 开头、错误写在流里（reqlog 同时记 status=200 与 error）。
+function resultOf(r) {
+  const code = r.status || 0;
+  const err = r.error || '';
+  if (err) {
+    if (/timeout|deadline|no such host|connection reset|EOF/i.test(err)) return ['中断', 'warn'];
+    if (code === 0) return ['中断', 'warn'];
+    return ['流错', 'bad'];
+  }
+  if (code >= 300) return [String(code), 'warn'];
+  return ['成功', 'ok'];
+}
+
 function renderReqTable() {
   const rows = LOGS.reqs || [];
   $('#reqNote').textContent = rows.length + ' 条' + (LOGS.reqTotal > rows.length ? ' / 缓存 ' + LOGS.reqTotal : '');
   $('#reqBody').innerHTML = rows.length ? rows.map(r => {
     const code = r.status || 0;
-    const cls = code >= 400 ? 'bad' : (code >= 300 ? 'warn' : 'ok');
+    const [resLabel, cls] = resultOf(r);
     const note = r.error || (r.degraded ? '降级: ' + r.degraded : '');
     return `<tr title="${esc(r.id || '')} · ${esc(r.user_agent || '')}">
       <td class="note">${fmtTime(r.time)}</td>
       <td class="mono">${esc(r.path || '-')}</td>
       <td class="mono">${esc(r.model || '-')}</td>
       <td class="mono">${esc(r.account || '-')}</td>
-      <td><span class="tag ${cls}">${code || '-'}</span>${r.stream ? ' <span class="tag muted">流</span>' : ''}</td>
+      <td><span class="tag ${cls}">${esc(resLabel)}</span>${r.stream ? ' <span class="tag muted">流</span>' : ''}</td>
       <td class="num">${r.prompt_tokens || 0} / ${r.output_tokens || 0}</td>
       <td class="num">${r.first_byte_ms ? r.first_byte_ms + 'ms' : '-'}</td>
       <td class="num">${r.duration_ms ? r.duration_ms + 'ms' : '-'}</td>
