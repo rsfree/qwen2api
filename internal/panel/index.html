@@ -998,7 +998,8 @@ async function renderCapacity() {
 }
 
 /* 每日赠送时间：上游没有"下次重置"字段，只能从积分流水里推最近一次入账，
-   再按 +24h 估算下一次（实测 6 个号在同一次批处理里 09:49 各 +40）。 */
+   再按 +24h 估算下一次。实测按账号 24h 滚动（不同批次的号时刻不同：
+   上午批 09:49、下午批 14:01），所以是**每号各自**的时间，不能全局写死一个点。 */
 function fmtDay(d) {
   const p = n => String(n).padStart(2, '0');
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
