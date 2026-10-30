@@ -125,12 +125,20 @@ func metaOf(t *testing.T, body map[string]any) map[string]any {
 
 func newRoutingServer(t *testing.T, up *routingUpstream) http.Handler {
 	t.Helper()
+	return newRoutingServerWith(t, up, nil)
+}
+
+func newRoutingServerWith(t *testing.T, up *routingUpstream, mutate func(*config.Config)) http.Handler {
+	t.Helper()
 	cfg := config.Default()
 	cfg.Upstream.BaseURL = up.srv.URL
 	cfg.Upstream.AuthBaseURL = up.srv.URL
 	cfg.Upstream.EntitlementBaseURL = up.srv.URL
 	cfg.StateFile = ""
 	cfg.Accounts = []config.Account{{Name: "a0", Token: "tok-0"}}
+	if mutate != nil {
+		mutate(&cfg)
+	}
 	p := pool.New(cfg.Pool, cfg.Accounts, "")
 	cli := upstream.New(cfg.Upstream)
 	return New(cfg, p, cli, reqlog.New(10), "test").Handler()
@@ -182,6 +190,13 @@ func TestModelsListIncludesMediaModels(t *testing.T) {
 	}
 	if vid.Params["resolutions"] == nil {
 		t.Fatalf("视频模型应带档位信息: %v", vid.Params)
+	}
+	// 标题与单价必须跟着配置走：pricing 是 hh11 的表，就该写 30/120。
+	if vid.Title != "HappyHorse 1.1" {
+		t.Fatalf("视频标题应随 root_model 生成，实际 %q", vid.Title)
+	}
+	if !strings.Contains(vid.Notes, "720P 5s=30") || !strings.Contains(vid.Notes, "1080P 15s=120") {
+		t.Fatalf("价格说明应从 pricing 表算出来，实际 %q", vid.Notes)
 	}
 	// 文本模型不能被生成模型挤掉（上游拉不到时用内置清单兜底）。
 	if _, ok := byID["qwen3.7-plus"]; !ok {
@@ -296,6 +311,50 @@ func TestVideoModelSelectsRoot(t *testing.T) {
 	}
 	if meta["subChatType"] != "zaodian_generate_video" {
 		t.Fatalf("subChatType 不对: %v", meta["subChatType"])
+	}
+}
+
+// TestVideoModelMetaFollowsConfig 换成 HappyHorse 1.0 的配置时，
+// 标题与单价说明都要跟着变 —— 写死数字会让人按错价判断成本（差 33%~75%）。
+func TestVideoModelMetaFollowsConfig(t *testing.T) {
+	up := newRoutingUpstream(t)
+	cfgHook := func(c *config.Config) {
+		c.Video.RootModel = "happyhorse"
+		c.Video.Pricing = map[string]map[string]int{
+			"720P":  {"5": 40, "10": 80, "15": 120},
+			"1080P": {"5": 70, "10": 140, "15": 210},
+		}
+	}
+	h := newRoutingServerWith(t, up, cfgHook)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	var out struct {
+		Data []ModelInfo `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("解析清单失败: %v", err)
+	}
+	var vid *ModelInfo
+	for i := range out.Data {
+		if out.Data[i].Media == "video" {
+			vid = &out.Data[i]
+		}
+	}
+	if vid == nil {
+		t.Fatal("清单里没有视频模型")
+	}
+	if vid.ID != "happyhorse" {
+		t.Fatalf("视频模型 id 应跟随 root_model，实际 %q", vid.ID)
+	}
+	if vid.Title != "HappyHorse" {
+		t.Fatalf("1.0 的标题不该写 1.1，实际 %q", vid.Title)
+	}
+	if !strings.Contains(vid.Notes, "720P 5s=40") {
+		t.Fatalf("价格说明应来自新表（40），实际 %q", vid.Notes)
+	}
+	if strings.Contains(vid.Notes, "5s=30") {
+		t.Fatalf("不该残留旧表价格: %q", vid.Notes)
 	}
 }
 

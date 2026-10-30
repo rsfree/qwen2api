@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -77,17 +78,75 @@ func (s *Server) mediaModels() []ModelInfo {
 			Object:   "model",
 			Created:  mediaModelCreated,
 			OwnedBy:  "qwen",
-			Title:    "HappyHorse 1.1",
+			Title:    videoTitle(id),
 			Media:    "video",
 			Endpoint: "/v1/videos/generations",
 			Verified: true,
 			Params:   params,
 			Notes: "更自然稳定。异步任务：提交拿 id，再 GET /v1/videos/generations/{id} 轮询。" +
-				"按档位扣积分（720P 5s=30 / 1080P 15s=120），提交前会校验账号余额。",
+				videoPriceNote(s.cfg.Video.Pricing),
 		})
 	}
 
 	return out
+}
+
+// videoTitle 视频模型标题。
+//
+// 🔴 不写死 "HappyHorse 1.1"：root_model 是可配置的（换 1.0 时价格差 33%~75%），
+// 写死会让清单变成一个骗人的名字。认不出来的直接回 id —— 宁可朴素，不可撒谎。
+func videoTitle(id string) string {
+	switch k := modelKey(id); {
+	case k == "happyhorse11":
+		return "HappyHorse 1.1"
+	case strings.HasPrefix(k, "happyhorse"):
+		return "HappyHorse"
+	}
+	return id
+}
+
+// videoPriceNote 从价格表生成"720P 5s=30 / 1080P 15s=120"这样的说明。
+//
+// 同样不写死数字：pricing 换成 hh（1.0）后是 40/210，写死的文案会让人按错的
+// 价格判断成本。表为空时明说"按个数限额"，而不是留一句空话。
+func videoPriceNote(pricing map[string]map[string]int) string {
+	if len(pricing) == 0 {
+		return "未配置 pricing，按每日个数限额。"
+	}
+	res := make([]string, 0, len(pricing))
+	for r := range pricing {
+		res = append(res, r)
+	}
+	sort.Slice(res, func(i, j int) bool { return resolutionRank(res[i]) < resolutionRank(res[j]) })
+
+	// 取最小分辨率的"最短档"与最大分辨率的"最长档"：一头一尾最能代表价格区间。
+	parts := make([]string, 0, 2)
+	if d, c, ok := pickDuration(pricing[res[0]], false); ok {
+		parts = append(parts, fmt.Sprintf("%s %ds=%d", res[0], d, c))
+	}
+	if len(res) > 1 {
+		if d, c, ok := pickDuration(pricing[res[len(res)-1]], true); ok {
+			parts = append(parts, fmt.Sprintf("%s %ds=%d", res[len(res)-1], d, c))
+		}
+	}
+	if len(parts) == 0 {
+		return "按档位扣积分，提交前校验账号余额。"
+	}
+	return "按档位扣积分（" + strings.Join(parts, " / ") + "），提交前校验账号余额。"
+}
+
+// pickDuration 在 resolution→秒→积分 的小表里取最短（longest=false）或最长档。
+func pickDuration(byDur map[string]int, longest bool) (dur, credits int, ok bool) {
+	for ds, c := range byDur {
+		n, err := strconv.Atoi(ds)
+		if err != nil {
+			continue
+		}
+		if !ok || (longest && n > dur) || (!longest && n < dur) {
+			dur, credits, ok = n, c, true
+		}
+	}
+	return dur, credits, ok
 }
 
 // resolutionRank 分辨率排序权重：720P 在前、1080P 次之，其余按字典序殿后。
