@@ -99,6 +99,18 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = s.cfg.DefaultModel
 	}
+	// 清单里同时列了图片/视频模型（见 mediaModels）。拿它们调 chat 时给一句
+	// 能指导处置的话 —— 不拦的话模型名会被甩给上游，换回一个 Bad_Request，
+	// 调用方只会以为"网关坏了"。
+	if ep := s.mediaEndpoint(model); ep != "" {
+		entry.Model = model
+		entry.Status = http.StatusBadRequest
+		entry.Error = "生成模型不能用于 chat: " + model
+		s.log.Add(entry)
+		writeErrorParam(w, http.StatusBadRequest, "invalid_request_error",
+			fmt.Sprintf("模型 %s 是生成模型，不能用于 chat；请改调 %s", model, ep), "model")
+		return
+	}
 	gear := req.ResolveThinking(s.cfg.DefaultThinking)
 	entry.Model = model
 	entry.Stream = req.Stream

@@ -226,9 +226,11 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		format = "url"
 	}
 
-	model := strings.TrimSpace(req.Model)
-	if model == "" {
-		model = s.cfg.DefaultModel
+	// model 字段可能填 chat 模型，也可能填图片模型（清单里两者都在）。
+	requested := strings.TrimSpace(req.Model)
+	model, imageModel := s.resolveImageModel(requested)
+	if requested == "" {
+		requested = imageModel
 	}
 	// 图片默认走 fast（关思考）：绘图任务的思考只会拖时间，不改善画面。
 	// 请求里显式给了 thinking 才用它的。
@@ -239,7 +241,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	ratio := sizeToRatio(req.Size)
 	prompt := buildImagePrompt(req.Prompt, ratio)
 
-	entry.Model = model
+	entry.Model = requested
 	// 图片是计费动作：n>1 时逐张串行，不并发轰同一账号。
 	var (
 		datums   []ImageDatum
@@ -247,7 +249,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		usedAcct string
 	)
 	for i := 0; i < req.N; i++ {
-		imgs, revised, acct, err := s.generateImage(r.Context(), model, thinking, prompt, refs, ratio)
+		imgs, revised, acct, err := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, ratio)
 		if err != nil {
 			lastErr = err
 			break
@@ -302,7 +304,9 @@ const maxInputImages = 20
 //
 // 🔴 上传与生成**必须同一个账号**：file_id 是账号维度的资源，
 // 用 A 号传的图让 B 号去生成，上游会当成"无权访问该文件"。
-func (s *Server) generateImage(ctx context.Context, model, thinking, prompt string,
+// imageModel 是"图片内核"（extra.meta.model），与建会话用的 chat 模型分开：
+// 上游模型表里没有图片模型 id，把它当 chat 模型发会 Bad_Request。
+func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking, prompt string,
 	refs []string, ratio string) (imgs []string, revised, acct string, err error) {
 
 	// 🔴 上游额度用尽后不会报错，而是**只发 keep_alive 心跳、永不产出**（2026-10-28 实测：
@@ -340,7 +344,7 @@ func (s *Server) generateImage(ctx context.Context, model, thinking, prompt stri
 		spec = upstream.ImageEditSpec(files)
 	} else {
 		// 🔴 extra.meta.model 是关键：不传图片模型时上游只是"聊图"，画不出来。
-		spec = upstream.ImageSpec(s.cfg.ImageModel, ratio)
+		spec = upstream.ImageSpec(imageModel, ratio)
 	}
 
 	chatID, err := s.up.NewChatTyped(ctx, cred, model, spec.ChatType)
@@ -539,9 +543,10 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	model := strings.TrimSpace(r.FormValue("model"))
-	if model == "" {
-		model = s.cfg.DefaultModel
+	requested := strings.TrimSpace(r.FormValue("model"))
+	model, imageModel := s.resolveImageModel(requested)
+	if requested == "" {
+		requested = imageModel
 	}
 	thinking := "fast"
 	format := strings.ToLower(strings.TrimSpace(r.FormValue("response_format")))
@@ -549,7 +554,7 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 		format = "url"
 	}
 
-	imgs, revised, acct, genErr := s.generateImage(r.Context(), model, thinking, prompt, refs, "")
+	imgs, revised, acct, genErr := s.generateImage(r.Context(), model, imageModel, thinking, prompt, refs, "")
 	if genErr != nil {
 		code := httpStatusFor(genErr)
 		entry.Account = acct
@@ -584,7 +589,7 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, ImageResponse{Created: time.Now().Unix(), Data: datums})
 
-	entry.Model = model
+	entry.Model = requested
 	entry.Account = acct
 	entry.Status = http.StatusOK
 	entry.Chars = len(datums)

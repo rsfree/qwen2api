@@ -238,7 +238,37 @@ curl -s localhost:8400/v1/chat/completions -H 'Authorization: Bearer <key>' \
 
 ### `GET /v1/models`
 
-返回 7 个实测模型（上游拉取 + 10 分钟 TTL；拉不到就用内置清单，**绝不 5xx**）。
+返回 **9 个条目 = 7 个文本模型 + 1 个图片模型 + 1 个视频模型**。文本模型来自上游
+（10 分钟 TTL；拉不到就用内置清单，**绝不 5xx**），生成模型由网关补上。
+
+```json
+[
+  {"id": "qwen3.7-plus",   "media": "text",  "thinking": true, "vision": true},
+  {"id": "qwen-image-3.0", "media": "image", "endpoint": "/v1/images/generations",
+   "params": {"sizes": ["1:1","4:3","3:4","16:9","9:16"], "max_n": 4}},
+  {"id": "happyhorse11",   "media": "video", "endpoint": "/v1/videos/generations",
+   "params": {"resolutions": ["720P","1080P"], "durations": [5,10,15],
+              "credits": {"720P": {"5": 30, "10": 60, "15": 90}}}}
+]
+```
+
+🔴 **上游没有独立的图片/视频模型 id** —— 2026-10-30 实测 `GET /api/v2/models/` 只有
+7 个 chat 模型；图片靠 `extra.meta.model`（`qwen-image-3.0`）选内核，视频靠
+`biz_data.rootModel`（`happyhorse11`）选内核。所以清单里的这两个是**本网关的模型名**，
+传它网关会翻译成上游那两个字段：
+
+| 你在 `model` 里写 | 建会话用的 chat 模型 | 生成内核 |
+|---|---|---|
+| 不填 / `qwen3.7-plus` 等文本模型 | 你填的那个 | 配置值（`image_model` / `root_model`） |
+| `qwen-image-3.0`（或 `Qwen-Image 3.0`） | 默认文本模型 | `qwen-image-3.0` |
+| `happyhorse11`（或 `HappyHorse 1.1`） | 默认文本模型 | `happyhorse11` |
+
+- 名字比较**忽略大小写、空格与分隔符**：上游 UI 显示的 `Qwen-Image 3.0` /
+  `HappyHorse 1.1` 可以直接抄过来用；
+- 拿生成模型调 `/v1/chat/completions` 会 **400 并指路**（"请改调 /v1/images/generations"），
+  而不是把模型名甩给上游换回一个看不懂的 `Bad_Request`；
+- `endpoint` / `params` 是**加性扩展字段**，只取 `id/object/created/owned_by` 的客户端
+  照样能用。
 
 ### `POST /v1/messages`（Anthropic）
 

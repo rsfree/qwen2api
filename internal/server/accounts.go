@@ -176,7 +176,7 @@ func (s *Server) TestAccount(ctx context.Context, name string) error {
 }
 
 // Models 给面板的模型清单（复用前门同一份缓存，不额外打上游）。
-func (s *Server) Models(ctx context.Context) any { return s.models.List(ctx) }
+func (s *Server) Models(ctx context.Context) any { return s.modelList(ctx) }
 
 // ---------- 内部 ----------
 

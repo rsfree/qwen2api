@@ -7,13 +7,14 @@
   "default_model": "qwen3.7-plus",
   "// default_thinking": "auto = 自动（前端默认）/ thinking = 强制思考 / fast = 关闭思考（首字最快）",
   "default_thinking": "auto",
-  "// image_model": "文生图用的图片模型名，写进 extra.meta.model。🔴 不传它时上游只会「聊图」不保证出图（2026-10-28 实测）",
+  "// image_model": "图片内核：写进 extra.meta.model。它也会作为 media=image 的模型出现在 /v1/models（endpoint=/v1/images/generations）。上游模型表里没有这个 id，别把它当 chat 模型发给 chats/new —— 网关会替你翻译",
   "image_model": "qwen-image-3.0",
   "// video": "文生视频默认参数，写进 extra.meta.biz_data（字符串化 JSON）",
   "video": {
     "resolution": "720P",
     "duration": 5,
     "audio": true,
+    "// root_model": "视频内核：写进 biz_data.req.rootModel（清单里 title=HappyHorse 1.1）。它也会作为 media=video 的模型出现在 /v1/models（endpoint=/v1/videos/generations）。🔴 换它必须同步换 pricing（hh11 与 hh 的价格差 33%~75%）",
     "root_model": "happyhorse11",
     "// pricing": "积分单价 resolution→秒→积分。⚠️ 价格按模型版本分两套：happyhorse11(hh11*) 是 720P 30/60/90、1080P 40/80/120；happyhorse1.0(hh*) 是 720P 40/80/120、1080P 70/140/210。改 root_model 必须同步改这张表，否则预算会算错 33%~75%。查不到的档位会被 400 拒绝（不猜价）",
     "pricing": {

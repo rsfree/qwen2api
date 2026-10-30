@@ -348,7 +348,7 @@ button.xs { white-space:nowrap; }
         <header><h3>模型清单</h3><span class="hint" id="modelsNote">与 /v1/models 同一份缓存</span></header>
         <div class="tbl-wrap">
           <table>
-            <thead><tr><th>模型</th><th>标题</th><th>媒体</th><th>能力</th><th class="num">上下文</th><th>备注</th></tr></thead>
+            <thead><tr><th>模型</th><th>标题</th><th>媒体</th><th>能力 / 端点</th><th>规格 / 上下文</th><th>备注</th></tr></thead>
             <tbody id="modelBody"></tbody>
           </table>
         </div>
@@ -824,6 +824,12 @@ function renderCapacity() {
 }
 
 /* ═══════════════ 模型 ═══════════════ */
+/* 媒体类型徽标：文本/图片/视频三色，一眼能分出"这个模型该往哪发" */
+function mediaTag(media) {
+  const v = media || 'text';
+  const cls = v === 'image' ? 'ok' : v === 'video' ? 'warn' : 'muted';
+  return `<span class="tag ${cls}">${esc(v)}</span>`;
+}
 async function renderModels() {
   if (!S.models) {
     try { const d = await api('/panel/api/models'); S.models = (d && d.data) || []; } catch (e) { S.models = []; }
@@ -834,18 +840,28 @@ async function renderModels() {
     if (m.thinking) caps.push('思考档');
     if (m.vision) caps.push('视觉');
     if (m.verified) caps.push('已实测');
+    // 生成模型没有上下文/能力标记，改展示可调档位 —— 空着会被当成"信息缺失"。
+    const spec = [];
+    const p = m.params || {};
+    if (p.resolutions) spec.push('分辨率 ' + p.resolutions.join('/'));
+    if (p.durations) spec.push('时长 ' + p.durations.map(d => d + 's').join('/'));
+    if (p.sizes) spec.push('画幅 ' + p.sizes.join('/'));
+    // 生成模型必须走专用端点，把这个信息放在「能力」列最显眼的位置。
+    const eps = m.endpoint ? `<span class="tag ok mono">${esc(m.endpoint)}</span>` : '';
     return `<tr>
       <td class="mono">${esc(m.id)}</td>
       <td>${esc(m.title || '-')}</td>
-      <td>${esc(m.media || 'text')}</td>
-      <td>${caps.map(c => `<span class="tag muted">${c}</span>`).join(' ') || '-'}</td>
-      <td class="num">${m.context_length ? num(m.context_length) : '-'}</td>
+      <td>${mediaTag(m.media)}</td>
+      <td>${eps} ${caps.map(c => `<span class="tag muted">${c}</span>`).join(' ')}</td>
+      <td>${m.context_length ? num(m.context_length) : (spec.join(' · ') || '-')}</td>
       <td class="note">${esc(m.notes || '')}</td>
     </tr>`;
   }).join('') || `<tr><td colspan="6" style="text-align:center;color:var(--ink-3);padding:26px">没有模型</td></tr>`;
+  // 调试台只打 /v1/chat/completions ⇒ 只列文本模型，否则一选就 400。
+  const textModels = list.filter(m => (m.media || 'text') === 'text');
   const sel = $('#dbgModel');
-  if (sel.options.length !== list.length) {
-    sel.innerHTML = list.map(m => `<option value="${esc(m.id)}">${esc(m.title || m.id)}</option>`).join('');
+  if (sel.options.length !== textModels.length) {
+    sel.innerHTML = textModels.map(m => `<option value="${esc(m.id)}">${esc(m.title || m.id)}</option>`).join('');
   }
 }
 

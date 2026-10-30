@@ -140,9 +140,13 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	audio := req.Audio || s.cfg.Video.Audio
 
-	model := strings.TrimSpace(req.Model)
+	// model 字段可能填 chat 模型，也可能填视频模型（清单里两者都在）。
+	// chatModel 用于建会话，rootModel 是生成内核；对外的 model 回显请求原值。
+	requested := strings.TrimSpace(req.Model)
+	chatModel, rootModel := s.resolveVideoModel(requested)
+	model := requested
 	if model == "" {
-		model = s.cfg.DefaultModel
+		model = rootModel
 	}
 
 	// 积分：按档位算这一次要扣多少。查不到档位就明确拒绝 ——
@@ -167,7 +171,7 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 	// 免费号 40、会员号 270、昨天剩 10 都可能（2026-10-29 实测 alt 号只有 10）。
 	s.refreshStaleCredits(r.Context(), creditTTL)
 
-	spec := upstream.VideoSpec(size, resolution, duration, audio, s.cfg.Video.RootModel)
+	spec := upstream.VideoSpec(size, resolution, duration, audio, rootModel)
 
 	var (
 		acct    string
@@ -192,9 +196,9 @@ func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		cred := s.pool.Credential(a.Name)
 		actx := upstream.WithAccount(r.Context(), a.Name)
-		chatID, err := s.up.NewChatTyped(actx, cred, model, spec.ChatType)
+		chatID, err := s.up.NewChatTyped(actx, cred, chatModel, spec.ChatType)
 		if err == nil {
-			body := upstream.BuildSubmitSpec(chatID, "", model, req.Prompt, "fast", spec, time.Now())
+			body := upstream.BuildSubmitSpec(chatID, "", chatModel, req.Prompt, "fast", spec, time.Now())
 			taskID, err = s.up.SubmitVideo(actx, cred, body)
 			if err == nil {
 				acct = a.Name

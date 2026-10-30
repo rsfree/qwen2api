@@ -722,6 +722,27 @@ GET https://sg-entitlement.qwen.com/api/entitlement/credits/credits/history
 - 注册口径：`info.is_active != false` 且 `info.meta.chat_type` 含 `t2t`。
 - 匿名访问该端点会吃到 WAF（HTTP 405 的拦截页）⇒ **必须带凭据**。
 
+### 5.1 没有独立的图片/视频模型 id（🔴 2026-10-30 实测）
+
+这 7 个模型**每一个的 `chat_type` 都同时含 `t2t` / `t2i` / `t2v`**（个别还有
+`image_edit` / `search` / `slides`…）。也就是说上游**不存在** `qwen-image-3.0`、
+`happyhorse11` 这样的模型条目 —— 它们是"内核"而不是"模型"：
+
+| 概念 | 藏在哪 | 取值（实测） |
+|---|---|---|
+| 图片内核 | `extra.meta.model` | `qwen-image-3.0` |
+| 图片编辑 | `chat_type` / `sub_chat_type` | `image_edit` |
+| 视频内核 | `messages[0].extra.meta.biz_data` → `req.rootModel` | `happyhorse11` |
+
+所以：
+
+- 把 `qwen-image-3.0` 填进 `chats/new` 的 `models[]` 会 **Bad_Request**；
+- 前端 UI 的模型下拉框（`Qwen-Image 3.0` / `HappyHorse 1.1`）是**客户端自己的文案**，
+  与 `models[]` 里的 chat 模型是两套东西；
+- 本仓在 `/v1/models` 里把这两个内核包装成**生成模型条目**（`media: image|video`
+  + `endpoint`），请求进来后再翻译成上面两个字段。翻译逻辑见
+  `internal/server/mediamodels.go`。
+
 ---
 
 ## 6. 附件（未实现）

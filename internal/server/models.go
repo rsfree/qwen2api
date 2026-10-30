@@ -28,6 +28,11 @@ type ModelInfo struct {
 	Verified bool   `json:"verified"`
 	Notes    string `json:"notes,omitempty"`
 	Context  int    `json:"context_length,omitempty"`
+	// Endpoint 调用该模型该走的端点。生成模型（图片/视频）不能走 chat，
+	// 这个字段就是给客户端看的"该往哪发"。文本模型留空 = /v1/chat/completions。
+	Endpoint string `json:"endpoint,omitempty"`
+	// Params 该模型的可选参数（尺寸 / 分辨率 / 档位单价），只有生成模型有。
+	Params map[string]any `json:"params,omitempty"`
 }
 
 // builtinModels 内置清单 = 2026-10-28 实测 `GET /api/v2/models/` 的 7 个 t2t 模型。
@@ -165,7 +170,8 @@ func (c *ModelCache) Info() map[string]any {
 
 // handleModels `GET /v1/models`。
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	list := s.models.List(r.Context())
+	// 文本模型来自上游缓存，图片/视频模型由本网关补上（见 mediaModels）。
+	list := s.modelList(r.Context())
 	if len(list) == 0 {
 		// 理论上不会发生（内置清单兜底）；真发生了也要给合法空清单而不是 500。
 		list = []ModelInfo{}
