@@ -62,14 +62,22 @@ type Account struct {
 	creditDailyAt time.Time
 	// egressIP / egressAt 最近一次实测的出口公网 IP（上游眼中的来源）。
 	// 空 = 还没探测过；面板流水与账号列表靠它回答"这次是从哪个 IP 出去的"。
-	egressIP string
-	egressAt time.Time
+	egressIP      string
+	egressAt      time.Time
 	cooldownUntil time.Time
 	failures      int
 	lastUsed      time.Time
 	served        int64
 	lastError     string
 	authDead      bool
+	// needLogin 已确认只能密码重登（refresh_token 被上游撤销，或从没有过票）。
+	//
+	// 两个用途，都是为了让 signin 尽量别落在请求路径上：
+	//   · AdoptCandidates 把它**插队**：趁请求还没碰到就修好；
+	//   · lessPick 把"能靠 refresh 续"的号排在它前面 —— 只要池里还有能快速
+	//     续期的号，请求就轮不到它（几百 ms vs 几秒 + 最容易吃 WAF 的 signin）。
+	// 纯内存态、不落盘：重启后按 served 重新判断即可，不必背着历史包袱。
+	needLogin bool
 }
 
 // View 面板/日志用的只读快照（不含 token）。
@@ -108,6 +116,8 @@ type View struct {
 	TokenKnown bool `json:"token_known"`
 	// HasRefresh 是否已经拿到 refresh_token（没有就只能用密码重登）。
 	HasRefresh bool `json:"has_refresh"`
+	// NeedLogin 已确认只能密码重登（票被撤销）。面板靠它看出"这个号在等后台修"。
+	NeedLogin bool `json:"need_login,omitempty"`
 	// RefreshLeftS refresh_token 还剩多少秒（RefreshKnown=false 时无意义）。
 	RefreshLeftS int  `json:"refresh_left_s"`
 	RefreshKnown bool `json:"refresh_known"`
@@ -262,6 +272,11 @@ func lessPick(a, b *Account, now time.Time) bool {
 	ai, bi := tokenAlive(a, now), tokenAlive(b, now)
 	if ai != bi {
 		return ai
+	}
+	// 都过期时，能靠 refresh 续的排前面 —— 请求路径因此几乎不会落到"只能
+	// 密码重登"的号上：前者几百毫秒，后者几秒且最容易吃 WAF（2026-11-02）。
+	if ap, bp := a.RefreshToken != "", b.RefreshToken != ""; ap != bp {
+		return ap
 	}
 	if a.served != b.served {
 		return a.served < b.served
@@ -705,6 +720,19 @@ func (p *Pool) MarkAuth(a *Account, reason string) {
 	p.save()
 }
 
+// MarkNeedLogin 记下"这个号只能密码重登了"（refresh_token 被撤销）。
+//
+// 不是把号作废，而是告诉后台：它现在只剩最贵的那条路，请**插队**修
+// （见 AdoptCandidates），别等请求撞上再花几秒 signin。换到新票后
+// SetToken 会自动清掉这个标记。
+func (p *Pool) MarkNeedLogin(name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if a := p.lookupLocked(name); a != nil {
+		a.needLogin = true
+	}
+}
+
 // MarkQuota 额度/积分耗尽：软冷却（该号今天没量了，退避到下一个窗口）。
 func (p *Pool) MarkQuota(a *Account, reason string) {
 	p.cooldown(a, reason, 0)
@@ -756,6 +784,7 @@ func (p *Pool) SetToken(name, cred string) bool {
 			}
 			a.authMode = ""
 			a.authDead = false
+			a.needLogin = false // 换到新票了，不再需要密码重登
 			a.failures = 0
 			a.cooldownUntil = time.Time{}
 			a.lastError = ""
@@ -858,9 +887,10 @@ func (p *Pool) Snapshot() []View {
 			CreditsLimit:  p.conf().MaxVideoCreditsPerDay,
 			CreditBalance: a.creditBalance,
 			CreditKnown:   a.creditKnown,
-		CreditDailyAt: dailyAt(a),
-		EgressIP:      a.egressIP,
+			CreditDailyAt: dailyAt(a),
+			EgressIP:      a.egressIP,
 			HasRefresh:    a.RefreshToken != "",
+			NeedLogin:     a.needLogin,
 		}
 		if !a.tokenExp.IsZero() {
 			v.TokenKnown = true
@@ -873,6 +903,10 @@ func (p *Pool) Snapshot() []View {
 		switch {
 		case a.authDead:
 			v.State = "auth_dead"
+		case a.needLogin:
+			// 只能密码重登：不是坏号，但也还没修好 —— 单独一个状态，
+			// 否则面板会把它算进"可用"，看着正常却永远不被选中。
+			v.State = "need_login"
 		case now.Before(a.cooldownUntil):
 			v.State = "cooling"
 			v.CooldownLeftS = int(a.cooldownUntil.Sub(now).Seconds())
@@ -1020,6 +1054,7 @@ func (p *Pool) HotNames(limit int) []string {
 		name   string
 		served int64
 		exp    time.Time
+		alive  bool
 	}
 	p.mu.RLock()
 	now := time.Now()
@@ -1029,14 +1064,23 @@ func (p *Pool) HotNames(limit int) []string {
 		if a.authDead || now.Before(a.cooldownUntil) {
 			continue
 		}
-		if !tokenAlive(a, now) {
-			continue
-		}
-		rows = append(rows, row{name: a.Name, served: a.served, exp: a.tokenExp})
+		rows = append(rows, row{
+			name: a.Name, served: a.served, exp: a.tokenExp,
+			alive: tokenAlive(a, now),
+		})
 	}
 	p.mu.RUnlock()
 
+	// alive 优先，其次 served 升序 —— 与 lessPick 同序。
+	//
+	// 🔴 不能只要 alive 的（2026-11-02 修）：全池凭据同时过期时它会返回空，
+	// 会话预热和连接保活直接停摆，而 Pick 仍然会选这些号（lessPick 里
+	// "活着"只是优先，不是过滤）。结果是"最需要预热的时候偏偏不预热"。
+	// 过期的号照旧往下走：调用方会跳过建会话（要凭据），但连接保活不需要。
 	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].alive != rows[j].alive {
+			return rows[i].alive
+		}
 		if rows[i].served != rows[j].served {
 			return rows[i].served < rows[j].served
 		}

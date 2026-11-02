@@ -29,6 +29,13 @@ type Client struct {
 	http *http.Client
 }
 
+// IdleConnTimeout 空闲连接保留时长。
+//
+// 🔴 提成导出常量是因为预热要**跟它对齐**：连接保活必须在这个时间内把目标号
+// 轮一遍，否则先保活的那批早就被回收了，等于白跑一轮代理往返。
+// 改这里就要同时看 keepalive.go 的 warmBatch。
+const IdleConnTimeout = 90 * time.Second
+
 // New 构造客户端。连接池按"多账号并发"调优：每主机 32 空闲连接，
 // 否则流式请求会互相排队等连接。
 func New(cfg config.Upstream) *Client {
@@ -40,7 +47,7 @@ func New(cfg config.Upstream) *Client {
 		}).DialContext,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   32,
-		IdleConnTimeout:       90 * time.Second,
+		IdleConnTimeout:       IdleConnTimeout,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ExpectContinueTimeout: time.Second,
 		ForceAttemptHTTP2:     true,
@@ -125,6 +132,10 @@ func (c *Client) OpenChat(ctx context.Context, cred string, body SubmitBody) (*S
 		return nil, err
 	}
 	req.Header = c.buildHeaders(cred, c.chatReferer(body.ChatID))
+	// 🔴 SSE 显式要求不压缩。Go 默认会加 `Accept-Encoding: gzip` 并透明解压，
+	// 而 CDN/nginx 要攒够一个 buffer 才能压出一块 —— 那段缓冲正好落在首字之前。
+	// 上游本来也不压 text/event-stream，这条只是把"别缓"说明白。
+	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -156,6 +167,31 @@ func (c *Client) OpenChat(ctx context.Context, cred string, body SubmitBody) (*S
 		parser: NewParser(),
 		buf:    make([]byte, 16<<10),
 	}, nil
+}
+
+// WarmConn 用一个极轻的请求保住该账号出口上的 TCP+TLS 连接。
+//
+// 为什么值得（2026-11-02 实测）：走住宅 SOCKS5 时，新建一条到 chat.qwen.ai
+// 的连接要 **2.1 秒**（其中 TLS 握手 1.7 秒），复用只要 **0.38 秒**。
+// 而 transport 的 IdleConnTimeout 是 90 秒 —— 低流量下每个请求都在付这笔过路费。
+//
+// 用 HEAD /：不需要凭据、不消耗模型额度，但照样走该账号的固定出口，
+// 所以保住的正是"下一次真实请求要用的那条连接"。
+func (c *Client) WarmConn(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, c.base+"/", nil)
+	if err != nil {
+		return err
+	}
+	req.Header = c.buildHeaders("", c.base+"/")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return transportErr("warm-conn", err)
+	}
+	// 必须把 body 读完再关，否则连接会以"未读净"被丢弃，等于白连一次。
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.Body.Close()
 }
 
 // SubmitVideo `POST /api/v2/chat/completions?chat_id=`（stream:false）—— 同步返回 task_id。

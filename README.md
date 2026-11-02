@@ -215,8 +215,10 @@ curl -s localhost:8400/v1/images/generations \
 > ⚠️ **产物链接的两个坑**（实测，本仓已兜住）：
 > 1. **刚生成的那几秒 CDN 还没转存完** —— 立刻下会得到 404 + 226 字节 HTML「死链」。
 >    `b64_json` 模式带退避重试；`url` 模式原样转出（image-adapter 同口径）。
-> 2. **下载要带 `Referer: https://chat.qwen.ai/`**（视频产物尤其必需），否则同样是 404。
->    网关的图片 b64 下载与视频 `/content` 代理都自动带。
+> 2. **脚本下载必须用浏览器 UA** —— `curl/*` 这类 UA 会被 WAF 直接挡成 404，返回体和
+>    「文件还没转存」**一模一样**（226 字节 Tengine 页），极容易误诊。Referer 反而是
+>    「要么不带、要么带 `https://chat.qwen.ai/`」：带面板域名等外站 Referer 会 403。
+>    网关的图片 b64 下载与视频 `/content` 代理都自带浏览器 UA，不用客户端操心。
 > 3. 判真假看 **magic bytes**，不看 `Content-Type`（真图可能回 `application/octet-stream`）。
 
 ### `POST /v1/videos/generations` + `GET /v1/videos/{id}`
@@ -238,9 +240,16 @@ curl -s localhost:8400/v1/videos/video_50079dcb… -H 'Authorization: Bearer <ke
 curl -s localhost:8400/v1/videos/video_50079dcb…/content -H 'Authorization: Bearer <key>' -o out.mp4
 ```
 
-> 🔴 **上游 CDN 有防盗链**：拿 `url` 里的裸链接直接下会得到 404（226 字节 HTML）。
-> 所以响应里额外给 `gateway_url`，网关替你带 `Referer` 取回；直接用 `url` 的话，
-> 客户端必须自己加 `Referer: https://chat.qwen.ai/`。
+> 🔴 **上游 CDN 前面有 WAF，不是普通防盗链**（2026-10-31 实测矩阵）：
+>
+> | 请求 | 结果 |
+> |---|---|
+> | 浏览器 UA，**不带** Referer | **200 / 206**（图片、视频都能直开） |
+> | 浏览器 UA + 外站 Referer（面板域名） | **403** |
+> | `curl/*` UA（Referer 对错都一样） | **404**（226 字节 HTML，与死链同形） |
+>
+> 所以：**浏览器点开就是正常的**，不需要任何 Referer；脚本/客户端下载换掉 curl 默认 UA 即可。
+> 响应里仍额外给 `gateway_url`，网关自带浏览器 UA 代取，省得客户端踩 UA 的坑。
 
 档位（上游按 `(resolution, duration)` 独立计价，**且价格随模型版本变**）：
 
@@ -393,7 +402,7 @@ Claude Code / Cline 这类客户端把 Base URL 指向本服务即可。按 Anth
 ```json
 "panel": {
   "key": "sk-panel-change-me",
-  "session_hours": 12,
+  "session_hours": 720,
   "session_secret": "多副本部署时必须配同一个"
 }
 ```
@@ -404,6 +413,8 @@ Claude Code / Cline 这类客户端把 Base URL 指向本服务即可。按 Anth
   单 Key 部署升级后不用改配置；
 - 提交后服务端换一个 **HttpOnly + SameSite=Lax 的签名 cookie**（HMAC-SHA256），
   明文密钥**不落 localStorage**（旧版会存，等于把长期凭据交给 XSS）；
+- 会话默认 **30 天**（`panel.session_hours` 可调）；签名密钥留空时**由凭据派生**，
+  所以**重启/发版不掉线**（配了 `session_secret` 则以它为准，用于轮换）；
 - `?key=…` 深链会先拿它换会话，再把参数从地址栏抹掉；
 - 脚本 / CI 仍可直接带 `Authorization: Bearer <key>`、`x-api-key` 或 `?key=` 调 `/panel/api/*`；
 - 🔴 **面板密钥只在面板生效，`/v1` 不认它** —— 面板能删账号，权限边界必须清晰；

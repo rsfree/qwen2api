@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"sync"
 	"time"
 )
@@ -26,11 +27,20 @@ type Entry struct {
 	OutputTokens int       `json:"output_tokens"`
 	Chars        int       `json:"chars"`
 	FirstByteMS  int64     `json:"first_byte_ms"`
-	DurationMS   int64     `json:"duration_ms"`
-	Error        string    `json:"error,omitempty"`
-	Degraded     string    `json:"degraded,omitempty"`
-	ClientIP     string    `json:"client_ip,omitempty"`
-	UserAgent    string    `json:"user_agent,omitempty"`
+	// SubmitMS 提交（POST chat/completions）→ 收到上游响应头。
+	// 这一段是**上游推理排队**，不含建会话、不含我们的解析。
+	SubmitMS int64 `json:"submit_ms,omitempty"`
+	// FirstTextMS 提交 → 第一个正文字符（不含 role 帧与心跳）。
+	// 与 SubmitMS 的差 = "上游发完头之后多久才吐第一个字"。
+	//
+	// 🔴 为什么单独记：客户端看到的"首字"常被**首个 role 帧**（我们立刻下发）
+	// 掩盖成建连时间，真正决定体感的是 FirstTextMS。
+	FirstTextMS int64  `json:"first_text_ms,omitempty"`
+	DurationMS  int64  `json:"duration_ms"`
+	Error       string `json:"error,omitempty"`
+	Degraded    string `json:"degraded,omitempty"`
+	ClientIP    string `json:"client_ip,omitempty"`
+	UserAgent   string `json:"user_agent,omitempty"`
 	// ChatHit 本次是否命中了预建会话（命中省掉一次 chats/new）。
 	ChatHit bool `json:"chat_hit,omitempty"`
 	// ChatMS 建会话耗时（毫秒）：命中为 0，未命中为真实值。
@@ -58,6 +68,20 @@ type Stats struct {
 	StartedAt  time.Time      `json:"started_at"`
 	TOKENS     int            `json:"tokens_total"`
 	AvgLatency int64          `json:"avg_duration_ms"`
+	// TTFT 端到端首字分位（收到请求 → 第一个正文/思考增量）。
+	// 别看 avg：首字是长尾分布，均值会被个别 10s 的请求拉飞。
+	TTFT TTFTStat `json:"ttft"`
+	// UpstreamTTFT 上游首字分位（提交 → 第一个正文）。
+	// 与 TTFT 的差 = 选号 + 建会话 + 建连 + 提交前的那段时间。
+	UpstreamTTFT TTFTStat `json:"upstream_ttft"`
+}
+
+// TTFTStat 一组首字样本的分位（样本来自环形流水，不是全量）。
+type TTFTStat struct {
+	N   int   `json:"n"`
+	P50 int64 `json:"p50_ms"`
+	P95 int64 `json:"p95_ms"`
+	Max int64 `json:"max_ms"`
 }
 
 // Log 环形流水。
@@ -134,6 +158,14 @@ func (l *Log) Add(e Entry) {
 		line := fmt.Sprintf("[req] %s %s model=%s acct=%s stream=%v status=%d tok=%d/%d %dms",
 			e.ID, e.Path, e.Model, e.Account, e.Stream, e.Status,
 			e.PromptTokens, e.OutputTokens, e.DurationMS)
+		// 首字拆两段：submit=提交到上游响应头，first=提交到第一个正文。
+		// 两个都打出来，才能一眼看出慢在"上游排队"还是"上游吐字"。
+		if e.SubmitMS > 0 {
+			line += fmt.Sprintf(" submit=%dms", e.SubmitMS)
+		}
+		if e.FirstTextMS > 0 {
+			line += fmt.Sprintf(" first=%dms", e.FirstTextMS)
+		}
 		if e.EgressIP != "" {
 			line += " egress=" + e.EgressIP
 		}
@@ -198,7 +230,42 @@ func (l *Log) Stats() Stats {
 	if l.total > 0 {
 		s.AvgLatency = l.latency / int64(l.total)
 	}
+	// 首字分位：样本来自环形流水（最多 capacity 条），够看趋势。
+	// 只统计"真的出了字"的请求 —— 失败的 FirstByteMS 为 0，混进来会把分位拉低。
+	n := l.capacity
+	if !l.filled {
+		n = l.next
+	}
+	var e2e, up []int64
+	for i := 0; i < n; i++ {
+		e := l.entries[i]
+		if e.Time.IsZero() {
+			continue
+		}
+		if e.FirstByteMS > 0 {
+			e2e = append(e2e, e.FirstByteMS)
+		}
+		if e.FirstTextMS > 0 {
+			up = append(up, e.FirstTextMS)
+		}
+	}
+	s.TTFT = statOf(e2e)
+	s.UpstreamTTFT = statOf(up)
 	return s
+}
+
+// statOf 算 P50 / P95 / Max。样本少时就是原值，不做插值。
+func statOf(v []int64) TTFTStat {
+	if len(v) == 0 {
+		return TTFTStat{}
+	}
+	sort.Slice(v, func(i, j int) bool { return v[i] < v[j] })
+	return TTFTStat{
+		N:   len(v),
+		P50: v[len(v)*50/100],
+		P95: v[min(len(v)-1, len(v)*95/100)],
+		Max: v[len(v)-1],
+	}
 }
 
 // JSON 便于面板直接序列化。

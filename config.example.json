@@ -63,13 +63,13 @@
       "direct_when_missing": true
     }
   },
-  "// panel": "面板登录：默认密钥（key，也可 QWEN2API_PANEL_KEY）。登录后换 HttpOnly 会话，明文不留在浏览器；也认 api_keys 里任意一把（单 Key 部署不用额外配）。想用账密就配 password_hash（`qwen2api -passwd '<密码>'`）或 password，登录框会多一个切换入口。🔴 panel.key 只在面板生效，/v1 不认。session_secret 留空则每次启动随机（重启需重登），多副本必须配同一个",
+  "// panel": "面板登录：默认密钥（key，也可 QWEN2API_PANEL_KEY）。登录后换 HttpOnly 会话，明文不留在浏览器；也认 api_keys 里任意一把（单 Key 部署不用额外配）。想用账密就配 password_hash（`qwen2api -passwd '<密码>'`）或 password，登录框会多一个切换入口。🔴 panel.key 只在面板生效，/v1 不认。session_secret 留空则由凭据派生（重启/发版不掉线），多副本凭据一致即互通；显式配置用于轮换",
   "panel": {
     "key": "sk-panel-change-me",
     "username": "admin",
     "password": "",
     "password_hash": "",
-    "session_hours": 12,
+    "session_hours": 720,
     "session_secret": ""
   },
   "pool": {
@@ -86,7 +86,17 @@
     "// max_video_per_day": "单账号每日视频任务个数上限，0 = 不限，默认 1（兜底防护）",
     "max_video_per_day": 1,
     "// max_video_credits_per_day": "单账号每日视频积分预算，0 = 不启用（默认）。现在会读账号真实余额（upstream.entitlement_base_url），余额才是真口径；这条只在你想额外加一道日上限时才填",
-    "max_video_credits_per_day": 0
+    "max_video_credits_per_day": 0,
+    "// keepalive": "预热节奏。全部支持热更（面板改完下一轮 tick 生效，不用重启）。tick_s = 轮询间隔；token_window_s = access 剩余多久开始续（必须 > tick_s）；conc_factor = 会话/连接覆盖 = 并发峰值 × 它 + 4（会话和连接只服务同时在跑的请求，不需要按 target_max 覆盖）；adopt_batch = 每轮补几个 refresh_token（要密码登录，故意摊慢）；parallel = 单批并发；batch_max = 单轮上限；target_max = token 预热目标上限（热满时间必须小于 access 的 15 分钟 TTL）",
+    "keepalive": {
+      "tick_s": 20,
+      "token_window_s": 180,
+      "conc_factor": 2,
+      "adopt_batch": 12,
+      "parallel": 4,
+      "batch_max": 48,
+      "target_max": 512
+    }
   },
   "// accounts": "凭据两种给法：① token（Barear 或 cookie jar，启动时自动探测形态）；② email+password（signin→refresh 自动换 access_token，失效自动重登）。注意 token 与 password 可同时给，password 用于续期。",
   "accounts": [

@@ -22,6 +22,9 @@ import (
 //go:embed index.html
 var indexHTML string
 
+//go:embed favicon.svg
+var faviconSVG []byte
+
 // Backend 面板需要的能力（由 server.Server 实现）。
 //
 // 写操作（导入/删除/重登）都在 Backend 上而不是面板里直接改池：
@@ -108,6 +111,12 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write([]byte(indexHTML))
+	// 图标是纯静态资源，且刻意排在鉴权之后（鉴权闸门不 return，登录页也能拿到）：
+	// 未登录时浏览器标签页同样要有图标，否则登录框旁边是个空白方块。
+	case r.URL.Path == "/panel/favicon.svg":
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(faviconSVG)
 	case r.URL.Path == "/panel/api/overview":
 		if !p.authorized(r) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})

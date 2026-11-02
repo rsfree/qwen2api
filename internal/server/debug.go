@@ -24,7 +24,8 @@ func (s *Server) DebugHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimPrefix(r.URL.Path, "/panel/api/debug")
 
-		// 媒体代取：CDN 有防盗链，<img src> 直连会 404（浏览器带的是面板域名的 Referer）。
+		// 媒体代取：CDN 的 Referer 白名单不认面板域名 —— <img src> 直连会拿到 403
+		// （浏览器会给面板页面发起的请求带上 `Referer: <面板域名>`）。
 		if p == "/media" {
 			s.handleDebugMedia(w, r)
 			return

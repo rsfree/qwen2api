@@ -92,8 +92,7 @@ func TestChatPoolDisabled(t *testing.T) {
 func TestChatHitSkipsNewChatCall(t *testing.T) {
 	up := newFakeUpstream(t, 0)
 	s := newTestServerWithServer(t, up, 1)
-	// per=1 ⇒ 预放满之后 Short 为 0，请求命中时不会触发异步补建，
-	// 这样才能断言"上游一次都没被打"。
+	// per=1：命中后池子会空，此时**只允许后台补货**，请求路径上不许等它。
 	// 用热更接口改配置（conf() 返回的是快照，不能就地赋值）。
 	cfg := s.conf()
 	cfg.Pool.WarmChatsPerAccount = 1
@@ -108,12 +107,18 @@ func TestChatHitSkipsNewChatCall(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("应成功，得到 %d: %s", rec.Code, rec.Body.String())
 	}
-	if up.newChats != 0 {
-		t.Fatalf("命中预建会话就不该再调 chats/new，实际 %d 次", up.newChats)
-	}
-	// 提交必须用池里那一条。
+	// 提交必须用池里那一条 —— 这是"命中生效"的直接证据。
 	if got, _ := up.gotSubmit["chat_id"].(string); got != "chat-pre" {
 		t.Fatalf("提交用的 chat_id 应为 chat-pre，得到 %q", got)
+	}
+	// 命中会把池子抽空，所以**后台**要补一个（否则下一次必然 miss，
+	// 命中率被锁死在 50%）。补货是异步的，允许它晚一点发生。
+	deadline := time.Now().Add(time.Second)
+	for up.newChats == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if up.newChats != 1 {
+		t.Fatalf("命中后应在后台补 1 个会话，实际 %d 次", up.newChats)
 	}
 }
 
@@ -163,9 +168,9 @@ func TestImageStillWorksWithoutChatPool(t *testing.T) {
 func TestChatPoolHitRateStat(t *testing.T) {
 	p := NewChatPool(1, time.Minute)
 	p.Put("a0", "t2t", "c1")
-	p.Take("a0", "t2t")   // 命中
-	p.Take("a0", "t2t")   // 未命中（取出即删）
-	p.Take("a1", "t2t")   // 未命中（跨号）
+	p.Take("a0", "t2t") // 命中
+	p.Take("a0", "t2t") // 未命中（取出即删）
+	p.Take("a1", "t2t") // 未命中（跨号）
 
 	st := p.Stat()
 	if st.Hit != 1 || st.Miss != 2 {
@@ -176,5 +181,30 @@ func TestChatPoolHitRateStat(t *testing.T) {
 	}
 	if st.Ready != 0 {
 		t.Fatalf("取完应剩 0，得到 %d", st.Ready)
+	}
+}
+
+// 补货名额：同一个号同一时刻只允许一个在途补货。
+//
+// 没有它的话，突发流量下每个命中都会触发一次 chats/new，
+// 而 Put 的 per 上限又把多余的丢掉 —— 上游调用量翻倍、全白打。
+func TestChatPoolTryBuildSingleFlight(t *testing.T) {
+	p := NewChatPool(1, time.Minute)
+	if !p.TryBuild("a0", "t2t") {
+		t.Fatal("第一次应拿到名额")
+	}
+	if p.TryBuild("a0", "t2t") {
+		t.Fatal("在途时不该再拿到第二个名额")
+	}
+	if !p.TryBuild("a1", "t2t") {
+		t.Fatal("不同账号互不影响")
+	}
+	p.BuildDone("a0", "t2t")
+	if !p.TryBuild("a0", "t2t") {
+		t.Fatal("释放后应能重新拿到")
+	}
+	// 关闭预建时一律不发名额：否则会往一个没人用的池子里灌会话。
+	if NewChatPool(0, time.Minute).TryBuild("a0", "t2t") {
+		t.Fatal("per=0 时不该发名额")
 	}
 }

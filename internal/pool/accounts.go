@@ -133,6 +133,11 @@ func (p *Pool) SetRefresh(name, refreshToken string) bool {
 	} else {
 		a.refreshExp = time.Time{}
 	}
+	// 有了新票就不再需要密码重登 —— 面板导入、手工改凭据都会走到这里，
+	// 不清会把一个已经能自愈的号永远排在选号最后。
+	if a.RefreshToken != "" {
+		a.needLogin = false
+	}
 	p.mu.Unlock()
 	p.save()
 	return true
@@ -242,11 +247,12 @@ func (p *Pool) AdoptCandidates(target, limit int) []string {
 		return nil
 	}
 	type row struct {
-		name     string
-		served   int64
-		inflight int32
-		lastUsed time.Time
-		exp      time.Time
+		name      string
+		served    int64
+		inflight  int32
+		lastUsed  time.Time
+		exp       time.Time
+		needLogin bool
 	}
 	p.mu.RLock()
 	rows := make([]row, 0, len(p.accounts))
@@ -257,12 +263,18 @@ func (p *Pool) AdoptCandidates(target, limit int) []string {
 		rows = append(rows, row{
 			name: a.Name, served: a.served, exp: a.tokenExp,
 			inflight: atomic.LoadInt32(&a.inflight), lastUsed: a.lastUsed,
+			needLogin: a.needLogin,
 		})
 	}
 	p.mu.RUnlock()
 
-	// 与 pick / WarmCandidates 同序（见上面那条注释）。
+	// 与 pick / WarmCandidates 同序（见上面那条注释），但"已知只能密码重登"
+	// 的号插队：它们已经坏了、正在等修，按 served 排队可能一直拖到请求撞上
+	// —— 那一发要多花几秒 signin，正是要避免的。
 	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].needLogin != rows[j].needLogin {
+			return rows[i].needLogin
+		}
 		if rows[i].served != rows[j].served {
 			return rows[i].served < rows[j].served
 		}

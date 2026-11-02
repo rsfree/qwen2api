@@ -46,11 +46,20 @@ type opened struct {
 	// chatHit / chatMS 建会话的来源与耗时（流水观测：命中省掉一次 chats/new）。
 	chatHit bool
 	chatMS  int64
+	// submitMS 提交 → 上游响应头的耗时（纯上游排队，不含建会话）。
+	submitMS int64
+	// submitAt 提交的时刻：首字要从这里算，而不是从"收到请求"算，
+	// 否则建会话/选号的耗时会把上游首字这一项污染掉。
+	submitAt time.Time
 }
 
 // handleChat `POST /v1/chat/completions`。
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	// 并发采样给预热用：会话/连接的覆盖范围按"同时在跑的请求数"算，
+	// 而不是按 token 的 target（后者大得多，多保活的全是白打的代理往返）。
+	s.noteInflight(1)
+	defer s.noteInflight(-1)
 	entry := reqlog.Entry{
 		ID:        "req-" + upstream.UUID()[:8],
 		Path:      "/v1/chat/completions",
@@ -150,6 +159,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if sd != nil {
 		entry.ChatHit = sd.chatHit
 		entry.ChatMS = sd.chatMS
+		entry.SubmitMS = sd.submitMS
 	}
 	if err != nil {
 		entry.Account = accountOfErr(err)
@@ -267,12 +277,11 @@ func openFail(lastAcct string, err error) error {
 func (s *Server) takeChat(ctx context.Context, acctName, cred, model, chatType string) (string, bool, int64, error) {
 	// 只有 t2t 值得维护池子（占请求绝大多数）；t2i / image_edit / t2v 一次
 	// 就要 50~90 秒，建会话那 2.4s 占比可以忽略，补了纯属白花上游调用。
-	refill := chatType == "t2t" && s.chats.Short(acctName, chatType) > 0
 	if id, ok := s.chats.Take(acctName, chatType); ok {
-		// 取出即删 ⇒ 立刻异步补一个，保持"下一个请求也能命中"。
-		if refill {
-			go s.prewarmChat(ctx, acctName, cred, model, chatType)
-		}
+		// 🔴 补货的判断必须在 **Take 之后**：命中会把池子抽空，
+		// 用取之前的 Short 判断，看到的是"还满着"⇒ 永不补货，
+		// 命中率被锁死在 50%（命中一次、下一次必然现建）。
+		s.refillChat(ctx, acctName, cred, model, chatType)
 		return id, true, 0, nil
 	}
 	// 记下现建的真实耗时：这是"命中能省多少"的唯一可信来源
@@ -286,10 +295,31 @@ func (s *Server) takeChat(ctx context.Context, acctName, cred, model, chatType s
 	if err != nil {
 		return "", false, took.Milliseconds(), err
 	}
-	if refill {
-		go s.prewarmChat(ctx, acctName, cred, model, chatType)
-	}
+	s.refillChat(ctx, acctName, cred, model, chatType)
 	return id, false, took.Milliseconds(), nil
+}
+
+// refillChat 后台补一个空会话，让下一个请求也能命中。
+//
+// 三道闸，缺一不可：
+//  1. 只对 t2t 维护（其余类型建会话占比可忽略）；
+//  2. 池子已经够了就不补（否则等于每个请求都多打一次上游）；
+//  3. 同一个号同一时刻只允许一个补货在途 —— 突发流量下若每个请求都补，
+//     上游 chats/new 调用量会直接翻倍，而 Put 又会把多余的那几个丢弃。
+func (s *Server) refillChat(ctx context.Context, acctName, cred, model, chatType string) {
+	if chatType != "t2t" || !s.chats.Enabled() {
+		return
+	}
+	if s.chats.Short(acctName, chatType) == 0 {
+		return
+	}
+	if !s.chats.TryBuild(acctName, chatType) {
+		return
+	}
+	go func() {
+		defer s.chats.BuildDone(acctName, chatType)
+		s.prewarmChat(ctx, acctName, cred, model, chatType)
+	}()
 }
 
 // prewarmChat 后台建一个空会话放进池子。
@@ -335,11 +365,16 @@ func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model,
 		return nil, err
 	}
 	body := upstream.BuildSubmitSpec(chatID, "", model, prompt, gear, attempt, time.Now())
+	tSubmit := time.Now()
 	st, err := s.up.OpenChat(actx, cred, body)
+	submitMS := time.Since(tSubmit).Milliseconds()
 	if err != nil {
 		return nil, err
 	}
-	return &opened{stream: st, chatID: chatID, chatHit: hit, chatMS: chatMS}, nil
+	return &opened{
+		stream: st, chatID: chatID, chatHit: hit, chatMS: chatMS,
+		submitMS: submitMS, submitAt: tSubmit,
+	}, nil
 }
 
 // visionFiles 把图片引用转成上游 files[] 条目。
@@ -420,8 +455,10 @@ func (s *Server) blobBase(r *http.Request) string {
 //
 // 🔴 为什么上传前必须做（2026-10-30 实测）：`getstsToken` 对**过期的 Bearer
 // 不返回 401**，而是 HTTP 200 + WAF 挑战页。于是：
-//   · "401 才续期" 的兜底在图片上传路径上完全失效；
-//   · 错误被分类成 KindRisk ⇒ 好号被软冷却（实测一次测试误伤 21 个号）。
+//
+//	· "401 才续期" 的兜底在图片上传路径上完全失效；
+//	· 错误被分类成 KindRisk ⇒ 好号被软冷却（实测一次测试误伤 21 个号）。
+//
 // access TTL 只有 900s，而保活只热最前面几个号 ⇒ 池里绝大多数号的 token
 // 长年处于"已过期"状态（实测 2863/3135），所以这不是边角情况而是常态。
 func (s *Server) ensureFresh(ctx context.Context, acct *pool.Account, cred string) string {
@@ -475,6 +512,14 @@ func mergeAttachments(stored, uploaded []upstream.FileRef) []upstream.FileRef {
 // 为什么这个顺序很重要：access token 只有 15 分钟，而 signin 是整条链路里
 // 最贵、最容易吃 WAF 的一步。refresh_token 换一张只要几百毫秒、不碰密码。
 func (s *Server) relogin(ctx context.Context, acct *pool.Account) bool {
+	// 与预热/后台重登串行（见 lockRefresh）：两边同时换同一个号，会把对方
+	// 刚拿到的票作废 —— 一次多余的 401 就要用密码 signin 来收尾。
+	unlock := s.lockRefresh(acct.Name)
+	defer unlock()
+	// 等锁期间可能已经被预热续好了：直接复用，别再换一张。
+	if s.tokenFresh(acct.Name, time.Minute) {
+		return true
+	}
 	// ① 有 refresh_token 就先走这条
 	if rt := s.pool.RefreshToken(acct.Name); rt != "" {
 		if access, next, err := s.up.RefreshWithToken(upstream.WithAccount(ctx, acct.Name), rt); err == nil {
@@ -592,6 +637,7 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 		if ev.Reasoning != "" && s.conf().ReasoningEnabled() {
 			if !firstByte {
 				entry.FirstByteMS = time.Since(start).Milliseconds()
+				entry.FirstTextMS = time.Since(sd.submitAt).Milliseconds()
 				firstByte = true
 			}
 			reasoningLen += len([]rune(ev.Reasoning))
@@ -603,6 +649,7 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 		if ev.Text != "" {
 			if !firstByte {
 				entry.FirstByteMS = time.Since(start).Milliseconds()
+				entry.FirstTextMS = time.Since(sd.submitAt).Milliseconds()
 				firstByte = true
 			}
 			chars += len([]rune(ev.Text))

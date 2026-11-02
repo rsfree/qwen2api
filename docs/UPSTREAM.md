@@ -475,11 +475,16 @@ HTTP 200、SSE 正常收流、`phase` 是普通的 `answer`。识别标志只有
 | 现象 | 原因 | 处置 |
 |---|---|---|
 | 刚出图立刻下 ⇒ **404 + 226 字节 HTML** | CDN 异步转存未就绪 | 退避重试（1s/3s）；或稍后再取 |
-| 带 `Referer` 才能下（视频尤其） | CDN 防盗链 | 请求加 `Referer: https://chat.qwen.ai/` |
+| `curl` 直下 ⇒ **404 + 226 字节 HTML** | WAF 把 curl 类 UA 挡成 404（伪装成死链） | 换浏览器 UA；**不需要** Referer |
+| 带外站 `Referer` ⇒ **403** | Referer 白名单只认 `chat.qwen.ai` | 不带 Referer，或带 `https://chat.qwen.ai/` |
 | `Content-Type` 不是 `image/*` | 真图可能回 `application/octet-stream` | **按 magic bytes 判**（PNG `89 50 4E 47` / MP4 `ftyp`） |
 
-> 这三条来自 image-adapter 的既有结论 + 本次复现：同一账号同一 URL，18:26 下 404、
+> 前两条来自 image-adapter 的既有结论 + 本次复现：同一账号同一 URL，18:26 下 404、
 > 19:11 下 200 且 8.5MB —— 不是签名失效，是转存延迟。
+>
+> UA/Referer 两行是 2026-10-31 对同一批 URL 的对照实测：**不带 Referer + 浏览器 UA 直接 200**，
+> 而 curl 默认 UA 无论如何都 404（隔几分钟重试仍是 404，换 UA 立刻 200）—— 说明那是 WAF
+> 拦的，不是转存没完成。两者返回体完全一致，只能靠换 UA 复测来区分。
 
 ### 4.5.7 断流后的补捞：产物其实落库在会话历史里（✅ 2026-10-31 实测）
 
@@ -897,6 +902,41 @@ POST /api/v2/files/getstsToken
 
 ---
 
+### 6.2 匿名（guest）通道：能出图，但只属于浏览器（✅ 2026-10-31 实测）
+
+站上确实开了匿名：`GET /api/v2/configs/` 里 `features.enable_anonymous = true`，
+前端也只在它为 `false` 时才禁用访客（`isDisableGuestAccess`）。但「能用」≠「能网关化」。
+
+**身份怎么给**
+- 匿名请求不带 `Authorization`，改用 `x-umid: <uuid>`（任意 UUID 均可，不校验来源）。
+- 🔴 `bx-umidtoken` 在匿名下会被当成**身份凭证**校验，占位串直接判无效：
+  `HTTP 200 + x-actual-status-code: 401`。去掉它 → 200。
+  （带真实浏览器产出的 umidtoken + 同一会话 cookie 才正常 —— 不是"可有可无的指纹"。）
+- 匿名可用模型只有 3 个：`qwen3.7-plus` / `qwen3.8-max` / `qwen3.8-omni-flash`（都含 `t2i`）。
+  用 `qwen3-max` 会 `404 Model not found`。
+
+**路由**：未登录直接开 `/c/guest` 会被前端踢去 `/auth`（守卫无条件跳转），
+"guest 页"只在浏览器里有意义。
+
+**卡点：`chats/new` 能过，`chat/completions` 过不去**
+
+| 出口 | `chats/new` | `chat/completions` |
+|---|---|---|
+| 直连 | 200（带 `x-umid`） | `RGV587` x5sec punish |
+| 本机 7897 / 池 `socks5h:2088` | 200 | `RGV587` |
+| curl_cffi `impersonate=chrome` | 200 | `RGV587` |
+
+换出口、补全浏览器 cookie（含 `isg` / `ssxmod_itna`）、换 Chrome TLS 指纹，completions 一律
+`RGV587`；极偶发放行一次，业务层仍报 `Bad_Request: Internal error...`。
+⇒ **拦截点不在 IP、不在 TLS、不在 cookie，而在 `bx-ua` / `bx-umidtoken` 的「当次现算签名」**：
+两值由页面 JS 每次生成，复用旧值等于重放。
+
+**结论**：guest 生图是浏览器专属能力。要网关化只有两条路 —— 挂真浏览器（Playwright 池），
+或逆向 bx 签名（随前端版本漂）。两者都远重于收益：3 个模型、匿名额度按 IP 计、无法并发。
+**本仓不做 guest 通道**，账号池仍是唯一可工程化路径。
+
+---
+
 ## 7. 真实链路状态
 
 | 步骤 | 结果 |
@@ -914,7 +954,7 @@ POST /api/v2/files/getstsToken
 - **token 真实寿命**：`auths/refresh` 存在说明会过期，但具体时长未观测；本仓靠 401 被动失效 + 冷却兜底。
 - **多会话并发上限**：未测。
 - **附件上传链**：✅ 已实现（STS 签名 PUT），图生图 / 文件 / chat 图片三处共用。
-- **风控阈值**：未观测到 RGV587（本仓按 429 软冷却处理）。
+- **风控阈值**：登录态未观测到 RGV587；**匿名（guest）场景必现**（见 §6.2），本仓登录态按 429 软冷却处理。
 
 ---
 

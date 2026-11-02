@@ -195,6 +195,84 @@ type Pool struct {
 	//     调到 8+ 会把号推进风控区，反而更糟。
 	// 只统计**成功出图**：实测挂起/失败不扣额度。
 	MaxImagePerDay int `json:"max_image_per_day"`
+	// Keepalive 预热节奏（全部支持热更）。
+	Keepalive Keepalive `json:"keepalive"`
+}
+
+// Keepalive 预热节奏参数。
+//
+// 为什么做成配置而不是常量：这些值最该随流量变，而号池从 5 并发涨到 200
+// 并发时，写死的节奏会让预热大面积跟不上（撞冷号 = 每请求多 1.7~3 秒）。
+// 改完下一轮 tick 生效，不用重启。
+type Keepalive struct {
+	// TickS 预热轮询间隔（秒），默认 20。
+	// 调小更跟得上突发，但上游调用更密（每轮一次续期/预建/保活）。
+	TickS int `json:"tick_s"`
+	// TokenWindowS access token 剩余寿命小于它就开始续期（秒），默认 180。
+	// 必须大于 TickS，否则会出现"过期了才开始续"。
+	TokenWindowS int `json:"token_window_s"`
+	// AdoptBatch 每轮最多补几个"还没有 refresh_token"的号，默认 12。
+	// 这一步要密码登录（最贵、最易吃 WAF），所以故意摊得很慢。
+	AdoptBatch int `json:"adopt_batch"`
+	// Parallel 单批次内的并发，默认 4。
+	Parallel int `json:"parallel"`
+	// BatchMax 单轮预热上限，默认 48。防止一轮把上游打太热。
+	BatchMax int `json:"batch_max"`
+	// TargetMax 预热目标数的上限，默认 512。
+	// 不是拍脑袋：热满时间必须 < access TTL（15 分钟），否则刚热完就开始过期。
+	TargetMax int `json:"target_max"`
+	// ConcFactor 并发系数，默认 2：会话/连接的覆盖范围 = 并发峰值 × 它 + 4。
+	//
+	// 🔴 会话和连接**不需要**按 TargetMax 覆盖：它们只服务"同时在跑的请求"。
+	// 保活 512 条连接而实际只有 5 个并发，等于每 20 秒白打 500 次代理往返。
+	ConcFactor int `json:"conc_factor"`
+}
+
+// DefaultKeepalive 预热节奏的默认值（也是缺省/非法值的回落目标）。
+func DefaultKeepalive() Keepalive {
+	return Keepalive{
+		TickS:        20,
+		TokenWindowS: 180,
+		AdoptBatch:   12,
+		Parallel:     4,
+		BatchMax:     48,
+		TargetMax:    512,
+		ConcFactor:   2,
+	}
+}
+
+// Effective 把零值/越界值归一成可用的节奏。
+//
+// 面板那边有 Min/Max 校验，但 config.json 是手写的 —— 少一个字段就吃零值，
+// 零值会让 ticker 变成 0 间隔（busy loop），必须在这里兜住。
+func (k Keepalive) Effective() Keepalive {
+	d := DefaultKeepalive()
+	if k.TickS <= 0 {
+		k.TickS = d.TickS
+	}
+	if k.TokenWindowS <= 0 {
+		k.TokenWindowS = d.TokenWindowS
+	}
+	if k.AdoptBatch <= 0 {
+		k.AdoptBatch = d.AdoptBatch
+	}
+	if k.Parallel <= 0 {
+		k.Parallel = d.Parallel
+	}
+	if k.BatchMax <= 0 {
+		k.BatchMax = d.BatchMax
+	}
+	if k.TargetMax <= 0 {
+		k.TargetMax = d.TargetMax
+	}
+	if k.ConcFactor <= 0 {
+		k.ConcFactor = d.ConcFactor
+	}
+	// 续期窗口必须大于一个 tick，否则"热完就过期"，等于没热。
+	if k.TokenWindowS <= k.TickS {
+		k.TokenWindowS = k.TickS + 60
+	}
+	return k
 }
 
 // DefaultImageTimeoutS 生图单次尝试的默认预算（秒）。
@@ -274,10 +352,14 @@ type Panel struct {
 	//   pbkdf2$<iterations>$<salt-hex>$<hash-hex>
 	// 用 `qwen2api -passwd '<密码>'` 生成。
 	PasswordHash string `json:"password_hash"`
-	// SessionHours 会话有效期（小时），默认 12。
+	// SessionHours 会话有效期（小时），默认 720（30 天）。
+	//
+	// 🔴 别往短了配：面板是 5s 轮询的，会话一到期就是「登录框自己爬出来」，
+	// 一天一次足够把控制台用成噪音源。真要收紧权限，用 session_secret 轮换。
 	SessionHours int `json:"session_hours"`
-	// SessionSecret 会话签名密钥；空 = 每次启动随机生成（重启后需重登）。
-	// 多副本部署时必须显式配同一个值，否则 A 副本签的会话在 B 上无效。
+	// SessionSecret 会话签名密钥；空 = 由凭据派生（见 SessionSeed）——
+	// 派生是确定性的，所以重启/发版不会把已登录的浏览器踢下线。
+	// 多副本部署时各副本凭据一致即可互通；显式配这个值优先级最高（轮换用）。
 	SessionSecret string `json:"session_secret"`
 }
 
@@ -307,12 +389,31 @@ func (p Panel) EffectiveUsername() string {
 	return "admin"
 }
 
-// EffectiveSessionHours 会话有效期，默认 12 小时（0 或负数按默认）。
+// EffectiveSessionHours 会话有效期，默认 720 小时（30 天，0 或负数按默认）。
 func (p Panel) EffectiveSessionHours() int {
 	if p.SessionHours > 0 {
 		return p.SessionHours
 	}
-	return 12
+	return 720
+}
+
+// SessionSeed 派生会话签名密钥的种子：面板密钥优先，其次密码 hash，最后明文密码。
+//
+// 只在「没显式配 session_secret」时用 —— 目的是让签名密钥跨重启保持稳定：
+// 以前留空就是随机，一次发版/改配置把所有浏览器踢下线，面板于是反复弹登录框。
+// 拿凭据派生不降低安全性：能拿到这些值的人本来就能直接登录。
+// 改密钥/改密码 ⇒ 种子变 ⇒ 旧会话自然失效，正好是想要的撤销语义。
+func (p Panel) SessionSeed() string {
+	if k := p.PanelKey(); k != "" {
+		return "key:" + k
+	}
+	if h := strings.TrimSpace(p.PasswordHash); h != "" {
+		return "hash:" + h
+	}
+	if pw := strings.TrimSpace(p.Password); pw != "" {
+		return "pass:" + pw
+	}
+	return ""
 }
 
 // Default 返回一份「开箱能跑」的默认配置。
@@ -358,7 +459,7 @@ func Default() Config {
 		},
 		Panel: Panel{
 			Username:     "admin",
-			SessionHours: 12,
+			SessionHours: 720,
 		},
 		Pool: Pool{
 			MaxRotate:             3,
@@ -373,6 +474,7 @@ func Default() Config {
 			// 余额才是唯一真口径；再叠一层「40 分/天」会把会员号的 270 分锁死。
 			// 想额外设上限就填正数（按账号、按自然日）。
 			MaxVideoCreditsPerDay: 0,
+			Keepalive:             DefaultKeepalive(),
 		},
 	}
 }

@@ -13,6 +13,7 @@ package server
 
 import (
 	"context"
+	"hash/fnv"
 	"log"
 	"sync"
 	"time"
@@ -21,26 +22,29 @@ import (
 )
 
 const (
-	// keepAliveTick 预热轮询间隔。
-	keepAliveTick = 20 * time.Second
-	// keepAliveWindow 剩余寿命小于它就提前换新（要大于 tick 才不会"过期了才换"）。
-	keepAliveWindow = 3 * time.Minute
-	// keepAliveParallel 单个批次内的并发。
-	keepAliveParallel = 4
-	// keepAliveAdoptBatch 单轮最多补几个"还没 refresh_token"的号。
-	// 12/轮 = 36/分钟 ⇒ 3000 个号约 80 分钟补完；补完之后每号 30 天只需保养一次。
-	keepAliveAdoptBatch = 12
 	// refreshMaintainWindow refresh_token 剩余不到这个时间就提前换新。
 	// 它 TTL 是 30 天，留 3 天余量足够吸收停机/抖动。
 	refreshMaintainWindow = 3 * 24 * time.Hour
 	// refreshMaintainBatch 单轮最多保养几个（到期最急的先做）。
 	refreshMaintainBatch = 2
+	// refreshRetryBackoff 续期失败后的静默期。
+	//
+	// 预热带是按 tick 轮转的：不压住失败号，它就会被每轮重新选中，对同一张可能
+	// 已经作废的 refresh_token 持续打 auth 域 —— 既无意义，还容易招风控。
+	// 取 5 分钟，与失败日志的去重窗口一致：一个号一次故障只留一条日志、一次处置。
+	refreshRetryBackoff = 5 * time.Minute
+	// refreshLockShards 换票互斥的分片数（见 lockRefresh）。
+	refreshLockShards = 64
 )
+
+// keepaliveTick 预热轮询间隔（配置可热更，改完下一轮生效）。
+func (s *Server) keepaliveTick() time.Duration {
+	ka := s.conf().Pool.Keepalive.Effective()
+	return time.Duration(ka.TickS) * time.Second
+}
 
 // KeepAlive 后台保活循环（由 main 启动，测试里不跑）。
 func (s *Server) KeepAlive(ctx context.Context) {
-	t := time.NewTicker(keepAliveTick)
-	defer t.Stop()
 	// 启动就先跑一轮：重启后整池凭据都过期，等 20 秒才热身会让首批请求很慢。
 	// 新凭据（access + refresh_token）必须落盘，否则重启后又要全量重登。
 	// 用"最多两分钟写一次"折中：2000+ 账号的 accounts.json 有几百 KB，
@@ -57,11 +61,22 @@ func (s *Server) KeepAlive(ctx context.Context) {
 		lastSave = time.Now()
 	}
 
-	changed := s.adoptOnce(ctx)
-	changed = s.warmOnce(ctx) || changed
-	s.prewarmChats(ctx)
-	changed = s.maintainRefresh(ctx) || changed
-	saveIfDue(changed)
+	// runOne 跑一轮完整预热：补 refresh_token → 续 access → 预建会话/保活连接
+	// → 保养 refresh_token。
+	//
+	// 🔴 peak 每轮只取一次：它是"上一轮到现在"的并发峰值，几个环节必须共用
+	// 同一个数 —— 让每个函数各调一次 Swap(0) 的话，第一个调用者就把峰值吃掉，
+	// 后面的环节全看到 0，等于白算。
+	runOne := func() {
+		peak := int(s.inflightPeak.Swap(0))
+		changed := s.adoptOnce(ctx, peak)
+		changed = s.warmOnce(ctx, peak) || changed
+		s.prewarmChats(ctx, peak)
+		changed = s.maintainRefresh(ctx) || changed
+		saveIfDue(changed)
+	}
+
+	runOne()
 	for {
 		select {
 		case <-ctx.Done():
@@ -70,22 +85,20 @@ func (s *Server) KeepAlive(ctx context.Context) {
 				log.Printf("[qwen2api] 退出前保存续期结果失败: %v", err)
 			}
 			return
-		case <-t.C:
-			changed := s.adoptOnce(ctx)
-			changed = s.warmOnce(ctx) || changed
-			s.prewarmChats(ctx)
-			changed = s.maintainRefresh(ctx) || changed
-			saveIfDue(changed)
+		case <-time.After(s.keepaliveTick()):
+			runOne()
 		}
 	}
 }
 
 // adoptOnce 给"还没 refresh_token 的号"补一张（用密码登录一次）。
 //
-// 只补"接下来会被用到的那批"（served 升序），单轮 6 个、并发 2 ——
+// 只补"接下来会被用到的那批"（served 升序），单轮数量走配置、并发固定 2 ——
 // 目的是把一次性的 3000 次登录摊成后台小流量，而不是再打一次批量登录。
-func (s *Server) adoptOnce(ctx context.Context) bool {
-	names := s.pool.AdoptCandidates(s.warmTarget(), keepAliveAdoptBatch)
+// 并发刻意不跟 Parallel 走：密码登录是最容易吃 WAF 的一步，快没有意义。
+func (s *Server) adoptOnce(ctx context.Context, peak int) bool {
+	ka := s.conf().Pool.Keepalive.Effective()
+	names := s.pool.AdoptCandidates(s.warmTarget(peak), ka.AdoptBatch)
 	if len(names) == 0 {
 		return false
 	}
@@ -134,6 +147,15 @@ func (s *Server) maintainRefresh(ctx context.Context) bool {
 
 // adoptOne 登录一次并把 access + refresh_token 都存下来。
 func (s *Server) adoptOne(ctx context.Context, name string) bool {
+	// 与预热 refresh 互斥：signin 会换掉整张会话，和 refresh 交叉执行时
+	// 会把对方刚拿到的票作废（见 lockRefresh）。
+	unlock := s.lockRefresh(name)
+	defer unlock()
+	// 与 refresh 共用退避表：登录失败（尤其被 WAF 拦）不能每轮都撞一次 ——
+	// 一批密码失效的号足以把 signin 打成主要流量，还会挤占真正可修的重登名额。
+	if !s.refreshDue(name, time.Now()) {
+		return false
+	}
 	a := s.pool.Get(name)
 	if a == nil || a.Password == "" {
 		return false
@@ -143,45 +165,126 @@ func (s *Server) adoptOne(ctx context.Context, name string) bool {
 	access, refresh, err := s.up.SignInSession(upstream.WithAccount(cctx, name), a.Email, a.Password)
 	if err != nil {
 		s.noteRefreshErr(name, err)
+		// 401（密码错）/ 400（未激活、封禁）是**永久**失败：再试一万次也一样，
+		// 只会白吃 WAF 并一直占着重登队列最前面。403 除外 —— 那多半是 WAF
+		// 挑战页，退避一轮再来才是对的。
+		if upstream.KindOf(err) == upstream.KindAuth && upstream.StatusOf(err) != 403 {
+			s.pool.MarkAuth(a, "signin: "+err.Error())
+			log.Printf("[qwen2api] 账号 %s 重登被上游永久拒绝，已停用: %v", name, err)
+		}
 		return false
 	}
 	s.pool.SetToken(name, access)
 	if refresh != "" {
 		s.pool.SetRefresh(name, refresh)
 	}
+	s.clearRefreshErr(name) // 修好了就别留着上一次的失败时间戳
 	return true
 }
 
 // warmBatch 每轮预热多少个 —— 跟着目标数一起缩放。
 //
-// 🔴 为什么要动态（2026-10-30）：目标数按流量估算（8~256），但批量原来是常量 8，
-// 于是一旦并发突然上来（压测、批量导入后、上游恢复瞬间），热满 256 个要
-// 256/8×20s ≈ 10 分钟 —— 这期间请求全在撞过期号，每个多几百毫秒续期。
+// 两个约束同时要满足：
+//  1. **热满要快**：取 target/8 让热满耗时稳定在约 8 轮，与规模无关
+//     （原来是常量 8，并发一上来热满 512 个要 21 分钟，期间请求全在撞冷号）；
+//  2. **保活要跟上连接 TTL**：连接只活 90 秒，一轮必须走够 target×tick/90 个，
+//     否则先保活的那批早就被回收了 —— 这一轮等于白跑。
 //
-// 取 1/8 让"热满耗时"稳定在约 8 轮（≈2.7 分钟），与目标规模无关；
-// 下限 4 保证低流量时不至于太慢，上限 48 避免一轮把上游打太热。
-func warmBatch(target int) int {
+// 下限 4 保证低流量时也能热起来，上限走配置（batch_max，默认 48）。
+func warmBatch(target, max, tickS int) int {
+	if max <= 0 {
+		max = 48
+	}
+	if tickS <= 0 {
+		tickS = 20
+	}
 	b := target / 8
+	// 连接只活 TTL，一轮走不完就得在 TTL 内轮一遍：
+	// 一个 TTL 里能跑 rounds 轮，每轮至少要覆盖 ceil(target/rounds) 个。
+	ttlS := int(upstream.IdleConnTimeout / time.Second)
+	rounds := ttlS / tickS
+	if rounds < 1 {
+		rounds = 1
+	}
+	if connNeed := (target + rounds - 1) / rounds; connNeed > b {
+		b = connNeed
+	}
 	if b < 4 {
 		b = 4
 	}
-	if b > 48 {
-		b = 48
+	if b > max {
+		b = max
 	}
 	return b
 }
 
-// warmOnce 跑一轮预热。
-func (s *Server) warmOnce(ctx context.Context) bool {
-	target := s.warmTarget()
-	batch := warmBatch(target)
-	names := s.pool.WarmCandidates(target, keepAliveWindow, batch)
+// warmTarget 估算"要随时保持可用的账号数"（token 口径）。
+//
+// 每个 access 活 15 分钟，所以速率为 r 次/分钟时需要 r*15 个可用凭据。
+// 用最近 10 分钟的实际请求数推算，低流量时只热几个号（不做无用续期）。
+//
+// 并发兜底（2026-11-02）：只用速率会漏掉"短时间打满"的情况 —— 10 分钟内
+// 只有 20 个请求，但全挤在 3 秒里，那 20 个号必须同时可用。所以再拿
+// 上一轮的并发峰值算一遍，取较大者。
+func (s *Server) warmTarget(peak int) int {
+	ka := s.conf().Pool.Keepalive.Effective()
+	const lookback = 10 * time.Minute
+	cut := time.Now().Add(-lookback)
+	n := 0
+	// Recent(0) = 取满整个环形缓冲（容量 500）。写死 200 会在高流量时低估速率。
+	for _, e := range s.log.Recent(0) {
+		if e.Time.After(cut) {
+			n++
+		}
+	}
+	// 采样窗口可能被截断，按"至少 1 次"算，避免 0 导致不预热。
+	rate := float64(n) / lookback.Minutes()
+	target := int(rate*15*1.5) + 8
+	if need := peak*ka.ConcFactor + 4; need > target {
+		target = need
+	}
+	if target < 8 {
+		target = 8
+	}
+	// 上限不是拍脑袋：热满时间必须 < access TTL，否则刚热完就开始过期。
+	if target > ka.TargetMax {
+		target = ka.TargetMax
+	}
+	return target
+}
+
+// chatTarget 会话/连接要覆盖多少个号。
+//
+// 🔴 与 warmTarget 分开（2026-11-02）：token 有 15 分钟 TTL，必须提前热一大片；
+// 但空会话和出口连接只服务"同时在跑的请求" —— 并发 5 的场景下保活 512 条连接，
+// 等于每 20 秒白打 500 次代理往返（每次 0.4~2 秒），把上游和代理都打热。
+//
+// 所以按并发峰值算，再用 token 目标封顶（不会超过"实际会用到的那批"）。
+func (s *Server) chatTarget(peak, tokenTarget int) int {
+	ka := s.conf().Pool.Keepalive.Effective()
+	n := peak*ka.ConcFactor + 4
+	if n < 4 {
+		n = 4
+	}
+	if n > tokenTarget {
+		n = tokenTarget
+	}
+	return n
+}
+
+// warmOnce 跑一轮 access token 续期。
+func (s *Server) warmOnce(ctx context.Context, peak int) bool {
+	ka := s.conf().Pool.Keepalive.Effective()
+	target := s.warmTarget(peak)
+	batch := warmBatch(target, ka.BatchMax, ka.TickS)
+	window := time.Duration(ka.TokenWindowS) * time.Second
+	names := s.pool.WarmCandidates(target, window, batch)
 	// 即使候选为空也要记：否则 /stats 的 warm.target 永远停在 0（观测失真）。
-	s.noteWarm(target, batch, len(names))
+	s.noteWarm(target, batch, len(names), peak)
 	if len(names) == 0 {
 		return false
 	}
-	sem := make(chan struct{}, keepAliveParallel)
+	sem := make(chan struct{}, ka.Parallel)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	changed := false
@@ -202,74 +305,99 @@ func (s *Server) warmOnce(ctx context.Context) bool {
 	return changed
 }
 
-// prewarmChats 给"马上要被用到的那批号"预建空会话。
+// prewarmChats 给"马上要被用到的那批号"预建空会话，并把它们的出口连接保活。
 //
-// 覆盖范围与 access token 预热**同源**：都是 warmTarget（按最近 10 分钟流量估算），
-// 单轮数量用 warmBatch 一起缩放。理由也一样 —— 目标数会随并发涨到几百，
-// 固定批量会让"热满"耗时随规模线性增长。
+// 覆盖范围按**并发**算（chatTarget），不是按 token 的 warmTarget ——
+// 空会话和连接只需要撑住同时在跑的请求。并发 5 时保活 512 条连接，
+// 每 20 秒就是 500 次白打的代理往返。
+//
+// 池子已经满的号不会重复建会话（那是白花一次上游调用），但会发一个 HEAD 保住
+// TCP+TLS —— 实测走住宅代理重新握手要 1.7 秒，比建会话便宜得多，收益却一样直接。
 //
 // 只补 t2t：对话占请求的绝大多数；t2i / image_edit / t2v 一次就要 50~90 秒，
 // 建会话那 2.4s 占比可以忽略，不值得为它们维护池子。
-func (s *Server) prewarmChats(ctx context.Context) {
+func (s *Server) prewarmChats(ctx context.Context, peak int) {
 	if !s.chats.Enabled() {
 		return
 	}
 	if n := s.chats.Trim(); n > 0 {
 		log.Printf("[qwen2api] 会话池清理过期 %d 个", n)
 	}
-	target := s.warmTarget()
-	names := s.pool.HotNames(target)
+	ka := s.conf().Pool.Keepalive.Effective()
+	need := s.chatTarget(peak, s.warmTarget(peak))
+	// 记下来给 /stats 看：这个数通常远小于 warm.target，差值就是"省下来的保活"。
+	s.chatTargetNow.Store(int32(need))
+	names := s.pool.HotNames(need)
 	if len(names) == 0 {
 		return
 	}
-	limit := warmBatch(target)
-	sem := make(chan struct{}, 4) // 建会话 2.4s/个，4 并发约 6 个/秒
+	limit := warmBatch(need, ka.BatchMax, ka.TickS)
+	sem := make(chan struct{}, ka.Parallel)
 	var wg sync.WaitGroup
 	built := 0
-	var mu sync.Mutex
 	for _, n := range names {
 		if built >= limit {
 			break
 		}
-		if s.chats.Short(n, "t2t") == 0 {
-			continue
-		}
-		// 只用新鲜凭据：过期的号建了也会被上游拒（且白占一次代理往返）。
-		if !s.tokenFresh(n, time.Minute) {
-			continue
-		}
+		// 建会话要凭据：过期的号建了也会被上游拒（且白占一次代理往返）。
+		// 但**连接保活不需要凭据**，所以过期号照样往下走 —— 下次请求用到它时
+		// 请求路径会先续期，那条已经握好的连接正好复用。
+		needChat := s.chats.Short(n, "t2t") > 0 && s.tokenFresh(n, time.Minute)
 		wg.Add(1)
 		built++
-		go func(name string) {
+		go func(name string, needChat bool) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			cred := s.pool.Credential(name)
-			if cred == "" {
+			if needChat {
+				cred := s.pool.Credential(name)
+				if cred == "" {
+					return
+				}
+				s.prewarmChat(ctx, name, cred, s.conf().DefaultModel, "t2t")
 				return
 			}
-			s.prewarmChat(ctx, name, cred, s.conf().DefaultModel, "t2t")
-			mu.Lock()
-			defer mu.Unlock()
-		}(n)
+			// 这条号马上会被用到，保住它的出口连接就够了（实测省 1.7 秒握手）。
+			_ = s.up.WarmConn(upstream.WithAccount(ctx, name))
+		}(n, needChat)
 	}
 	wg.Wait()
 }
 
+// noteInflight 记录一次 chat 请求进出，并维护"上一轮预热以来的并发峰值"。
+//
+// 用 CAS 而不是加锁：每个请求只进来一次，锁会成为高频请求下的争用点。
+func (s *Server) noteInflight(delta int32) {
+	if s == nil {
+		return
+	}
+	n := s.inflightNow.Add(delta)
+	if delta <= 0 || n <= 0 {
+		return
+	}
+	for {
+		p := s.inflightPeak.Load()
+		if n <= p || s.inflightPeak.CompareAndSwap(p, n) {
+			return
+		}
+	}
+}
+
 // noteWarm 记录最近一轮预热的参数（/stats 与面板观测用）。
-func (s *Server) noteWarm(target, batch, actual int) {
+func (s *Server) noteWarm(target, batch, actual, peak int) {
 	s.warmMu.Lock()
 	defer s.warmMu.Unlock()
 	s.warmStat = WarmStat{
-		Target: target, Batch: batch, Actual: actual, At: time.Now(),
+		Target: target, Batch: batch, Actual: actual, Peak: peak, At: time.Now(),
 	}
 }
 
 // WarmStat 最近一轮预热的参数快照。
 type WarmStat struct {
-	Target int       `json:"target"` // 估算需要保持可用的账号数
+	Target int       `json:"target"` // 估算需要保持可用的账号数（token 口径）
 	Batch  int       `json:"batch"`  // 本轮取了几个候选
 	Actual int       `json:"actual"` // 实际取到的（候选不足时会小于 batch）
+	Peak   int       `json:"peak"`   // 本轮用到的并发峰值（会话/连接按它算）
 	At     time.Time `json:"at"`
 }
 
@@ -280,41 +408,35 @@ func (s *Server) WarmSnapshot() WarmStat {
 	return s.warmStat
 }
 
-// warmTarget 估算"要随时保持可用的账号数"。
-//
-// 每个 access 活 15 分钟，所以速率为 r 次/分钟时需要 r*15 个可用凭据。
-// 用最近 10 分钟的实际请求数推算，低流量时只热几个号（不做无用续期），
-// 高流量时自动扩到上限。
-func (s *Server) warmTarget() int {
-	const lookback = 10 * time.Minute
-	cut := time.Now().Add(-lookback)
-	n := 0
-	for _, e := range s.log.Recent(200) {
-		if e.Time.After(cut) {
-			n++
-		}
-	}
-	// 采样窗口可能被截断（Recent 有上限），按"至少 1 次"算，避免 0 导致不预热。
-	rate := float64(n) / lookback.Minutes()
-	target := int(rate*15*1.5) + 8
-	if target < 8 {
-		target = 8
-	}
-	// 上限不是拍脑袋：热满时间必须 < access TTL，否则刚热完就开始过期。
-	// 每轮 warmBatch(512)=48 个、20s 一轮 ⇒ 144/分钟 ⇒ 512 个约 3.6 分钟热满，
-	// 离 15 分钟的 TTL 还有 11 分钟余量；再往上（1024+）热满要 7~15 分钟，
-	// 边际收益趋零且会把 auth 域打热。
-	if target > 512 {
-		target = 512
-	}
-	return target
-}
-
 // refreshTokenOnly 只用 refresh_token 换新（不碰密码）。
-// 失败只记日志：下一轮会重试，真不行时请求路径上的 relogin 会兜底。
+//
+// 失败分两种，处置必须不同 —— 这是 2026-11-02 那次"timeout 之后紧接着 401
+// 令牌已撤销"暴露出来的：
+//
+//   - **明确失效**（HTTP 401）：这张票已经不能用了，清掉它。AdoptCandidates 只挑
+//     "没有 refresh_token"的号，清空是唯一能让后台用密码补一张的入口。留着它只会
+//     让预热每 20s 撞一次 401（日志被 5 分钟去重，看着像"偶发"，其实一直在打）。
+//   - **结果未知**（超时 / 网络）：HTTP 超时 ≠ 没执行，上游很可能已经消费掉这张
+//     票。所以既不拿它原地重试，也不立刻重登（可能白花一次最容易吃 WAF 的
+//     signin），先静默 refreshRetryBackoff 再说。
+//
+// ⚠️ 清空不等于"马上修复"：这个号会退出预热队列，修复时机交回两处 ——
+// 后台 adoptOnce（只补"接下来要用"的那批）或请求路径上的 relogin（真正要用时）。
+// 这样不会为了一个冷号白花密码登录，也不会让它继续污染 auth 域。
 func (s *Server) refreshTokenOnly(ctx context.Context, name string) bool {
+	unlock := s.lockRefresh(name)
+	defer unlock()
+	// 拿到锁后复查：等锁这一小会儿里，请求路径可能已经把它续好了。
+	// 再换一张纯属浪费 —— 每多换一次就多一次撞 401「令牌已撤销」的机会。
+	ka := s.conf().Pool.Keepalive.Effective()
+	if s.tokenFresh(name, time.Duration(ka.TokenWindowS)*time.Second) {
+		return false
+	}
 	rt := s.pool.RefreshToken(name)
 	if rt == "" {
+		return false
+	}
+	if !s.refreshDue(name, time.Now()) {
 		return false
 	}
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -322,18 +444,78 @@ func (s *Server) refreshTokenOnly(ctx context.Context, name string) bool {
 	access, next, err := s.up.RefreshWithToken(upstream.WithAccount(cctx, name), rt)
 	if err != nil {
 		s.noteRefreshErr(name, err)
+		s.afterRefreshFailure(name, err)
 		return false
 	}
 	s.pool.SetToken(name, upstream.ModeBearer+":"+access)
 	if next != "" {
 		s.pool.SetRefresh(name, next)
 	}
+	s.clearRefreshErr(name)
 	return true
 }
 
-// noteRefreshErr 续期失败日志去重（同一个号 5 分钟内只记一次）。
+// lockRefresh 按账号名取一把分片锁，返回解锁函数。
 //
-// 3000 个号同时失败时，逐条打日志会把日志刷爆，反而看不到别的问题。
+// 为什么需要它：同一个号可能被三条路径同时换票 —— 预热的 refresh、请求路径的
+// relogin、后台的 signin。并发换票会让一方刚拿到的票被另一方作废（实测
+// 「timeout 之后紧接着 401 令牌已撤销」的嫌疑来源），而每次多余失败都要用
+// 密码 signin 收尾 —— 那正是最贵、最该避免的一步。
+//
+// 用固定分片而不是 per-account 的 map：3135 个号各一把锁要常驻一张表，
+// 而真实并发换票只有个位数，64 片几乎不会碰撞。
+func (s *Server) lockRefresh(name string) func() {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(name))
+	mu := &s.refreshLocks[h.Sum32()%refreshLockShards]
+	mu.Lock()
+	return mu.Unlock
+}
+
+// afterRefreshFailure 按错误种类决定这个号下一步怎么办。
+//
+// 只对 401 清票：403 在 auth 域通常是 WAF/风控挑战（KindAuth 但票没坏），
+// 清掉反而会把一个还能用的号推去密码重登 —— 那才是最容易被拦的一步。
+func (s *Server) afterRefreshFailure(name string, err error) {
+	if upstream.KindOf(err) != upstream.KindAuth || upstream.StatusOf(err) != 401 {
+		return // 其余情况只退避（时间戳已由 noteRefreshErr 记下）
+	}
+	if s.pool.SetRefresh(name, "") {
+		// 没票又没密码 = 已经没有任何续期手段。留在池里只会显示"可用"、
+		// 却永远不被选中（lessPick 把它排最后），是最难排查的那种僵尸号。
+		if a := s.pool.Get(name); a != nil && a.Password == "" {
+			s.pool.MarkAuth(a, "refresh_token 已撤销，且未保存密码，无法重登")
+			log.Printf("[qwen2api] 账号 %s 的 refresh_token 已撤销且没有密码，已停用", name)
+			return
+		}
+		// 打上 needLogin：AdoptCandidates 会把它插到队列最前面（趁请求还没
+		// 碰到就修好），lessPick 也会把它排到最后（请求路径不再撞上几秒的 signin）。
+		s.pool.MarkNeedLogin(name)
+		log.Printf("[qwen2api] 账号 %s 的 refresh_token 已失效（401），插队重登", name)
+	}
+}
+
+// refreshDue 上次失败是否已过静默期（见 refreshRetryBackoff）。
+//
+// 复用 creditErrMu：这张表只在预热路径上读写，频率极低，不值得再加一把锁。
+func (s *Server) refreshDue(name string, now time.Time) bool {
+	s.creditErrMu.Lock()
+	defer s.creditErrMu.Unlock()
+	last, ok := s.refreshErrAt[name]
+	return !ok || now.Sub(last) >= refreshRetryBackoff
+}
+
+// clearRefreshErr 续期成功后抹掉失败记录，避免静默期把这个号白挡一轮。
+func (s *Server) clearRefreshErr(name string) {
+	s.creditErrMu.Lock()
+	delete(s.refreshErrAt, name)
+	s.creditErrMu.Unlock()
+}
+
+// noteRefreshErr 记录续期失败：一份数据两个用途 —— 日志去重 + 重试退避。
+//
+// 3000 个号同时失败时，逐条打日志会把日志刷爆，反而看不到别的问题；
+// 而"上次失败是什么时候"正好也是 refreshDue 需要的退避起点，不必另开状态。
 func (s *Server) noteRefreshErr(name string, err error) {
 	s.creditErrMu.Lock()
 	last, ok := s.refreshErrAt[name]
@@ -347,5 +529,5 @@ func (s *Server) noteRefreshErr(name string, err error) {
 	}
 	s.refreshErrAt[name] = now
 	s.creditErrMu.Unlock()
-	log.Printf("[qwen2api] 账号 %s 预热续期失败: %v", name, err)
+	log.Printf("[qwen2api] 账号 %s 续期失败: %v", name, err)
 }

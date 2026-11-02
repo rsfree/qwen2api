@@ -614,8 +614,8 @@ func (s *Server) recoverImages(ctx context.Context, cred, chatID string) []strin
 // 🔴 两个实测坑（2026-10-28）：
 //  1. **刚生成的那几秒 CDN 还没转存完** —— 立刻下会拿到 404 + 226 字节 HTML 死链。
 //     所以带退避重试（1s/3s），而不是一次失败就判死。
-//  2. 下载要带 `Referer: https://chat.qwen.ai/`（视频产物更是必需，图片有时也需要）。
-//     不带的话同样是 404，看起来像"图不存在"，其实是防盗链。
+//  2. 下载**要带浏览器 UA**：`curl/*` 会被 WAF 挡成 404，返回体和上面的"未转存"完全一样。
+//     Referer 反而可有可无（不带 200，带外站 403）—— 2026-10-31 对同一批 URL 对照实测。
 //
 // 另外按 image-adapter 的教训：**判真假看 magic bytes，不看 Content-Type**
 // （真图可能回 application/octet-stream，按 image/* 判会误杀）。

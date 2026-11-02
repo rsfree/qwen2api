@@ -3,7 +3,7 @@ package panel
 // 面板登录：**密钥优先**（config.panel.key，留空回落 config.api_keys），
 // 账密作为可选后备（只在配了 panel.password 时出现）。
 //
-// 两种凭据都换同一个签名会话 cookie（HttpOnly，默认 12h）：
+// 两种凭据都换同一个签名会话 cookie（HttpOnly，默认 30 天）：
 //   · 密钥登录不会把明文 Key 留在 localStorage —— 换完 cookie 就丢掉，
 //     XSS 也偷不到长期凭据；
 //   · 但请求头带 Bearer / x-api-key / ?key= 依然可用（脚本、书签、curl 需要）。
@@ -41,10 +41,18 @@ type failBucket struct {
 	since time.Time
 }
 
-// newSecret 取会话签名密钥：配置优先，否则每次启动随机（重启后需重登）。
+// newSecret 取会话签名密钥，顺序：显式配置 → 由凭据派生 → 随机。
+//
+// 🔴 中间那步是「重启不掉线」的关键：以前留空就随机，一次重启/发版所有会话失效，
+// 面板于是在轮询里反复把登录框顶出来（用户感受就是"它老自己跳出来"）。
+// 派生只依赖凭据，重启后不变；改密钥/密码则旧会话自然失效。
 func newSecret(cfg config.Panel) []byte {
 	if s := strings.TrimSpace(cfg.SessionSecret); s != "" {
 		return []byte(s)
+	}
+	if seed := cfg.SessionSeed(); seed != "" {
+		sum := sha256.Sum256([]byte("qwen2api/panel/session\x00" + seed))
+		return sum[:]
 	}
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
@@ -268,7 +276,7 @@ func (p *Panel) handleLogin(w http.ResponseWriter, r *http.Request) {
 // 密钥登录也走会话，而不是"每个请求都带明文 Key"：
 //   - 浏览器侧：明文只在登录那一次出现，之后由 HttpOnly cookie 代理
 //     （XSS 拿不到；localStorage 里也不留长期凭据）；
-//   - 服务端：撤销密钥只需改配置重启，会话的 TTL 到期即止（12h 后可再收紧）。
+//   - 服务端：撤销密钥只需改配置重启，会话随 TTL 到期即止（默认 30 天，可调）。
 func (p *Panel) issueSessionCookie(w http.ResponseWriter, r *http.Request, cfg config.Panel) {
 	ttl := time.Duration(cfg.EffectiveSessionHours()) * time.Hour
 	http.SetCookie(w, &http.Cookie{

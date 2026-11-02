@@ -52,7 +52,7 @@ func main() {
 			log.Fatalf("[qwen2api] 生成失败: %v", err)
 		}
 		fmt.Printf("把下面这段并入 config.json 的 panel（session_secret 建议另配一个随机串）：\n\n")
-		fmt.Printf("  \"panel\": {\n    \"username\": \"admin\",\n    \"password_hash\": %q,\n    \"session_hours\": 12\n  }\n\n", h)
+		fmt.Printf("  \"panel\": {\n    \"username\": \"admin\",\n    \"password_hash\": %q,\n    \"session_hours\": 720\n  }\n\n", h)
 		fmt.Println("也可以只用环境变量：QWEN2API_PANEL_PASSWORD=<明文>（容器部署推荐）")
 		return
 	}

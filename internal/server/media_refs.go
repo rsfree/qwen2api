@@ -14,7 +14,7 @@ import (
 // resolveImageRef 把 `image` 字段的三种形态统一解成字节。
 //
 //   - `data:image/png;base64,…` → 直接解码（mime 从 data URI 头取）
-//   - `http(s)://…`            → 下载（带 Referer/UA：上游 CDN 有防盗链）
+//   - `http(s)://…`            → 下载（带浏览器 UA：CDN 的 WAF 会把 curl 类 UA 挡成 404）
 //   - 裸 base64                → 解码后按魔数嗅探 mime（SDK 常把 PNG 声明成 octet-stream）
 //
 // 三种形态都要收，是 image-adapter 的既定契约（`image` 支持 URL / data URI / 裸 base64）。

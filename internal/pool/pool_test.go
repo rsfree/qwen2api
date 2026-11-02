@@ -152,3 +152,44 @@ func TestSnapshotNoTokenLeak(t *testing.T) {
 	}
 	_ = time.Now()
 }
+
+// 全池凭据同时过期时，HotNames 仍要给出候选 —— 否则会话预热和连接保活
+// 会在最需要的时候集体停摆，而 Pick 依旧会选这些号。
+func TestHotNamesFallsBackWhenAllExpired(t *testing.T) {
+	cfg := config.Pool{}
+	p := New(cfg, []config.Account{
+		{Name: "a0", Token: "t0"},
+		{Name: "a1", Token: "t1"},
+	}, "")
+
+	// 全部压成"已过期"（tokenAlive 要求剩余 > 2min）。
+	past := time.Now().Add(-time.Minute)
+	for _, a := range p.accounts {
+		a.tokenExp = past
+	}
+	names := p.HotNames(2)
+	if len(names) != 2 {
+		t.Fatalf("全冷时也必须返回候选（否则预热停摆），得到 %d 个", len(names))
+	}
+}
+
+// 活着的号必须排在过期号前面：它们才是 Pick 真正会选的。
+func TestHotNamesPrefersAlive(t *testing.T) {
+	cfg := config.Pool{}
+	p := New(cfg, []config.Account{
+		{Name: "dead", Token: "t0"},
+		{Name: "live", Token: "t1"},
+	}, "")
+	now := time.Now()
+	for _, a := range p.accounts {
+		if a.Name == "live" {
+			a.tokenExp = now.Add(10 * time.Minute)
+		} else {
+			a.tokenExp = now.Add(-time.Minute)
+		}
+	}
+	names := p.HotNames(1)
+	if len(names) != 1 || names[0] != "live" {
+		t.Fatalf("应优先返回活着的号，得到 %v", names)
+	}
+}

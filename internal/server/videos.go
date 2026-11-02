@@ -51,7 +51,8 @@ type VideoObject struct {
 	Status    string `json:"status"` // queued / in_progress / completed / failed
 	Progress  int    `json:"progress"`
 	URL       string `json:"url,omitempty"`
-	// GatewayURL 网关代取地址（上游 CDN 有防盗链，裸链直下会 404）。
+	// GatewayURL 网关代取地址（上游 CDN 的 WAF 会把 curl 类 UA 挡成 404，
+	// 网关自带浏览器 UA 代取，客户端就不必操心）。
 	GatewayURL string `json:"gateway_url,omitempty"`
 	Error      string `json:"error,omitempty"`
 	// UpstreamID 上游任务 id（tsk_…），便于对照 qwen 控制台排查。
@@ -296,7 +297,8 @@ func (s *Server) handleVideoGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	obj := translateVideo(task, raw)
-	// 客户端拿到 CDN 直链直接下载会 404（防盗链要 Referer），所以再给一个网关代理地址。
+	// 直链本身是好的（浏览器能直接播），但脚本用默认 UA 下载会被 WAF 挡成 404；
+	// 额外给一个网关代理地址，客户端换不了 UA 时走它。
 	if obj.URL != "" {
 		obj.GatewayURL = "/v1/videos/" + id + "/content"
 	}
@@ -305,8 +307,9 @@ func (s *Server) handleVideoGet(w http.ResponseWriter, r *http.Request) {
 
 // handleVideoContent `GET /v1/videos/{id}/content` —— 代理下载成片。
 //
-// 为什么需要它：上游 CDN 有防盗链，客户端拿裸链接直接下会得到 404（226 字节 HTML）。
-// 网关加 Referer 代取，客户端就能像普通文件一样下载。
+// 为什么需要它：上游 CDN 的 WAF 只放行浏览器类 UA —— 客户端用 curl 默认 UA 直下会拿到
+// 404（226 字节 HTML，和"还没转存完"无法区分）。网关带浏览器 UA 代取，客户端就能像
+// 普通文件一样下载。Referer 不是必要条件：不带就 200，带外站值反而 403。
 func (s *Server) handleVideoContent(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/videos/"), "/content")
 	task, ok := s.videos.get(id)

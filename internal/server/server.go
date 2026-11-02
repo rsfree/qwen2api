@@ -50,8 +50,14 @@ type Server struct {
 	accountsMu sync.Mutex
 	// creditCursor 余额刷新轮转游标（受 creditRefreshMu 保护）。
 	creditCursor int
-	// refreshErrAt 预热续期的失败日志去重（账号名 → 上次记录时间）。
+	// refreshErrAt 预热续期失败的时间戳（账号名 → 上次失败）：
+	// 同一份数据两个用途 —— 日志去重 + 重试退避（见 refreshDue）。
 	refreshErrAt map[string]time.Time
+	// refreshLocks 按账号分片的"换票互斥"（见 lockRefresh）。
+	// 预热 refresh、请求路径 relogin、后台 signin 三者必须串行：同时换同一个号
+	// 会互相作废对方刚拿到的票（实测 401「令牌已撤销」的嫌疑来源之一），
+	// 而每次多余失败都要用密码 signin 收尾。
+	refreshLocks [refreshLockShards]sync.Mutex
 	// keysMu 保护前门令牌（config.api_keys 或面板托管的 apikeys.json）。
 	// 每次 /v1 请求都要读它，所以读写必须轻（RLock + 切片拷贝）。
 	keysMu      sync.RWMutex
@@ -64,6 +70,19 @@ type Server struct {
 	// warmMu / warmStat 最近一轮保活预热的参数（target/batch/actual）。
 	warmMu   sync.Mutex
 	warmStat WarmStat
+	// inflightNow 当前在途的 chat 请求数；inflightPeak 是"自上次读取以来"的峰值。
+	//
+	// 为什么要峰值而不是瞬时值：预热每 20 秒才看一次，瞬时采样会漏掉两次 tick
+	// 之间那一下突发（而突发正是要覆盖的场景）。请求进出时顺手 CAS 一下峰值，
+	// 预热读完 Swap(0) 清零，下一轮重新统计。
+	//
+	// 用途：会话与连接的覆盖范围按它算（不是按 token 的 target）——
+	// 同时在跑的 N 个请求才需要 N 个不同号，多保活全是白打代理。
+	inflightNow  atomic.Int32
+	inflightPeak atomic.Int32
+	// chatTargetNow 上一轮会话/连接预热覆盖了多少个号（按并发算出来的）。
+	// 与 warm.target 并列展示，一眼能看出"两个口径差多少"。
+	chatTargetNow atomic.Int32
 	// egressMu / egress 账号级"出口 IP"缓存（懒探测，见 egress.go）。
 	egressMu sync.Mutex
 	egress   map[string]*egressState
@@ -370,12 +389,18 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"pool":     s.pool.Snapshot(),
 		"stats":    s.log.Stats(),
 		"models":   s.models.Info(),
-		// keepalive：最近的预热参数 + 当前新鲜凭据数，用来判断"预热跟不跟得上并发"。
+		// keepalive：预热参数 + 当前新鲜凭据数，用来判断"预热跟不跟得上并发"。
 		"keepalive": map[string]any{
+			// params 是**当前生效值**（面板热更后不用猜有没有生效）。
+			"params":      s.conf().Pool.Keepalive.Effective(),
 			"warm":        s.WarmSnapshot(),
 			"token_fresh": s.pool.TokenFreshCount(),
 			// chats 预建会话池：ready = 当前可直接用的空会话数。
 			"chats": s.chats.Stat(),
+			// inflight 当前在途；chat_target 会话/连接这轮覆盖了几个号
+			// （按并发算，通常远小于 warm.target —— 这两个数差太多是正常的）。
+			"inflight":    s.inflightNow.Load(),
+			"chat_target": s.chatTargetNow.Load(),
 		},
 	})
 }

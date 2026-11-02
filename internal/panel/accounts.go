@@ -21,7 +21,9 @@ type acctStats struct {
 	Ready        int `json:"ready"`
 	Cooling      int `json:"cooling"`
 	Dead         int `json:"dead"`
-	Exhausted    int `json:"exhausted"`
+	// NeedLogin 票被撤销、正在等后台密码重登的号（不是坏号，但还不可用）。
+	NeedLogin int `json:"need_login"`
+	Exhausted int `json:"exhausted"`
 	ImgLeft      int `json:"img_left"`
 	Credits      int `json:"credits"`
 	CreditsKnown int `json:"credits_known"`
@@ -41,6 +43,8 @@ func acctStatusOf(v pool.View, videoMin int) string {
 	switch v.State {
 	case "auth_dead":
 		return "dead"
+	case "need_login":
+		return "need_login"
 	case "cooling":
 		return "cooling"
 	}
@@ -59,6 +63,8 @@ func summarize(views []pool.View, videoMin int) acctStats {
 		switch acctStatusOf(v, videoMin) {
 		case "dead":
 			st.Dead++
+		case "need_login":
+			st.NeedLogin++
 		case "cooling":
 			st.Cooling++
 		case "exhausted":
@@ -141,7 +147,7 @@ func (p *Panel) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 		return -1
 	}
-	rank := map[string]int{"dead": 0, "cooling": 1, "exhausted": 2, "ready": 3}
+	rank := map[string]int{"dead": 0, "need_login": 1, "cooling": 2, "exhausted": 3, "ready": 4}
 	sort.SliceStable(filtered, func(i, j int) bool {
 		a, b := filtered[i], filtered[j]
 		switch sortKey {

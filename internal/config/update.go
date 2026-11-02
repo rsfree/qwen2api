@@ -69,6 +69,22 @@ var Fields = []Field{
 	{Key: "pool.chat_pool_ttl_s", Label: "预建会话有效期（秒）", Type: "int", Min: 60, Max: 86400, Hot: true,
 		Hint: "超过就丢弃，避免用很旧的空会话去提交"},
 
+	// 预热节奏：流量变了就调这里，不用发版。改完下一轮 tick 生效。
+	{Key: "pool.keepalive.tick_s", Label: "预热轮询间隔（秒）", Type: "int", Min: 5, Max: 300, Hot: true,
+		Hint: "每轮做一次 token 续期 / 会话预建 / 连接保活。调小跟得上突发，但上游调用更密"},
+	{Key: "pool.keepalive.token_window_s", Label: "token 提前续期窗口（秒）", Type: "int", Min: 60, Max: 1800, Hot: true,
+		Hint: "access 剩余寿命小于它就开始换新；必须大于轮询间隔，否则热完就过期"},
+	{Key: "pool.keepalive.conc_factor", Label: "预热并发系数", Type: "int", Min: 1, Max: 10, Hot: true,
+		Hint: "会话/连接的覆盖范围 = 并发峰值 × 它 + 4。调大更抗突发，代价是更多空会话与保活流量"},
+	{Key: "pool.keepalive.adopt_batch", Label: "每轮补 refresh_token 数", Type: "int", Min: 1, Max: 100, Hot: true,
+		Hint: "补 refresh 要密码登录（最易吃风控），故意摊慢；冷号多时可以调大"},
+	{Key: "pool.keepalive.parallel", Label: "预热并发数", Type: "int", Min: 1, Max: 32, Hot: true,
+		Hint: "单批次并行度。调大热得更快，但同一时刻打上游更密"},
+	{Key: "pool.keepalive.batch_max", Label: "单轮预热上限", Type: "int", Min: 4, Max: 512, Hot: true,
+		Hint: "一轮最多处理几个号。太大容易把上游打热"},
+	{Key: "pool.keepalive.target_max", Label: "预热目标上限", Type: "int", Min: 8, Max: 4096, Hot: true,
+		Hint: "按流量估算出的目标数上限。热满时间必须小于 token 的 15 分钟 TTL"},
+
 	{Key: "video.root_model", Label: "视频内核模型", Type: "string", Hot: true,
 		Hint: "实测 happyhorse11；改错会 Bad_Request"},
 	{Key: "video.resolution", Label: "视频默认分辨率", Type: "enum",

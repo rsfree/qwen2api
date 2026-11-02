@@ -75,11 +75,30 @@ func TestPanelDefaults(t *testing.T) {
 	if p.EffectiveUsername() != "admin" {
 		t.Fatalf("默认用户名应为 admin，得到 %s", p.EffectiveUsername())
 	}
-	if p.EffectiveSessionHours() != 12 {
-		t.Fatalf("默认会话 12h，得到 %d", p.EffectiveSessionHours())
+	// 默认 30 天：面板轮询、会话一短就变成"登录框自己弹出来"。
+	if p.EffectiveSessionHours() != 720 {
+		t.Fatalf("默认会话 720h（30 天），得到 %d", p.EffectiveSessionHours())
 	}
 	if (Panel{Username: "ops", SessionHours: 3}).EffectiveSessionHours() != 3 {
 		t.Fatal("显式配置未生效")
+	}
+}
+
+func TestPanelSessionSeed(t *testing.T) {
+	// 面板密钥优先：改密码不该让密钥派生值漂移。
+	if got := (Panel{Key: "sk-panel", Password: "pw"}).SessionSeed(); got != "key:sk-panel" {
+		t.Fatalf("应以面板密钥为种子，得到 %q", got)
+	}
+	// 没有密钥时退到密码 hash，最后才是明文。
+	if got := (Panel{PasswordHash: "pbkdf2$x"}).SessionSeed(); got != "hash:pbkdf2$x" {
+		t.Fatalf("应回落到密码 hash，得到 %q", got)
+	}
+	if got := (Panel{Password: " pw "}).SessionSeed(); got != "pass:pw" {
+		t.Fatalf("应回落到明文密码并去空白，得到 %q", got)
+	}
+	// 什么都没配 ⇒ 空种子（由调用方退回随机）。
+	if got := (Panel{}).SessionSeed(); got != "" {
+		t.Fatalf("无凭据时应为空，得到 %q", got)
 	}
 }
 

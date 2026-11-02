@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>qwen2api · 控制台</title>
+<link rel="icon" type="image/svg+xml" href="/panel/favicon.svg">
 <style>
 /* ── 设计令牌：明暗两套独立色板 ─────────────────────────────────────────
    冷石墨基调（仪表盘语言）：底色分层 + 单一靛蓝强调（仅交互），语义色只给状态。
@@ -638,7 +639,7 @@ wang@example.com|密码3|备用号"></textarea>
 <!-- 登录面板：默认密钥登录（config.panel.key，留空回落前门 API Key） -->
 <div class="veil" id="keyVeil" hidden>
   <div class="dlg" style="width:430px">
-    <header><h3 id="authTitle">输入密钥进入</h3></header>
+    <header><h3 id="authTitle">输入密钥进入</h3><span class="grow"></span><button class="xs ghost" id="authClose" title="关掉登录框；之后点左上角状态可重新打开">关闭</button></header>
     <div class="body">
       <div id="authKey">
         <div class="field">
@@ -671,6 +672,8 @@ const key = () => localStorage.getItem(KEY_STORE) || '';
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const num = n => (n == null || n === '') ? '-' : Number(n).toLocaleString('en-US');
 const pct = (a, b) => b > 0 ? Math.min(100, Math.round(a / b * 100)) : 0;
+// fmtSessionHours 会话时长的人话形态：720 → "30 天（720 小时）"。
+const fmtSessionHours = h => (h > 0 && h % 24 === 0) ? (h / 24) + ' 天（' + h + ' 小时）' : (h || 0) + ' 小时';
 
 function hdrs(extra) {
   const h = Object.assign({}, extra || {});
@@ -685,7 +688,7 @@ async function api(path, opt) {
   const txt = await r.text();
   let data = null;
   try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = { error: txt.slice(0, 200) }; }
-  if (r.status === 401) { showAuth(); throw new Error('unauthorized'); }
+  if (r.status === 401) { onUnauthorized(); throw new Error('unauthorized'); }
   if (!r.ok) throw new Error((data && (data.error || data.message)) || ('HTTP ' + r.status));
   return data;
 }
@@ -700,9 +703,17 @@ function toast(msg, kind) {
    两种凭据都走 /panel/api/login → HttpOnly 会话 cookie；浏览器里不再留明文凭据。 */
 let authMode = 'key';
 let authHasPass = false;   // 服务端是否还开着一道账密入口（/panel/api/session 告知）
-function showAuth(mode) {
+let authPrompted = false;  // 本次页面已自动弹过登录框（轮询 401 不再反复顶出来）
+let authNeeded = false;    // 当前处于"未登录"态（顶栏那行可点，点开才重新要凭据）
+/* showAuth 把登录框摆成指定形态。
+   🔴 已经开着时**只同步形态**：不重置输入、不抢焦点。否则面板 5s 轮询撞上会话过期，
+   就会每隔 5s 把用户正在输入的密钥清掉、把焦点从输入框抢走 —— 那种"它老自己跳出来"
+   的手感正是这么来的。 */
+function showAuth(mode, reason) {
   if (mode) authMode = mode;
   const isKey = authMode === 'key';
+  const veil = $('#keyVeil');
+  const first = veil.hidden;
   $('#authPass').hidden = isKey;
   $('#authKey').hidden = !isKey;
   $('#authTitle').textContent = isKey ? '输入密钥进入' : '登录面板';
@@ -710,11 +721,44 @@ function showAuth(mode) {
   $('#authSwitchWrap').hidden = !authHasPass;
   $('#authSwitch').textContent = isKey ? '改用账号密码登录' : '改用密钥登录';
   $('#keyGo').textContent = isKey ? '进入' : '登录';
-  $('#keyErr').hidden = true;
-  $('#keyVeil').hidden = false;
-  setTimeout(() => (isKey ? $('#keyInput') : $('#loginPass')).focus(), 30);
+  if (first) {
+    $('#keyErr').hidden = true;
+    if (reason) { $('#keyErr').textContent = reason; $('#keyErr').hidden = false; }
+    setTimeout(() => (isKey ? $('#keyInput') : $('#loginPass')).focus(), 30);
+  }
+  veil.hidden = false;
+  authPrompted = true;
 }
 const askKey = () => showAuth('key');
+
+/* onUnauthorized 后台请求撞 401（会话过期 / 服务端换了密钥）时的统一处理：
+   自动弹**只弹一次**，之后只在顶栏亮"未登录"，把弹不弹的决定权交回用户。 */
+function onUnauthorized() {
+  authNeeded = true;
+  markLoggedOut();
+  if (!$('#keyVeil').hidden) return;   // 框已经开着：别重置、别抢焦点
+  if (authPrompted) return;            // 本次已自动弹过：不再自己爬出来
+  showAuth('key', '登录已失效，请重新输入密钥');
+}
+
+/* markLoggedOut 顶栏状态打成"未登录"，整行可点（点了才重新弹框）。 */
+function markLoggedOut() {
+  const s = $('#navState');
+  s.textContent = '未登录 · 点此登录';
+  s.style.cursor = 'pointer';
+  $('#navPulse').className = 'pulse bad';
+}
+
+/* markOnline 恢复顶栏状态；顺手复位"已弹过"标记 ——
+   既然这轮数据拉通了，下次会话过期就该允许再自动提示一次。 */
+function markOnline() {
+  const s = $('#navState');
+  authNeeded = false;
+  authPrompted = false;
+  s.textContent = '已连接';
+  s.style.cursor = '';
+  $('#navPulse').className = 'pulse';
+}
 
 // doAuth 按当前形态提交。
 // 🔴 密钥登录**不再把 Key 存进 localStorage**：服务端换一个 HttpOnly 会话，
@@ -803,8 +847,7 @@ const S = {
 async function loadOverview() {
   const d = await api('/panel/api/overview');
   S.ov = d;
-  $('#navState').textContent = '已连接';
-  $('#navPulse').className = 'pulse';
+  markOnline();
   $('#navVer').textContent = 'v' + (d.version || '-');
   $('#navUp').textContent = fmtUp(d.uptime_s);
   const ps = d.pool_stats || {};
@@ -843,6 +886,7 @@ const VIDEO_MIN = 30; // 最低档 720P 5s，用来判断"余额还能不能做�
 
 function acctStatus(a) {
   if (a.state === 'auth_dead') return { k: 'dead', t: '失效', cls: 'bad' };
+  if (a.state === 'need_login') return { k: 'need_login', t: '待重登', cls: 'warn' };
   if (a.state === 'cooling') return { k: 'cooling', t: '冷却 ' + fmtDur(a.cooldown_left_s), cls: 'warn' };
   const imgFull = a.image_limit > 0 && a.image_today >= a.image_limit;
   const noCredit = a.credit_known && a.credit_balance < VIDEO_MIN;
@@ -888,6 +932,7 @@ function renderAccounts() {
     ['ready', '可用', st.ready || 0],
     ['cooling', '冷却', st.cooling || 0],
     ['dead', '失效', st.dead || 0],
+    ['need_login', '待重登', st.need_login || 0],
     ['exhausted', '额度用尽', st.exhausted || 0],
   ];
   $('#accChips').innerHTML = chips.map(([k, t, n]) =>
@@ -1240,7 +1285,7 @@ function renderConfig() {
     // 面板登录形态：密钥（panel.key）/ API Key 回落 / 可选账密 —— 只显示有没有配，不回显值。
     kv('面板登录', (c.panel && c.panel.key_set ? '<span class="tag ok">自定义密钥</span>' : '<span class="tag muted">用 API Key</span>')
       + (c.panel && c.panel.password_enabled ? ' <span class="tag muted">+ 账密</span>' : '')),
-    kv('会话有效期', ((c.panel && c.panel.session_hours) || 12) + ' 小时'),
+    kv('会话有效期', fmtSessionHours((c.panel && c.panel.session_hours) || 720)),
     kv('reasoning 透出', c.reasoning ? '开' : '关'),
   ].join('');
   const u = c.upstream || {};
@@ -1838,10 +1883,13 @@ async function dbgSendVideo(turn, model, prompt) {
       try { v.src = await dbgBlobURL(DBG_BASE + '/v1/videos/' + encodeURIComponent(id) + '/content'); }
       catch (e) { turn.body.append(dbgNode('div', 'err', '取回成片失败：' + e.message)); }
       if (pr.url) {
-        const a = dbgNode('a', 'note', '原始 CDN 直链（客户端需自带 Referer）');
+        const a = dbgNode('a', 'note', '原始 CDN 直链（浏览器可直开；脚本下载需换浏览器 UA）');
         a.href = pr.url;
         a.target = '_blank';
-        a.rel = 'noopener';
+        // 🔴 必须 no-referrer：从面板点过去，浏览器会带 `Referer: <面板域名>`，
+        // 而 CDN 的白名单只认 chat.qwen.ai ⇒ 403（看起来像"视频坏了"）。
+        a.rel = 'noopener noreferrer';
+        a.referrerPolicy = 'no-referrer';
         a.style.display = 'block';
         a.style.marginTop = '7px';
         turn.body.append(a);
@@ -2140,6 +2188,17 @@ function bind() {
   $('#importGo').addEventListener('click', doImport);
 
   $('#keyGo').addEventListener('click', doAuth);
+  // 关掉登录框不踢人：只是别让它在轮询里再自己爬出来（authPrompted 保持 true）。
+  $('#authClose').addEventListener('click', () => {
+    $('#keyVeil').hidden = true;
+    if (authNeeded) markLoggedOut();
+  });
+  // 顶栏"未登录"可点：这是关掉登录框之后唯一的重新登录入口。
+  $('#navState').addEventListener('click', () => {
+    if (!authNeeded) return;
+    authPrompted = false;
+    showAuth('key');
+  });
   $('#authSwitch').addEventListener('click', e => {
     e.preventDefault();
     showAuth(authMode === 'key' ? 'pass' : 'key');
@@ -2154,8 +2213,9 @@ function bind() {
     localStorage.removeItem(KEY_STORE);
     S.ov = null;
     $('#btnLogout').hidden = true;
-    $('#navState').textContent = '已退出';
-    $('#navPulse').className = 'pulse warn';
+    authNeeded = true;
+    authPrompted = false;   // 主动退出：重新弹出的决定权归用户
+    markLoggedOut();
     showAuth('key');
   });
 

@@ -133,7 +133,11 @@ func (c *Client) doRefresh(ctx context.Context, cookieHeader string) (access, ne
 	if base == "" {
 		base = c.base
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// 10s 是这次 refresh 的**真实预算**：正常只要几百毫秒，已经几十倍余量。
+	// 🔴 别写成 30s —— 调用方（预热 15s / 请求 ctx）比它短，内层永远轮不到，
+	// 等于没写；而 15s 先放弃的后果不是"失败"，是"结果未知"：上游可能已经
+	// 执行并把旧 refresh_token 作废了，我们却没读到新票（2026-11-02 线上实测）。
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v2/auths/refresh", nil)

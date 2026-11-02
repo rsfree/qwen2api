@@ -26,6 +26,12 @@ type ChatPool struct {
 	per int           // 每号每类型最多缓存几个（0 = 关闭预建）
 	ttl time.Duration // 超过这个年龄的会话丢弃
 	now func() time.Time
+	// building 正在后台补货的 (账号|类型)。
+	//
+	// 为什么要它：命中后要"立刻补一个"，但突发流量下每个请求都会命中并触发补货，
+	// 同一号会同时建好几个 —— Put 的 per 上限又会把多余的丢掉，
+	// 等于白打上游（每个 2~3 秒、一次代理往返）。有这张表就退化成"每号最多一个在途"。
+	building map[string]bool
 	// hit / miss 命中率观测。命中=省掉一次 chats/new；
 	// 如果 miss 很高，说明预热覆盖的号与实际选号错位（要看 warmTarget/HotNames）。
 	hit, miss int64
@@ -49,11 +55,40 @@ func NewChatPool(per int, ttl time.Duration) *ChatPool {
 		ttl = 15 * time.Minute
 	}
 	return &ChatPool{
-		m:   map[string]map[string][]chatEntry{},
-		per: per,
-		ttl: ttl,
-		now: time.Now,
+		m:        map[string]map[string][]chatEntry{},
+		building: map[string]bool{},
+		per:      per,
+		ttl:      ttl,
+		now:      time.Now,
 	}
+}
+
+// TryBuild 占一个"补货中"的名额；已有在途补货则返回 false。
+//
+// 成对使用 BuildDone，中间那段就是真实的 chats/new 调用。
+func (p *ChatPool) TryBuild(account, chatType string) bool {
+	if p == nil || !p.Enabled() {
+		return false
+	}
+	k := account + "\x00" + chatType
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.building[k] {
+		return false
+	}
+	p.building[k] = true
+	return true
+}
+
+// BuildDone 释放补货名额（幂等）。
+func (p *ChatPool) BuildDone(account, chatType string) {
+	if p == nil {
+		return
+	}
+	k := account + "\x00" + chatType
+	p.mu.Lock()
+	delete(p.building, k)
+	p.mu.Unlock()
 }
 
 // SetLimits 热更新每号每类型的目标数与 TTL（面板保存后调用）。
@@ -221,15 +256,15 @@ func (p *ChatPool) Trim() int {
 
 // ChatPoolStat 观测口径（/stats 与面板用）。
 type ChatPoolStat struct {
-	Per    int            `json:"per"`     // 每号每类型目标数
-	TTLS   int            `json:"ttl_s"`   // 缓存上限（秒）
-	Ready  int            `json:"ready"`   // 当前可用的会话总数
-	Hit    int64          `json:"hit"`     // 命中次数（省掉一次 chats/new）
-	Miss   int64          `json:"miss"`    // 未命中次数（只能现建）
-	HitPct float64        `json:"hit_pct"` // 命中率（%）
-	BuildMS float64       `json:"build_ms_avg"` // 现建会话的平均耗时（ms）
-	BuildN  int64         `json:"build_n"`      // 现建样本数
-	ByName map[string]int `json:"by_type"` // 按会话类型分布
+	Per     int            `json:"per"`          // 每号每类型目标数
+	TTLS    int            `json:"ttl_s"`        // 缓存上限（秒）
+	Ready   int            `json:"ready"`        // 当前可用的会话总数
+	Hit     int64          `json:"hit"`          // 命中次数（省掉一次 chats/new）
+	Miss    int64          `json:"miss"`         // 未命中次数（只能现建）
+	HitPct  float64        `json:"hit_pct"`      // 命中率（%）
+	BuildMS float64        `json:"build_ms_avg"` // 现建会话的平均耗时（ms）
+	BuildN  int64          `json:"build_n"`      // 现建样本数
+	ByName  map[string]int `json:"by_type"`      // 按会话类型分布
 }
 
 // Stat 汇总当前池子。
