@@ -298,9 +298,13 @@ func TestImageProxyIsUnauthenticated(t *testing.T) {
 	}
 }
 
-// TestImagesGenerationReturnsProxyURL 端到端钉住"不再吐上游直链"：
-// 那条链有 UA + Referer 双防盗链，调用方拿到手必然 403/404。
-func TestImagesGenerationReturnsProxyURL(t *testing.T) {
+// TestImagesGenerationReturnsUpstreamURL 端到端钉住"url 就是上游 cdn 原链"。
+//
+// 🔴 方向与 2026-11-02 早先版本相反：当时改成返回网关代理地址（因为原链有
+// UA + Referer 防盗链、调用方拿到手会 403/404）。用户随后明确要求**全部给
+// cdn.qwenlm.ai**，于是回退。这条测试现在守的是"别又被顺手改回代理地址"，
+// 以及"网关域名绝不能渗进响应体"。
+func TestImagesGenerationReturnsUpstreamURL(t *testing.T) {
 	const upstreamURL = "https://cdn.qwenlm.ai/output/u1/t2i/c1/abc.png?key=k"
 	up := newImageUpstream(t)
 	up.productURL = upstreamURL
@@ -324,9 +328,13 @@ func TestImagesGenerationReturnsProxyURL(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	want := "https://qwen2api.1task.cn/v1/media/output/u1/t2i/c1/abc.png?key=k"
-	if len(resp.Data) != 1 || resp.Data[0].URL != want {
-		t.Fatalf("应返回代理地址 %q，实际 %+v", want, resp.Data)
+	// 🔴 2026-11-02 用户要求：`url` 必须是**上游 cdn 原链**，响应里不出现网关域名。
+	if len(resp.Data) != 1 || resp.Data[0].URL != upstreamURL {
+		t.Fatalf("应原样返回上游直链 %q，实际 %+v", upstreamURL, resp.Data)
+	}
+	// 反向断言：绝不能被改写成网关的 /v1/media 代理地址（哪怕 blob_base_url 配了）。
+	if strings.Contains(resp.Data[0].URL, "/v1/media/") {
+		t.Fatalf("url 被改写成了网关代理地址：%q", resp.Data[0].URL)
 	}
 }
 

@@ -196,13 +196,13 @@ curl -s localhost:8400/v1/images/generations \
 ```
 
 ```json
-{"created":1793185538,"data":[{"url":"https://qwen2api.1task.cn/v1/media/output/.../t2i/....png?key=<JWT>"}]}
+{"created":1793185538,"data":[{"url":"https://cdn.qwenlm.ai/output/.../t2i/....png?key=<JWT>"}]}
 ```
 
-> 🔴 `url` 是**网关自己的代理地址**（`/v1/media/...`），不是上游 `cdn.qwenlm.ai` 直链。
-> 网关实时透传字节、不落盘。原链前面有 UA + Referer 双重防盗链（见 `docs/UPSTREAM.md` §4.5.6），
-> 直接给调用方必然 403/404，所以这里必须换。代理端点**免鉴权**（`<img>` 不会带 API Key），
-> 访问控制沿用原链里的 `key`。
+> `url` 就是**上游 cdn 原链**，原样透传，不做改写、不落盘、不转存。
+> ⚠️ 该链有 UA + Referer 双重防盗链（见 `docs/UPSTREAM.md` §4.5.6）：浏览器地址栏直输能开，
+> 网页 `<img>` / 服务端 SDK 拉取会 403/404。需要绕过时用同一网关的
+> `GET /v1/media/<原 path>` 代理（免鉴权、实时透传），见下方运维面表。
 
 | 字段 | 说明 |
 |---|---|
@@ -219,12 +219,12 @@ curl -s localhost:8400/v1/images/generations \
 >
 > ⚠️ **产物链接的坑**（实测，本仓已兜住）：
 > 1. **刚生成的那几秒 CDN 还没转存完** —— 立刻下会得到 404 + 226 字节 HTML「死链」。
->    `b64_json` 模式带退避重试；HTTP 代理端点对 404 也重试一次。
-> 2. **上游原链有两道防盗链** —— `curl/*` 这类 UA 被 WAF 挡成 404（返回体与「没转存」
->    一模一样，极容易误诊）；带外站 Referer 则 403。所以 `url` **返回的是网关代理地址**，
->    客户端不需要操心 UA/Referer。
+>    `b64_json` 模式带退避重试；`/v1/media` 代理对 404 也重试一次。
+> 2. **原链有两道防盗链** —— `curl/*` 这类 UA 被 WAF 挡成 404（返回体与「没转存」
+>    一模一样，极容易误诊）；带外站 Referer 则 403。`url` 原样返回，所以**自己下载要带
+>    浏览器 UA**；不想操心就用 `/v1/media` 代理。
 > 3. 判真假看 **magic bytes**，不看 `Content-Type`（真图可能回 `application/octet-stream`）；
->    代理端点在 `Content-Type` 不是 `image/*` 时按扩展名兜底。
+>    `/v1/media` 在 `Content-Type` 不是 `image/*` 时按扩展名兜底。
 
 ### `POST /v1/videos/generations` + `GET /v1/videos/{id}`
 
@@ -363,7 +363,7 @@ Claude Code / Cline 这类客户端把 Base URL 指向本服务即可。按 Anth
 | `GET /healthz` | 存活（不带凭据） |
 | `GET /readyz` | 就绪（无可用账号时 503） |
 | `GET /stats` | 池快照 + 请求统计 + 模型缓存状态 |
-| `GET /v1/media/output/...` | 图片直链**实时代理**（免鉴权、不落盘）。`url` 模式返回的就是它：替调用方补上上游 CDN 要求的 UA/Referer，见 `docs/UPSTREAM.md` §4.5.6 |
+| `GET /v1/media/output/...` | 图片直链**实时代理**（免鉴权、不落盘）。替调用方补上上游 CDN 要求的 UA/Referer，用于原链被 403/404 时绕行；`url` 字段默认不用它（原样返回上游直链），见 `docs/UPSTREAM.md` §4.5.6 |
 
 ## 配置
 

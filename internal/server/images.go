@@ -277,12 +277,13 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 			lastErr = err
 			break
 		}
-		// 对外一律返回网关的代理地址：上游 CDN 有 UA + Referer 双重防盗链，
-		// 原链交给调用方必挂（见 mediaproxy.go 文件头）。
-		// b64_json 分支仍用**原链**下载：我们自己的出口带对了头，不必绕一圈。
-		proxyBase := s.blobBase(r)
+		// 🔴 对外**原样返回上游 cdn 直链**（2026-11-02 用户明确要求）：
+		// 不改写成网关域名，响应里不出现 qwen2api 自己的地址。
+		// 代价：该链有 UA + Referer 双重防盗链（见 docs/UPSTREAM.md §4.5.6），
+		// 浏览器地址栏直输能开，网页 <img> / 服务端 SDK 会 403/404 ——
+		// 需要绕过时用 /v1/media 代理（mediaproxy.go），改这里一行即可切回。
 		for _, u := range imgs {
-			d := ImageDatum{URL: proxyImageURL(proxyBase, u), RevisedPrompt: revised}
+			d := ImageDatum{URL: u, RevisedPrompt: revised}
 			if format == "b64_json" {
 				b64, derr := downloadAsBase64(r.Context(), u)
 				if derr != nil {
@@ -803,9 +804,9 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	datums := make([]ImageDatum, 0, len(imgs))
-	proxyBase := s.blobBase(r)
 	for _, u := range imgs {
-		d := ImageDatum{URL: proxyImageURL(proxyBase, u), RevisedPrompt: revised}
+		// 同 generations：原样返回上游直链。
+		d := ImageDatum{URL: u, RevisedPrompt: revised}
 		if format == "b64_json" {
 			if b64, derr := downloadAsBase64(r.Context(), u); derr == nil {
 				d.B64JSON = b64

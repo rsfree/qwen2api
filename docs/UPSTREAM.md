@@ -497,7 +497,10 @@ HTTP 200、SSE 正常收流、`phase` 是普通的 `answer`。识别标志只有
 >
 > 两道闸是**独立**的：403 走 Referer 白名单，404 走 UA 识别。所以"把链接发给别人 / 放进网页
 > `<img>` / 交给服务端 SDK"必然挂 —— `<img>` 会自动带页面 Referer（403），SDK 不带浏览器 UA（404）。
-> 网关因此不再透出原链，改为 `/v1/media/<原 path>` 实时代理（见 `internal/server/mediaproxy.go`）。
+>
+> 网关的处置：`url` 字段**仍原样返回上游直链**（用户要求，不做改写）；另提供
+> `GET /v1/media/<原 path>` 实时代理（免鉴权、补对 UA/Referer、不落盘）供需要绕过的调用方使用，
+> 见 `internal/server/mediaproxy.go`。
 
 ### 4.5.7 断流后的补捞：产物其实落库在会话历史里（✅ 2026-10-31 实测）
 
