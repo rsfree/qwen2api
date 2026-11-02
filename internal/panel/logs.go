@@ -19,7 +19,7 @@ import (
 // 查询参数：
 //
 //	limit    1..500，默认 200
-//	q        模糊匹配 路径/模型/账号/来源 IP/请求 ID/错误
+//	q        模糊匹配 路径/模型/账号/来源 IP/请求 ID/上游会话 id/错误
 //	outcome  ok | failed（空 = 全部）
 func (p *Panel) handleRequests(w http.ResponseWriter, r *http.Request) {
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
@@ -42,7 +42,8 @@ func (p *Panel) handleRequests(w http.ResponseWriter, r *http.Request) {
 		if outcome == "failed" && ok {
 			continue
 		}
-		if q != "" && !matchEntry(q, e.Path, e.Model, e.Account, e.ClientIP, e.ID, e.Error, e.UserAgent) {
+		// ChatID 也进搜索：产物超时后运维手里只有这个 id，要能反查到那一条流水。
+		if q != "" && !matchEntry(q, e.Path, e.Model, e.Account, e.ClientIP, e.ID, e.ChatID, e.Error, e.UserAgent) {
 			continue
 		}
 		items = append(items, e)

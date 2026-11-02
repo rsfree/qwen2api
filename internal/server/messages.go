@@ -164,9 +164,11 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	for {
 		ev, more, err := sd.stream.Next()
 		if err != nil {
+			// 与 chat 前门同一口径：流内错误只给标准英文，详细原因留服务端。
+			_, msg := clientError(http.StatusBadGateway, errTypeFor(err), err.Error())
 			s.anthropicEvent(w, flusher, "error", map[string]any{
 				"type":  "error",
-				"error": map[string]any{"type": "api_error", "message": err.Error()},
+				"error": map[string]any{"type": "api_error", "message": msg},
 			})
 			break
 		}
@@ -363,4 +365,3 @@ func mustJSON(s string) json.RawMessage {
 	raw, _ := json.Marshal(s)
 	return raw
 }
-

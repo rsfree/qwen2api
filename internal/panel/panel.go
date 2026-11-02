@@ -344,7 +344,6 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"uptime_s":   p.b.UptimeSeconds(),
 		"pool_stats": summarize(views, videoMin),
 		"stats":      p.b.Log().Stats(),
-		"requests":   p.b.Log().Recent(80),
 		"config":     summary,
 	})
 }

@@ -271,6 +271,9 @@ func (s *Server) Handler() http.Handler {
 	// 🔴 免鉴权：上游来拉图时不会带我们的 API Key。
 	// 安全性靠"不可猜 ID + 2h TTL + 只读"，见 blobs.go 文件头。
 	mux.HandleFunc("GET /v1/blobs/{id}", s.handleBlob)
+	// 🔴 同样免鉴权：浏览器 <img> 不会带 API Key。
+	// 只代理写死的上游 host + /output/ 前缀，安全性见 mediaproxy.go 文件头。
+	mux.HandleFunc("GET /v1/media/{rest...}", s.handleImageProxy)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("GET /stats", s.wrap("/stats", s.handleStats))
@@ -415,12 +418,26 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeError(w http.ResponseWriter, code int, typ, msg string) {
 	typ, msg = clientError(code, typ, msg)
+	retryAfter(w, code)
 	writeJSON(w, code, ErrorBody{Error: ErrorDetail{Message: msg, Type: typ}})
+}
+
+// retryAfter 给"过会儿再来"的 5xx 补上标准重试提示。
+//
+// 为什么值得单独写：客户端与中间网关（new-api / one-api 这类）很多只在
+// 看到 Retry-After 时才自动重试；缺了它，一次上游抖动就变成调用方的一次硬失败。
+// 5 秒是保守值 —— 上游"零产物"通常是单个账号挂了，换号重发立刻就能出。
+func retryAfter(w http.ResponseWriter, code int) {
+	switch code {
+	case http.StatusGatewayTimeout, http.StatusServiceUnavailable:
+		w.Header().Set("Retry-After", "5")
+	}
 }
 
 // writeErrorParam 带 param 的错误（Images 端点用：指明是哪个字段的问题）。
 func writeErrorParam(w http.ResponseWriter, code int, typ, msg, param string) {
 	typ, msg = clientError(code, typ, msg)
+	retryAfter(w, code)
 	writeJSON(w, code, ErrorBody{Error: ErrorDetail{Message: msg, Type: typ, Param: param}})
 }
 

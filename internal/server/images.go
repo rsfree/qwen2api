@@ -277,8 +277,12 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 			lastErr = err
 			break
 		}
+		// 对外一律返回网关的代理地址：上游 CDN 有 UA + Referer 双重防盗链，
+		// 原链交给调用方必挂（见 mediaproxy.go 文件头）。
+		// b64_json 分支仍用**原链**下载：我们自己的出口带对了头，不必绕一圈。
+		proxyBase := s.blobBase(r)
 		for _, u := range imgs {
-			d := ImageDatum{URL: u, RevisedPrompt: revised}
+			d := ImageDatum{URL: proxyImageURL(proxyBase, u), RevisedPrompt: revised}
 			if format == "b64_json" {
 				b64, derr := downloadAsBase64(r.Context(), u)
 				if derr != nil {
@@ -340,8 +344,14 @@ var errUpstreamTimeout = errors.New("上游在时间预算内没有任何产物�
 // 只能靠会话历史补捞，而补捞有落库延迟、也可能扑空 —— 让预算覆盖到产物尾部，
 // 比事后补救便宜。多图本来就慢，统一用一个可配上限，语义更好解释。
 //
-// ⚠️ 零产物超时会**换号再试一次**（见 imageAccountRotations 的闸），
-// 所以最坏等待是 2×预算。觉得太久的把它调小即可。
+// ⚠️ 零产物超时**不换号重试**（2026-10-31 起）：冷却该号 10 分钟 + 直接 504，
+// 所以最坏等待就是 1×预算，不是 2×（旧注释写反了，2026-11-02 订正）。
+//
+// 那能不能降到 180s？**不能**（2026-11-02 全形态实测）：
+// 单图 t2i 55~79s、单参考图 i2i 56~118s、n=2 116s —— 都够；
+// 但**双参考图 edits 实测 255.1s 才出图**。而"真挂住（只发心跳）"与
+// "慢但会出"在预算耗尽的时刻长得一模一样，只降预算等于用误杀换快失败。
+// 真嫌等太久，让它走 Retry-After 由调用方重试，比在网关里掐更划算。
 func (s *Server) imageBudget() time.Duration {
 	sec := s.conf().ImageTimeoutS
 	if sec <= 0 {
@@ -441,8 +451,10 @@ func (s *Server) generateImage(ctx context.Context, model, imageModel, thinking,
 		// 而超时本身也不保证下一个号更快。冷却这个号（它大概率额度将尽），如实报超时。
 		if errors.Is(err, errUpstreamTimeout) {
 			s.coolAfterImageTimeout(a)
-			log.Printf("[qwen2api] 生图超时（%s 零产物，%s），冷却 10 分钟、不重试",
-				a.Name, took.Round(time.Second))
+			// 把整条诊断打进运行日志：文案里已含"补捞几次 + 为什么没救回来"，
+			// 而事后判断"该不该手工取回"全靠这一行。
+			log.Printf("[qwen2api] 生图超时（%s 零产物，%s），冷却 10 分钟、不重试：%v",
+				a.Name, took.Round(time.Second), err)
 			break
 		}
 		if !(retryableImageErr(err) || fastRetryable(err, took)) {
@@ -513,10 +525,11 @@ func (s *Server) generateOnAccount(ctx context.Context, a *pool.Account,
 			}
 			// 一张都没收到：图可能已经落进上游会话历史，只是这一帧没送到。
 			// 这是流式生图唯一的"事后取证"通道（见 upstream.LatestChatImages）。
-			if rec := s.recoverImages(ctx, cred, chatID); len(rec) > 0 {
+			rec, tries, why := s.recoverImages(ctx, cred, chatID)
+			if len(rec) > 0 {
 				imgs = rec
-				log.Printf("[qwen2api] 生图流失败（%v），从会话历史补回 %d 张（chat=%s）",
-					err, len(rec), chatID)
+				log.Printf("[qwen2api] 生图流失败（%v），从会话历史补回 %d 张（chat=%s，补捞 %d 次）",
+					err, len(rec), chatID, tries)
 				break
 			}
 			if ctx.Err() == context.DeadlineExceeded {
@@ -525,11 +538,16 @@ func (s *Server) generateOnAccount(ctx context.Context, a *pool.Account,
 				//   · 上游临时故障 —— 等几分钟同一账号又能出图。
 				// 所以文案不能断言"额度用完"，只能说"两种可能 + 怎么区分"。
 				// 🔴 这段中文只进流水/容器日志；客户端拿到的是 504 + "upstream timeout"。
-				return nil, "", chatID, fmt.Errorf("%w（预算 %s，垫图 %d 张）。两种可能："+
-					"①该账号今日生图额度将尽（再发一次通常返回 insufficient_quota 确认）；"+
-					"②上游临时故障（等几分钟重试往往恢复，多垫图时更慢）。"+
+				// 🔴 三种可能里第 ③ 条是 2026-11-02 才确认的（线上 img-1b45ad8e）：
+				// 预算 300s 放弃时上游**还在画**，61 秒后才出图。所以"零产物超时"
+				// 既不能断言额度用尽，也不能说上游坏了 —— 它可能只是慢。
+				// 补捞次数/原因一起写进来：事后第一问就是"补捞为什么没救回来"。
+				return nil, "", chatID, fmt.Errorf("%w（预算 %s，垫图 %d 张；会话补捞 %d 次%s）。"+
+					"三种可能：①该账号今日生图额度将尽（再发一次通常返回 insufficient_quota 确认）；"+
+					"②上游临时故障（等几分钟重试往往恢复，多垫图时更慢）；"+
+					"③上游还在画、只是比预算慢 —— 产物几分钟后会落进会话历史，凭本条的 chat_id 可手工取回。"+
 					"预算已用尽、网关不会自动换号重试：请稍后再发，或换一个账号发起",
-					errUpstreamTimeout, budget, len(refs))
+					errUpstreamTimeout, budget, len(refs), tries, why)
 			}
 			return nil, "", chatID, err
 		}
@@ -570,12 +588,19 @@ func (s *Server) generateOnAccount(ctx context.Context, a *pool.Account,
 // 只在"一张图都没有"时才值得调：历史里的图与流里的是同一批，
 // 已经拿到图再查一遍只是白花一次往返。
 //
+// 返回 tries（实际查了几次）与 why（无果的原因，已是可以直接拼进文案的括号短语）：
+// 这两个值是给运维看的 —— 504 之后第一个问题就是"补捞为什么没救回来"，
+// "查了 2 次、链接未定稿"与"根本没查"是完全不同的故障。
+//
 // 🔴 用 WithoutCancel：这条路径恰恰是"本次预算已耗尽/流已断"的时候，
 // 继承原 ctx 会立刻失败，等于白写。只保留其中的账号与出口信息（value 不受影响）。
 // 客户端主动断开（Canceled）则不补 —— 补回来也没人收。
-func (s *Server) recoverImages(ctx context.Context, cred, chatID string) []string {
-	if chatID == "" || errors.Is(ctx.Err(), context.Canceled) {
-		return nil
+func (s *Server) recoverImages(ctx context.Context, cred, chatID string) (imgs []string, tries int, why string) {
+	if chatID == "" {
+		return nil, 0, "（未执行：没有 chat_id）"
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return nil, 0, "（未执行：客户端已断开）"
 	}
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 25*time.Second)
 	defer cancel()
@@ -584,29 +609,42 @@ func (s *Server) recoverImages(ctx context.Context, cred, chatID string) []strin
 	//   图片帧在**第 60.0 秒**才出现在流里，而线上那条 502 是在 **25.8s** 断的。
 	//   断点完全可能早于"落库"：此刻查历史会是空的，几秒后就有了。
 	//   代价只有 ~3s（查询本身 0.2s），比让调用方重画一张（60s + 一次额度）便宜得多。
+	//
+	// ⚠️ 但"落库"也不等于"能下载"：实测链接还要再过 2~6 分钟才被 CDN 签名。
+	//   所以"未定稿"同样只再查一轮 —— 想等到定稿是不现实的（>> 预算），
+	//   这里只把状态记清楚，把取回的机会留给事后。
+	var lastWhy string
 	for attempt := 0; attempt < 2; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-time.After(3 * time.Second):
 			case <-rctx.Done():
-				return nil
+				return nil, tries, lastWhy
 			}
 		}
+		tries++
 		found, err := s.up.LatestChatImages(rctx, cred, chatID)
 		if err != nil {
-			// 读失败不值得再等：下一轮多半还是同样的错（凭据/风控/形态）。
+			// 🔴 未定稿不是"查询失败"，而是"上游画完了、CDN 还没签名"：
+			// 值得再查一轮（3s 后可能刚好签完），但不值得为它拉长预算。
+			if errors.Is(err, upstream.ErrImageNotFinalized) {
+				lastWhy = "（链接已落库但未定稿，CDN 未签名）"
+				continue
+			}
+			// 其他读失败不值得再等：下一轮多半还是同样的错（凭据/风控/形态）。
 			log.Printf("[qwen2api] 会话历史补捞失败（chat=%s）: %v", chatID, err)
-			return nil
+			return nil, tries, "（查询失败：" + err.Error() + "）"
 		}
 		if len(found) > 0 {
 			if attempt > 0 {
 				log.Printf("[qwen2api] 会话历史第 %d 次补捞命中（首查为空，%d 张）",
 					attempt+1, len(found))
 			}
-			return found
+			return found, tries, ""
 		}
+		lastWhy = "（历史里查无产物）"
 	}
-	return nil
+	return nil, tries, lastWhy
 }
 
 // downloadAsBase64 把直链图片转成 base64（b64_json 用）。
@@ -765,8 +803,9 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	datums := make([]ImageDatum, 0, len(imgs))
+	proxyBase := s.blobBase(r)
 	for _, u := range imgs {
-		d := ImageDatum{URL: u, RevisedPrompt: revised}
+		d := ImageDatum{URL: proxyImageURL(proxyBase, u), RevisedPrompt: revised}
 		if format == "b64_json" {
 			if b64, derr := downloadAsBase64(r.Context(), u); derr == nil {
 				d.B64JSON = b64

@@ -28,6 +28,9 @@ type imageUpstream struct {
 	chatReqs []map[string]any
 	// failMode = "hangup" 时只写一帧 created 就收尾（模拟上游"只发心跳、无产物"）。
 	failMode string
+	// productURL 产物直链。空则用 cdn.example（默认够测字段映射）；
+	// 测图片代理要换成真实上游域名 cdn.qwenlm.ai。
+	productURL string
 }
 
 func newImageUpstream(t *testing.T) *imageUpstream {
@@ -55,9 +58,13 @@ func newImageUpstream(t *testing.T) *imageUpstream {
 				_, _ = w.Write([]byte("data: {\"response.created\":{\"chat_id\":\"c\",\"parent_id\":\"\",\"response_id\":\"r\",\"response_index\":\"0\"}}\n\n"))
 				return
 			}
+			product := f.productURL
+			if product == "" {
+				product = "https://cdn.example/img.png?key=k"
+			}
 			for _, fr := range []string{
 				`{"response.created":{"chat_id":"chat-1","parent_id":"","response_id":"r1","response_index":"0"}}`,
-				`{"choices":[{"delta":{"role":"assistant","content":"https://cdn.example/img.png?key=k","phase":"image_gen","extra":{"output_image_hw":[["1024","1024"]],"model":"qwen-image-3.0"},"status":"typing"}}],"response_id":"r1","usage":{}}`,
+				`{"choices":[{"delta":{"role":"assistant","content":"` + product + `","phase":"image_gen","extra":{"output_image_hw":[["1024","1024"]],"model":"qwen-image-3.0"},"status":"typing"}}],"response_id":"r1","usage":{}}`,
 				`{"choices":[{"delta":{"content":"","role":"assistant","status":"finished","phase":"image_gen"}}],"response_id":"r1"}`,
 			} {
 				_, _ = w.Write([]byte("data: " + fr + "\n\n"))

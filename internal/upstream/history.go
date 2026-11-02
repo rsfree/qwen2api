@@ -3,12 +3,19 @@ package upstream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// ErrImageNotFinalized 会话历史里已经有图，但链接还没被 CDN 签名 —— 现在下载必 404。
+//
+// 这是"上游确实画了、只是慢"的铁证：调用方拿不到图不是**失败**，是**晚**。
+// 上层据此能讲清"别重画、几分钟后可以取回"，而不是笼统报一句超时。
+var ErrImageNotFinalized = errors.New("会话历史里的图片链接尚未定稿（CDN 未签名，下载必 404）")
 
 // historyTimeout 会话历史是只读小请求（实测 0.25s / 9KB），20s 足够。
 //
@@ -85,7 +92,48 @@ func (c *Client) LatestChatImages(ctx context.Context, cred, chatID string) ([]s
 	if best == nil {
 		return nil, nil
 	}
-	return best.imageURLs(), nil
+	// 🔴 只交付**已定稿**的链接（2026-11-02 对线上 chat fb709dd6 实测）：
+	// 落库分两步，"content_list 里出现地址" ≠ "现在能下载"。未定稿形态
+	// `.../t2i/<msg>/1793612603855`（无扩展名、无签名）下回来是 404 + 226 字节
+	// Tengine HTML —— 和"刚出图还没转存完"的表象一模一样，极易误诊。
+	// 定稿后才变成 `.../1793612603855e.png?key=<JWT>`，实测要再等 2~6 分钟。
+	//
+	// 宁可报"未定稿"也别把死链当产物交出去：调用方拿到 200 + 打不开的 URL
+	// 会以为成功并把它存下来，这比直接 504 糟得多。
+	final, pending := splitFinalized(best.imageURLs())
+	if len(final) > 0 {
+		return final, nil
+	}
+	return nil, fmt.Errorf("%w（%d 个链接待签名）", ErrImageNotFinalized, len(pending))
+}
+
+// splitFinalized 把链接分成"现在就能下"与"还在等 CDN 签名"两组（保序）。
+func splitFinalized(urls []string) (final, pending []string) {
+	for _, u := range urls {
+		if finalizedImageURL(u) {
+			final = append(final, u)
+		} else {
+			pending = append(pending, u)
+		}
+	}
+	return final, pending
+}
+
+// finalizedImageURL 该链接是否已定稿（现在下载能拿到真图）。
+//
+// 🔴 判据只用 `?key=` —— 依据是同一条会话间隔几分钟抓两次的对照：
+//
+//	未定稿 `.../1793612603855`           → CDN 404 + 226B Tengine HTML
+//	定稿   `.../1793612603855e.png?key=` → 200 / image/png / 9.3MB
+//
+// 不拿 `status:"finished"` 或 `done` 当判据：那条会话两者都已是完成态，
+// 链接却还没签名 —— 它们只说明"生成结束"，不说明"文件可下载"。
+//
+// fail-closed 的取舍：哪天上游改成公开直链（无 key），这里会把真产物误判成
+// 未定稿，表现是"补捞永远无果、仍报超时"—— 也就是今天的行为，不会更坏。
+func finalizedImageURL(u string) bool {
+	_, query, ok := strings.Cut(u, "?")
+	return ok && strings.Contains(query, "key=")
 }
 
 // historyMessage 会话历史里的单条消息（只声明实现用到的字段）。

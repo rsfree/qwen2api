@@ -196,8 +196,13 @@ curl -s localhost:8400/v1/images/generations \
 ```
 
 ```json
-{"created":1793185538,"data":[{"url":"https://cdn.qwenlm.ai/output/.../t2i/....png?key=<JWT>"}]}
+{"created":1793185538,"data":[{"url":"https://qwen2api.1task.cn/v1/media/output/.../t2i/....png?key=<JWT>"}]}
 ```
+
+> 🔴 `url` 是**网关自己的代理地址**（`/v1/media/...`），不是上游 `cdn.qwenlm.ai` 直链。
+> 网关实时透传字节、不落盘。原链前面有 UA + Referer 双重防盗链（见 `docs/UPSTREAM.md` §4.5.6），
+> 直接给调用方必然 403/404，所以这里必须换。代理端点**免鉴权**（`<img>` 不会带 API Key），
+> 访问控制沿用原链里的 `key`。
 
 | 字段 | 说明 |
 |---|---|
@@ -212,14 +217,14 @@ curl -s localhost:8400/v1/images/generations \
 > 🔴 `prompt` **原样发给上游**，不要自己加「请画一张图：」之类的包装。t2i 是显式类型，
 > 上游按 `chat_type` 分派；被改写的 prompt 会让它静默空转（实测 200s 无内容）。
 >
-> ⚠️ **产物链接的两个坑**（实测，本仓已兜住）：
+> ⚠️ **产物链接的坑**（实测，本仓已兜住）：
 > 1. **刚生成的那几秒 CDN 还没转存完** —— 立刻下会得到 404 + 226 字节 HTML「死链」。
->    `b64_json` 模式带退避重试；`url` 模式原样转出（image-adapter 同口径）。
-> 2. **脚本下载必须用浏览器 UA** —— `curl/*` 这类 UA 会被 WAF 直接挡成 404，返回体和
->    「文件还没转存」**一模一样**（226 字节 Tengine 页），极容易误诊。Referer 反而是
->    「要么不带、要么带 `https://chat.qwen.ai/`」：带面板域名等外站 Referer 会 403。
->    网关的图片 b64 下载与视频 `/content` 代理都自带浏览器 UA，不用客户端操心。
-> 3. 判真假看 **magic bytes**，不看 `Content-Type`（真图可能回 `application/octet-stream`）。
+>    `b64_json` 模式带退避重试；HTTP 代理端点对 404 也重试一次。
+> 2. **上游原链有两道防盗链** —— `curl/*` 这类 UA 被 WAF 挡成 404（返回体与「没转存」
+>    一模一样，极容易误诊）；带外站 Referer 则 403。所以 `url` **返回的是网关代理地址**，
+>    客户端不需要操心 UA/Referer。
+> 3. 判真假看 **magic bytes**，不看 `Content-Type`（真图可能回 `application/octet-stream`）；
+>    代理端点在 `Content-Type` 不是 `image/*` 时按扩展名兜底。
 
 ### `POST /v1/videos/generations` + `GET /v1/videos/{id}`
 
@@ -358,6 +363,7 @@ Claude Code / Cline 这类客户端把 Base URL 指向本服务即可。按 Anth
 | `GET /healthz` | 存活（不带凭据） |
 | `GET /readyz` | 就绪（无可用账号时 503） |
 | `GET /stats` | 池快照 + 请求统计 + 模型缓存状态 |
+| `GET /v1/media/output/...` | 图片直链**实时代理**（免鉴权、不落盘）。`url` 模式返回的就是它：替调用方补上上游 CDN 要求的 UA/Referer，见 `docs/UPSTREAM.md` §4.5.6 |
 
 ## 配置
 
@@ -657,7 +663,8 @@ internal/reqlog/     请求流水（环形缓冲 + stdout 一行）
 | **`n=2`** | ✅ 2 张，165.7s（串行两次上游调用，约 83s/张） |
 | **额度耗尽** | ✅ 429 + `insufficient_quota` + 上游原话（识别 `extra.update_member`） |
 | **每日额度（免费号）** | ✅ 全程压测：**9 张**后耗尽；中途 2 次「静默挂起」但自愈（非额度） |
-| **挂起保护** | ✅ 图片单次预算 = `image_timeout_s`（默认 **300s**，真跑实测出图 60s、最慢双垫图 137s）；超时 → 该号冷却 10 分钟 + **直接回 504**（不换号重试：预算已很长，再等一轮等于挂 10 分钟）。"额度将尽 / 临时故障"的判断只写流水 |
+| **挂起保护** | ✅ 图片单次预算 = `image_timeout_s`（默认 **300s**，真跑实测出图 60s、最慢双垫图 137s）；超时 → 该号冷却 10 分钟 + **直接回 504**（不换号重试：预算已很长，再等一轮等于挂 10 分钟）。"额度将尽 / 上游故障 / 只是慢"三种可能只写流水，不替调用方猜 |
+| **超时后取回** | ✅ 504 的流水写明"补捞几次 + 为什么没救回来"（如 `会话补捞 2 次（链接已落库但未定稿，CDN 未签名）`）+ `chat_id`；面板请求表点 chat_id 即可复制，拿去上游会话历史手工取图（2026-11-02 线上实测取回 2752×1536 PNG） |
 | **本地每日配额** | ✅ 限额设 1 实测：第 1 张 69.9s 出图，第 2 张 **0.003s 直接 429**（未打上游） |
 | **图生图 b64** `response_format:"b64_json"` | ✅ 53.9s，9.95MB base64 → 7.46MB PNG（`89 50 4E 47` 校验） |
 | **`/v1/images/edits`**（multipart） | ✅ 51.7s，`-F image=@ref.png` 直接出图 |

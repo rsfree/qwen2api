@@ -172,6 +172,71 @@ func TestImageStreamFailsWhenHistoryHasNoImage(t *testing.T) {
 	}
 }
 
+// 零产物超时的流水必须自证"补捞为什么没救回来"（2026-11-02 线上 img-1b45ad8e）。
+//
+// 那次 300s 一到就 504，补捞两次全空 —— 因为上游 61 秒后才画完，而链接
+// 还要再等 2~6 分钟才被 CDN 签名。事后翻日志只有一句"生图超时"，
+// 看不出补捞跑没跑、为什么空，得人工去上游翻会话才发现图早就画好了。
+func TestImageTimeoutRecordsRecoverOutcome(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/api/v2/chats/new"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"chat-1"}}`))
+
+		case strings.Contains(r.URL.Path, "/api/v2/chat/completions"):
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`data: {"response.created":{"chat_id":"chat-1","parent_id":"","response_id":"r1","response_index":"0"}}` + "\n\n"))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done() // 只发心跳、永不产出：超时由网关这一侧判
+
+		case strings.Contains(r.URL.Path, "/api/v2/chats/chat-1"):
+			// 已落库，但链接还没被 CDN 签名（线上实测形态：无扩展名、无 query）
+			_, _ = w.Write([]byte(`{"success":true,"data":{"chat":{"history":{"messages":{
+				"m1":{"role":"assistant","timestamp":1,"done":true,"content_list":[
+					{"content":"https://cdn.example/output/u/t2i/m/1793612603855","phase":"image_gen","status":"finished"}]}}}}}}`))
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := config.Default()
+	cfg.Upstream.BaseURL = srv.URL
+	cfg.ImageTimeoutS = 1 // 秒；把 300s 的预算逼出来
+	cfg.StateFile = ""
+	cfg.Accounts = []config.Account{{Name: "a0", Token: "tok-0"}}
+	cfg.ImageModel = "qwen-image-3.0"
+
+	lg := reqlog.New(10)
+	h := New(cfg, pool.New(cfg.Pool, cfg.Accounts, ""), upstream.New(cfg.Upstream), lg, "test").Handler()
+
+	rec := postImage(t, h)
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("零产物超时应回 504，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	// 客户端只该看到标准英文 —— 中文诊断与上游内部 id 都不许递出去。
+	if body := rec.Body.String(); strings.Contains(body, "1793612603855") || strings.Contains(body, "补捞") {
+		t.Fatalf("诊断信息不该进响应体: %s", body)
+	}
+
+	recent := lg.Recent(1)
+	if len(recent) != 1 {
+		t.Fatalf("应有 1 条流水，实际 %d 条", len(recent))
+	}
+	e := recent[0]
+	if e.ChatID != "chat-1" {
+		t.Fatalf("流水必须带 chat_id（事后取回产物的唯一钥匙），得到 %q", e.ChatID)
+	}
+	for _, want := range []string{"会话补捞 2 次", "未定稿"} {
+		if !strings.Contains(e.Error, want) {
+			t.Fatalf("流水应写明 %q，实际: %s", want, e.Error)
+		}
+	}
+}
+
 // 断点早于落库 ⇒ 首查为空、几秒后再查才有。这条来自真跑实测：
 // 图片帧在第 60.0s 才出现在流里，而线上 502 是 25.8s 断的 —— 只查一次会全军覆没。
 func TestImageStreamRecoversOnSecondHistoryLookup(t *testing.T) {

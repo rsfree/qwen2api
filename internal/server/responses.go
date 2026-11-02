@@ -148,9 +148,11 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	for {
 		ev, more, err := sd.stream.Next()
 		if err != nil {
+			// 同上：客户端只该看到机器可读的短句，内部细节留在服务端。
+			_, msg := clientError(http.StatusBadGateway, errTypeFor(err), err.Error())
 			emit("response.failed", map[string]any{
 				"response": map[string]any{"id": id, "status": "failed",
-					"error": map[string]any{"code": "upstream_error", "message": err.Error()}},
+					"error": map[string]any{"code": "upstream_error", "message": msg}},
 			})
 			break
 		}

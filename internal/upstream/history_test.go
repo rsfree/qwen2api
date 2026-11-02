@@ -181,6 +181,63 @@ func TestLatestChatImagesSurfacesBusinessError(t *testing.T) {
 	}
 }
 
+// 🔴 未定稿的链接不能当产物交付（2026-11-02 实测）。
+//
+// 落库分两步：content_list 里出现地址 ≠ 现在能下载。那条会话的 done/status
+// 都已是完成态，链接却还是 `.../1793612603855`（无扩展名、无签名），
+// 下载是 404 + 226 字节 Tengine HTML —— 和"刚出图还没转存完"完全同形。
+// 交付这种链接比报超时更糟：调用方会当成成功，然后存下一个永远打不开的地址。
+func TestLatestChatImagesRejectsUnfinalizedURL(t *testing.T) {
+	cli := newHistoryClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"data":{"chat":{"history":{"messages":{
+			"m1":{"role":"assistant","timestamp":1,"done":true,"content_list":[
+				{"content":"https://cdn.example/output/u/t2i/m/1793612603855","phase":"image_gen","status":"finished"}]}
+		}}}}}`))
+	})
+	got, err := cli.LatestChatImages(context.Background(), "tok", "chat-1")
+	if !errors.Is(err, ErrImageNotFinalized) {
+		t.Fatalf("未签名的链接必须报 ErrImageNotFinalized，得到 err=%v urls=%v", err, got)
+	}
+	if len(got) != 0 {
+		t.Fatalf("不能把未定稿的死链当产物返回: %+v", got)
+	}
+}
+
+// 定稿（带 ?key=）就照常返回 —— 判据是"现在能不能下载"，不是"生成完没完"。
+func TestLatestChatImagesAcceptsFinalizedURL(t *testing.T) {
+	cli := newHistoryClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"data":{"chat":{"history":{"messages":{
+			"m1":{"role":"assistant","timestamp":1,"content_list":[
+				{"content":"https://cdn.example/output/u/t2i/m/1793612603855e.png?key=JWT","phase":"image_gen","status":"finished"}]}
+		}}}}}`))
+	})
+	got, err := cli.LatestChatImages(context.Background(), "tok", "chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !strings.Contains(got[0], "?key=JWT") {
+		t.Fatalf("定稿链接应正常返回: %+v", got)
+	}
+}
+
+// 多图里部分定稿：能下的先交付，别因为一张没签就把整批丢掉。
+func TestLatestChatImagesDropsOnlyUnfinalized(t *testing.T) {
+	cli := newHistoryClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"data":{"chat":{"history":{"messages":{
+			"m1":{"role":"assistant","timestamp":1,"content_list":[
+				{"content":"https://cdn.example/output/u/t2i/m/111","phase":"image_gen","status":"finished"},
+				{"content":"https://cdn.example/output/u/t2i/m/222e.png?key=JWT","phase":"image_gen","status":"finished"}]}
+		}}}}}`))
+	})
+	got, err := cli.LatestChatImages(context.Background(), "tok", "chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !strings.Contains(got[0], "222e.png") {
+		t.Fatalf("应只交付已定稿的那张: %+v", got)
+	}
+}
+
 // JSON 形状漂移时给出可诊断的错误，而不是静默返回空。
 func TestLatestChatImagesRejectsUnexpectedShape(t *testing.T) {
 	cli := newHistoryClient(t, func(w http.ResponseWriter, r *http.Request) {
