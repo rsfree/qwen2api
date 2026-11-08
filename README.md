@@ -326,7 +326,7 @@ curl -s "$B/cgt-…/content" -H 'Authorization: Bearer <key>' -o out.mp4
 > | 单图首帧 `standard` | 960×960 | ❌ 被输入图覆盖 |
 > | 首尾帧 `first-last-frame` | 960×960 | ❌ 被输入图覆盖 |
 >
-> 实测耗时（5 秒片）：t2v **约 7 分钟**、单图首帧约 4.5 分钟、首尾帧 47 秒、多参考图 60 秒。
+> 实测耗时（5 秒片）：t2v **约 7~8 分钟**、单图首帧约 4.5 分钟、首尾帧 47 秒、多参考图 60 秒。
 > 客户端轮询预算别按 i2v 的一分钟设计。
 >
 > 紧急退回纯文生：`QWEN2API_VIDEO_MATERIAL_DISABLE=1`（不必回滚版本）。
