@@ -39,7 +39,7 @@ func (s *Server) DebugHandler() http.Handler {
 			s.handleImages(w, r)
 		case p == "/v1/images/edits" && r.Method == http.MethodPost:
 			s.handleImageEdits(w, r)
-		case p == "/v1/videos/generations" && r.Method == http.MethodPost:
+		case p == "/v1/videos" && r.Method == http.MethodPost:
 			s.handleVideoCreate(w, r)
 		case strings.HasSuffix(p, "/content") && strings.HasPrefix(p, "/v1/videos/"):
 			s.handleVideoContent(w, r)

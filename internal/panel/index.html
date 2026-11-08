@@ -515,7 +515,7 @@ button.xs { white-space:nowrap; }
         <div class="pad" id="keyWarn" hidden></div>
         <div id="keyRows"><div class="pad hint">加载中…</div></div>
         <div class="pad" style="border-top:1px solid var(--line-soft)">
-          <div class="hint" style="margin-bottom:6px">Base URL（OpenAI 兼容：/v1/chat/completions · /v1/images/generations · /v1/videos/generations）</div>
+          <div class="hint" style="margin-bottom:6px">Base URL（OpenAI 兼容：/v1/chat/completions · /v1/images/generations · /v1/videos）</div>
           <div class="codebox" id="keyBase">-</div>
           <div class="hint" style="margin:12px 0 6px">最小可用示例（key 放环境变量，别写死在脚本里）</div>
           <div class="codebox" id="keyCurl">-</div>
@@ -1584,7 +1584,7 @@ const DBG_BASE = '/panel/api/debug';
 const DBG_EP = {
   text: '/v1/chat/completions',
   image: '/v1/images/generations',
-  video: '/v1/videos/generations',
+  video: '/v1/videos',
 };
 // DBG_MAX_REFS 与后端 maxInputImages 对齐（服务端超出直接 400）
 const DBG_MAX_REFS = 20;
@@ -1809,16 +1809,18 @@ async function dbgSendImage(turn, model, prompt) {
 
 /* ---- 视频（提交 + 轮询） ---- */
 async function dbgSendVideo(turn, model, prompt) {
+  // canonical 形状：content[] 是唯一入参载体，参数在顶层。
   const payload = {
-    model, prompt,
-    size: $('#dbgVSize').value,
+    model,
+    content: [{ type: 'text', text: prompt }],
+    ratio: $('#dbgVSize').value,
     resolution: $('#dbgRes').value,
     duration: Number($('#dbgDur').value),
-    audio: $('#dbgAudio').value === '1',
+    generate_audio: $('#dbgAudio').value === '1',
   };
   turn.bub.append(dbgIO('请求体', dbgJSON(payload)));
 
-  const r = await fetch(DBG_BASE + '/v1/videos/generations', {
+  const r = await fetch(DBG_BASE + DBG_EP.video, {
     method: 'POST',
     headers: hdrs({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload),
@@ -1830,7 +1832,7 @@ async function dbgSendVideo(turn, model, prompt) {
 
   const id = j.id;
   turn.who.append(dbgNode('span', 'pill warn', '排队中'));
-  turn.body.textContent = '任务 ' + id + '（上游 ' + (j.upstream_id || '-') + '）';
+  turn.body.textContent = '任务 ' + id + '（提交只回 id —— 受理 ≠ 成功，要轮询）';
   dbgSetResp(turn, '响应（提交）', dbgJSON(j));
 
   const bar = dbgNode('div', 'bar');
@@ -1849,7 +1851,7 @@ async function dbgSendVideo(turn, model, prompt) {
     if (!pr) continue;
     const pill = turn.who.querySelector('.pill:last-of-type');
 
-    if (pr.status === 'completed') {
+    if (pr.status === 'succeeded') {
       pill.className = 'pill ok';
       pill.textContent = '完成';
       fill.style.width = '100%';
@@ -1859,9 +1861,10 @@ async function dbgSendVideo(turn, model, prompt) {
       turn.body.append(v);
       try { v.src = await dbgBlobURL(DBG_BASE + '/v1/videos/' + encodeURIComponent(id) + '/content'); }
       catch (e) { turn.body.append(dbgNode('div', 'err', '取回成片失败：' + e.message)); }
-      if (pr.url) {
+      const src = (pr.content && pr.content.video_url) || '';
+      if (src) {
         const a = dbgNode('a', 'note', '原始 CDN 直链（浏览器可直开；脚本下载需换浏览器 UA）');
-        a.href = pr.url;
+        a.href = src;
         a.target = '_blank';
         // 🔴 必须 no-referrer：从面板点过去，浏览器会带 `Referer: <面板域名>`，
         // 而 CDN 的白名单只认 chat.qwen.ai ⇒ 403（看起来像"视频坏了"）。
@@ -1881,9 +1884,10 @@ async function dbgSendVideo(turn, model, prompt) {
       dbgSetResp(turn, '响应（失败）', dbgJSON(pr));
       return;
     }
+    // 上游不报百分比：进度条只表达「非终态」，不编数字。
     pill.className = 'pill warn';
-    pill.textContent = pr.status === 'in_progress' ? '生成中 ' + (pr.progress || 0) + '%' : '排队中';
-    fill.style.width = Math.max(4, pr.progress || 0) + '%';
+    pill.textContent = pr.status === 'running' ? '生成中' : '排队中';
+    fill.style.width = pr.status === 'running' ? '45%' : '8%';
     dbgSetResp(turn, '响应（轮询）', dbgJSON(pr));
   }
   turn.bub.classList.remove('pending');

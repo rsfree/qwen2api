@@ -664,6 +664,54 @@ GET  /api/v2/task/status/<task_id>
 | 720P | 15s | 120 |
 | 1080P | 5s | 70（走付费） |
 
+### 4.7.1 能力按内核分档（✅ 2026-11-08 前端 bundle 取证，零消耗）
+
+前端 `qwen-chat-fe/0.3.38/js/main.js` 里的原文常量（只读 GET）：
+
+```js
+// 模型别名：UI 显示名 ⇄ biz_data.rootModel
+zn = {"happyhorse-1.1":"happyhorse11","happyhorse-1.0":"happyhorse","wan-2.7":"wan27"}
+// 每个内核支持的模式
+ss = {"happyhorse-1.1":["standard","multi-reference"],
+      "happyhorse-1.0":["standard","multi-reference"],
+      "wan-2.7":["standard","first-last-frame"]}
+// 各模式的附件张数上限
+ms = {standard:1, "multi-reference":9, "first-last-frame":2}
+Kn = ["720P","1080P"];  Yn = "720P"
+Zn = [5,10,15]
+Jn = ["16:9","4:3","1:1","3:4","9:16","original"];  es = "16:9"
+```
+
+⇒ 三条硬结论：
+
+1. **没有任何内核同时支持「多参考图」与「首尾帧」**：happyhorse 系只有 multi-reference，
+   wan-2.7 只有 first-last-frame。所以「能力」是 **(内核 × 模式)** 的矩阵，
+   同一个 `content[]` 换个 model 就可能从合法变非法。
+2. **比例是 6 档**（含 `original`），不是 UI 上常见的 3 档。`original` 发上游时写成 `origin`
+   （前端 `ns = e => e.ratio === "original" ? "origin" : e.ratio`）。
+3. `audio` 在前端是**写死 `true`**（没有开关），但与分辨率/时长同层，网关保留可配。
+
+### 4.7.2 biz_data 的参考图形态（✅ 2026-11-08 前端 bundle 取证）
+
+```js
+genMode = mode === "multi-reference" ? "multi_ref" : "vid_gen"
+params  = { resolution, size, duration, audio: true,
+            ...(attachments.length ? { attachments: [{type:"image", materialId}] } : {}) }
+```
+
+- 参考图走 `params.attachments`，**不是** `files[]` 里的图片自动生效；
+- 顺序即语义：首尾帧场景 `[0]`=首帧、`[1]`=尾帧
+  （前端解析历史消息时也是这么读的：`[a,r]=attachments.map(e=>e.materialId)` → `firstItemId`/`lastItemId`）；
+- `attachments` 里**只有 `type:"image"`**：没有任何视频/音频素材的构造路径
+  ⇒ 参考视频/音频是「明确不支持」，不是「未取证」。
+
+🔴 **未实测**：`materialId` 是会话素材对象 `{type:"image", id}` 的 `id`。
+网关 `files[]` 上传后拿到的 `id`（`img-<uuid>`）能否直接当 `materialId` —— **没有证据**。
+
+所以网关当前对参考素材一律 `400 unsupported_parameter` 并说明边界，而不是静默放行：
+静默放行的最坏结果是「HTTP 200 + 照扣积分 + 生成一条根本没用参考图的片子」，
+排障时没人会想到参数压根没生效。实测开关：`QWEN2API_VIDEO_MATERIAL_PROBE=1`。
+
 ## 4.7 文件解析：`t2t` + `files[]`（✅ 2026-10-28 本仓实测）
 
 上传链与图生图共用（§4.6.1 / §4.6.2），差别只在 `filetype` 与条目映射：

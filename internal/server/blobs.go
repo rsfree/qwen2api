@@ -30,8 +30,11 @@ import (
 	"time"
 )
 
-// blobTTL 托管图片的存活时间。与 FileStore / videoStore 同口径（2 小时）：
+// blobTTL 托管图片的存活时间。与 FileStore 同口径（2 小时）：
 // 上游拉图发生在提交后的几秒内，2 小时足够覆盖重试与人工排查。
+//
+// 注意 videoStore 现在是落盘 8 天，不是这个口径 —— 视频任务要活到终态（十几分钟），
+// 还要支撑「重启后客户端拿旧 id 还能查」，2 小时远远不够。
 const blobTTL = 2 * time.Hour
 
 // blobMaxBytes 单张上限（与 fetchMedia / 上传链对齐）。

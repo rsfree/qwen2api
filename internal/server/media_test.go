@@ -185,39 +185,80 @@ func TestVideoUnknownIDIs404(t *testing.T) {
 	}
 }
 
-func TestTranslateVideoStatus(t *testing.T) {
-	task := &videoTask{taskID: "tsk_abc", model: "qwen3.7-plus"}
-
+// TestNormalizeVideoStatus canonical 六态归一。
+//
+// 上游取值域没有官方文档，只能按包含关系映射。这条钉两件事：
+//   - 认得的词落到正确终态；
+//   - **认不得的词收敛为非终态 running**（当终态落库会提前释放槽位、提前对账，
+//     而且客户端再也不会来查）。
+func TestNormalizeVideoStatus(t *testing.T) {
 	cases := []struct {
-		raw  map[string]any
-		want string
+		raw   string
+		want  string
+		known bool
 	}{
-		{map[string]any{"task_status": "SUCCESS"}, "completed"},
-		{map[string]any{"task_status": "success"}, "completed"},
-		{map[string]any{"task_status": "FAILED"}, "failed"},
-		{map[string]any{"task_status": "RUNNING"}, "in_progress"},
-		{map[string]any{}, "in_progress"},
+		{"SUCCESS", "succeeded", true},
+		{"success", "succeeded", true},
+		{"task_completed", "succeeded", true},
+		{"FAILED", "failed", true},
+		{"error", "failed", true},
+		{"CANCELLED", "cancelled", true},
+		{"EXPIRED", "expired", true},
+		{"RUNNING", "running", true},
+		{"PROCESSING", "running", true},
+		{"QUEUED", "queued", true},
+		{"PENDING", "queued", true},
+		{"", "running", false},
+		{"brand_new_state", "running", false},
 	}
 	for _, c := range cases {
-		if got := translateVideo(task, c.raw).Status; got != c.want {
-			t.Fatalf("task_status=%v → %s, want %s", c.raw, got, c.want)
+		got, known := upstream.NormalizeVideoStatus(c.raw)
+		if got != c.want || known != c.known {
+			t.Fatalf("task_status=%q → %s(known=%v), want %s(known=%v)",
+				c.raw, got, known, c.want, c.known)
 		}
 	}
 }
 
-func TestTranslateVideoExtractsURL(t *testing.T) {
-	task := &videoTask{taskID: "tsk_abc"}
-	// content 是 rsfree 实测的产物字段。
-	got := translateVideo(task, map[string]any{
-		"task_status": "SUCCESS",
-		"content":     "https://cdn.example/v.mp4",
-	})
-	if got.URL != "https://cdn.example/v.mp4" {
-		t.Fatalf("产物 URL 未提取: %+v", got)
+// TestVideoProductExtraction 产物只在真有的时候才给出。
+func TestVideoProductExtraction(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  map[string]any
+		want string
+	}{
+		// content 是实测字段（字符串直链）。
+		{"content-string", map[string]any{"content": "https://cdn.example/v.mp4"}, "https://cdn.example/v.mp4"},
+		{"video_url", map[string]any{"video_url": "https://cdn.example/v.mp4"}, "https://cdn.example/v.mp4"},
+		{"contents-array", map[string]any{"contents": []any{
+			map[string]any{"url": "https://cdn.example/v.mp4"}}}, "https://cdn.example/v.mp4"},
+		{"none", map[string]any{"task_status": "SUCCESS"}, ""},
 	}
-	// 没有产物时不能编一个。
-	if v := translateVideo(task, map[string]any{"task_status": "SUCCESS"}); v.URL != "" {
-		t.Fatalf("不该编造 URL: %q", v.URL)
+	for _, c := range cases {
+		video, _ := upstream.VideoProduct(c.raw)
+		if video != c.want {
+			t.Fatalf("%s: 产物 %q, want %q", c.name, video, c.want)
+		}
+	}
+	// 尾帧是单独一列，不能混进 video_url。
+	video, last := upstream.VideoProduct(map[string]any{
+		"video_url": "https://cdn.example/v.mp4", "last_frame_url": "https://cdn.example/last.png",
+	})
+	if video != "https://cdn.example/v.mp4" || last != "https://cdn.example/last.png" {
+		t.Fatalf("尾帧抽取不对: video=%q last=%q", video, last)
+	}
+}
+
+// TestVideoUsageOnlyWhenPresent usage 不许编：上游没给就不下发。
+func TestVideoUsageOnlyWhenPresent(t *testing.T) {
+	if _, _, ok := upstream.VideoUsage(map[string]any{}); ok {
+		t.Fatal("上游没给 usage 时不该报告 ok")
+	}
+	c, tot, ok := upstream.VideoUsage(map[string]any{
+		"usage": map[string]any{"completion_tokens": float64(411300)},
+	})
+	if !ok || c != 411300 || tot != 411300 {
+		t.Fatalf("usage 归一不对: c=%d total=%d ok=%v", c, tot, ok)
 	}
 }
 

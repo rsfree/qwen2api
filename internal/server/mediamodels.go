@@ -80,10 +80,11 @@ func (s *Server) mediaModels() []ModelInfo {
 			OwnedBy:  "qwen",
 			Title:    videoTitle(id),
 			Media:    "video",
-			Endpoint: "/v1/videos/generations",
+			Endpoint: "/v1/videos",
 			Verified: true,
 			Params:   params,
-			Notes: "更自然稳定。异步任务：提交拿 id，再 GET /v1/videos/generations/{id} 轮询。" +
+			Notes: "更自然稳定。异步任务：POST /v1/videos 提交只回 {id}，再 GET /v1/videos/{id} " +
+				"轮询 status；产物在 content.video_url（仅 succeeded 有值）。" +
 				videoPriceNote(s.conf().Video.Pricing),
 		})
 	}
@@ -194,7 +195,15 @@ func (s *Server) resolveImageModel(model string) (chatModel, imageModel string) 
 func (s *Server) resolveVideoModel(model string) (chatModel, rootModel string) {
 	rootModel = strings.TrimSpace(s.conf().Video.RootModel)
 	chatModel = strings.TrimSpace(model)
-	if rootModel != "" && sameModelName(chatModel, rootModel) {
+
+	// 客户端可能直接传**内核名**（happyhorse11 / happyhorse-1.0 / wan27 / wan-2.7），
+	// 也可能传任意 chat 模型名（此时内核用配置默认）。
+	// 🔴 内核决定能力矩阵：wan27 才有首尾帧，happyhorse 系才有参考图。
+	// 认不出来就按配置默认，绝不把未知字符串当内核发给上游。
+	if k, ok := videoKernelOf(chatModel); ok {
+		rootModel = k
+		chatModel = ""
+	} else if rootModel != "" && sameModelName(chatModel, rootModel) {
 		chatModel = ""
 	}
 	if chatModel == "" {
@@ -204,6 +213,19 @@ func (s *Server) resolveVideoModel(model string) (chatModel, rootModel string) {
 		rootModel = "happyhorse11"
 	}
 	return chatModel, rootModel
+}
+
+// videoKernelOf 把客户端给的名字归一成上游内核（happyhorse11 / happyhorse / wan27）。
+//
+// 别名表在 videoprotocol.go：上游前端把内核显示成 "HappyHorse 1.1" / "Wan 2.7"，
+// 用户从界面抄过来是常态，差一个空格或点号不该被刁难。
+func videoKernelOf(name string) (string, bool) {
+	k := modelKey(name)
+	if k == "" {
+		return "", false
+	}
+	canon, ok := videoKernelAliases[k]
+	return canon, ok
 }
 
 // sameModelName 比较模型名时忽略大小写、空格与分隔符。
@@ -244,7 +266,7 @@ func (s *Server) mediaEndpoint(model string) string {
 		return "/v1/images/generations"
 	}
 	if id := strings.TrimSpace(s.conf().Video.RootModel); id != "" && sameModelName(m, id) {
-		return "/v1/videos/generations"
+		return "/v1/videos"
 	}
 	return ""
 }

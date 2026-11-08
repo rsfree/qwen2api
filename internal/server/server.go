@@ -37,8 +37,12 @@ type Server struct {
 	started time.Time
 	version string
 	panel   http.Handler
-	// videos 视频任务 → 账号映射（内存 2h）。
+	// videos 视频任务 → 账号映射。落盘在 data/videos.json（见 videostore.go）：
+	// 上游任务活 7 天、产物 24h，只存内存等于重启即丢客户端的任务 id。
 	videos *videoStore
+	// videoStop 关闭后台巡检（回调推送依赖它）。
+	videoStop     chan struct{}
+	videoStopOnce sync.Once
 	// files 上传条目的暂存（内存 2h）。
 	files *FileStore
 	// blobs 图片外链托管（内存 2h）—— 给上游一个自己能拉的 URL，绕开 STS。
@@ -101,7 +105,8 @@ func New(cfg config.Config, p *pool.Pool, up *upstream.Client, log *reqlog.Log, 
 		log:     log,
 		started: time.Now(),
 		version: version,
-		videos:  newVideoStore(),
+		videos:  newVideoStore(config.VideosFile(cfg.StateFile)),
+		videoStop: make(chan struct{}),
 		files:   NewFileStore(),
 		blobs:   NewBlobStore(),
 		egress:  map[string]*egressState{},
@@ -255,6 +260,15 @@ func (s *Server) UptimeSeconds() int { return int(time.Since(s.started).Seconds(
 
 // Handler 组装路由。
 func (s *Server) Handler() http.Handler {
+	// 视频后台巡检：刷新未终态任务 + 推回调。
+	// 没有它，带 callback_url 的任务只能等客户端自己来查才动 —— 那就不是回调了。
+	//
+	// 只在**有落盘路径**时启动：空路径意味着这是个无状态实例（测试 / 未配 data 卷），
+	// 后台任务既存不住也没有回调对象，起了只是白白打上游。
+	if s.videos.Path() != "" {
+		s.videoStopOnce.Do(func() { go s.videoWatchLoop(s.videoStop) })
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.wrap("/v1/chat/completions", s.handleChat))
 	mux.HandleFunc("POST /v1/messages", s.wrap("/v1/messages", s.handleMessages))
@@ -263,8 +277,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", s.wrap("/v1/models", s.handleModels))
 	mux.HandleFunc("POST /v1/images/generations", s.wrap("/v1/images/generations", s.handleImages))
 	mux.HandleFunc("POST /v1/images/edits", s.wrap("/v1/images/edits", s.handleImageEdits))
-	mux.HandleFunc("POST /v1/videos/generations", s.wrap("/v1/videos/generations", s.handleVideoCreate))
+	// 视频：canonical 契约（video-adapter §2）。
+	// 旧路径 /v1/videos/generations 显式 410 —— 两套形状并存必然出现字段对不上。
+	mux.HandleFunc("POST /v1/videos", s.wrap("/v1/videos", s.handleVideoCreate))
+	mux.HandleFunc("GET /v1/videos", s.wrap("/v1/videos", s.handleVideoList))
+	mux.HandleFunc("POST /v1/videos/generations", s.wrap("/v1/videos/generations", s.handleVideoLegacy))
 	mux.HandleFunc("GET /v1/videos/{id}", s.wrap("/v1/videos/{id}", s.handleVideoGet))
+	mux.HandleFunc("DELETE /v1/videos/{id}", s.wrap("/v1/videos/{id}", s.handleVideoDelete))
 	mux.HandleFunc("GET /v1/videos/{id}/content", s.wrap("/v1/videos/{id}/content", s.handleVideoContent))
 	mux.HandleFunc("POST /v1/files", s.wrap("/v1/files", s.handleFiles))
 	mux.HandleFunc("GET /v1/files/{id}", s.wrap("/v1/files/{id}", s.handleFileGet))
@@ -432,6 +451,42 @@ func retryAfter(w http.ResponseWriter, code int) {
 	case http.StatusGatewayTimeout, http.StatusServiceUnavailable:
 		w.Header().Set("Retry-After", "5")
 	}
+}
+
+// itoa 小整数转字符串（内联友好，热路径上不必走 fmt）。
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		b[i] = '-'
+	}
+	return string(b[i:])
+}
+
+// writeErrorCode 带 code 的四键信封。
+//
+// canonical 视频协议要求 `{error:{message,type,param,code}}`：
+// code 与 type 分工不同 —— type 说「哪一类错」，code 说「具体是什么」。
+// 只给 type 时客户端只能按大类分支（400 一律当参数错），归因粒度不够。
+func writeErrorCode(w http.ResponseWriter, code int, typ, errCode, param, msg string) {
+	typ, msg = clientError(code, typ, msg)
+	retryAfter(w, code)
+	writeJSON(w, code, ErrorBody{Error: ErrorDetail{
+		Message: msg, Type: typ, Param: param, Code: errCode,
+	}})
 }
 
 // writeErrorParam 带 param 的错误（Images 端点用：指明是哪个字段的问题）。

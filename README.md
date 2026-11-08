@@ -39,7 +39,7 @@
 | 🤝 **三协议前门** | `POST /v1/chat/completions`（OpenAI）· `POST /v1/messages`（Anthropic Messages，Claude Code 可接）· `POST /v1/responses`（Responses 形态） |
 | 🖼️ **图片输入（多模态）** | chat 的 content 段支持图片：URL / data URI / 裸 base64，`image_url` / `input_image` / Anthropic `image` 三种写法全收；走 `getstsToken` → OSS 上传 → `files[]`（`file_class=vision`），上传与提交**同账号** |
 | 🎨 **图片生成/编辑** | `POST /v1/images/generations`（文生图 + **图生图**）与 `POST /v1/images/edits`（multipart 前门）。字段集对齐 image-adapter 规范；`image` 支持 URL / data URI / 裸 base64，**参考图自动走 `getstsToken` → OSS V4 签名 PUT 上传** |
-| 🎬 **视频生成** | `POST /v1/videos/generations` 提交异步任务 + `GET /v1/videos/{id}` 轮询成片。支持 720P/1080P、5/10/15 秒、画幅与音轨开关 |
+| 🎬 **视频生成** | `POST /v1/videos` 提交异步任务（只回 `id`）+ `GET /v1/videos/{id}` 轮询。canonical 六态、`content.video_url`、幂等、回调、任务落盘。支持 720P/1080P × 5/10/15s × 6 档比例 |
 | 🖼️ **媒体产物** | 图片返回带签名的 CDN 直链（`cdn.qwenlm.ai`），可选 `b64_json` 内联；视频返回 `tsk_` 任务的产物 URL |
 | 📄 **文件解析** | `POST /v1/files` 上传（PDF/txt/任意文档）→ 在 chat 的 content part 里引用 `file_id`，模型直读内容。**实测**：95 字节 txt 里埋「紫色大象 42」，提问后原样答出 |
 | 🔍 **联网搜索** | 上游 `feature_config.auto_search` 默认开启；`thinking: auto` + 明确要求即可检索当日新闻并附来源链接 |
@@ -226,48 +226,72 @@ curl -s localhost:8400/v1/images/generations \
 > 3. 判真假看 **magic bytes**，不看 `Content-Type`（真图可能回 `application/octet-stream`）；
 >    `/v1/media` 在 `Content-Type` 不是 `image/*` 时按扩展名兜底。
 
-### `POST /v1/videos/generations` + `GET /v1/videos/{id}`
+### `POST /v1/videos` + `GET /v1/videos/{id}`（canonical 异步视频）
+
+契约按 `video-adapter` 的 canonical 形状落地。与 OpenAI Sora 同名路径，但**更严**：
+创建只回 `id`、产物在 `content.video_url`、状态是六态、错误是 `{code,message}`。
 
 ```bash
-# 提交
-curl -s localhost:8400/v1/videos/generations \
+# 提交：content[] 是唯一入参载体；只回 id（受理 ≠ 成功）
+curl -s localhost:8400/v1/videos \
   -H 'Authorization: Bearer <key>' -H 'Content-Type: application/json' \
-  -d '{"prompt":"一只橘猫在窗台上打哈欠","size":"16:9","resolution":"720P","duration":5}'
-# → {"id":"video_50079dcb…","object":"video","status":"queued","upstream_id":"tsk_50079dcb…"}
+  -d '{"model":"happyhorse11",
+       "content":[{"type":"text","text":"一只橘猫在窗台上打哈欠"}],
+       "ratio":"16:9","resolution":"720p","duration":5,"generate_audio":true}'
+# → {"id":"video_50079dcb…"}
 
-# 轮询
-curl -s localhost:8400/v1/videos/video_50079dcb… -H 'Authorization: Bearer <key>'
-# → {"status":"in_progress"} → {"status":"completed","progress":100,
-#     "url":"https://cdn.qwenlm.ai/…/t2v/….mp4?key=…",
-#     "gateway_url":"/v1/videos/video_50079dcb…/content"}
+# 轮询（?refresh=1 跳过 2 秒节流）
+curl -s 'localhost:8400/v1/videos/video_50079dcb…?refresh=1' -H 'Authorization: Bearer <key>'
+# → {"status":"running","content":{"video_url":null},"error":null,…}
+# → {"status":"succeeded","content":{"video_url":"https://cdn.qwenlm.ai/…mp4"},"duration":5,…}
 
 # 下载成片（推荐走网关代理，见下）
 curl -s localhost:8400/v1/videos/video_50079dcb…/content -H 'Authorization: Bearer <key>' -o out.mp4
+
+# 列表（只读本地快照，不打上游）/ 删除（仅终态）
+curl -s 'localhost:8400/v1/videos?limit=20' -H 'Authorization: Bearer <key>'
+curl -s -X DELETE localhost:8400/v1/videos/video_50079dcb… -H 'Authorization: Bearer <key>'
 ```
 
-> 🔴 **上游 CDN 前面有 WAF，不是普通防盗链**（2026-10-31 实测矩阵）：
->
-> | 请求 | 结果 |
-> |---|---|
-> | 浏览器 UA，**不带** Referer | **200 / 206**（图片、视频都能直开） |
-> | 浏览器 UA + 外站 Referer（面板域名） | **403** |
-> | `curl/*` UA（Referer 对错都一样） | **404**（226 字节 HTML，与死链同形） |
->
-> 所以：**浏览器点开就是正常的**，不需要任何 Referer；脚本/客户端下载换掉 curl 默认 UA 即可。
-> 响应里仍额外给 `gateway_url`，网关自带浏览器 UA 代取，省得客户端踩 UA 的坑。
+六态：`queued` / `running` / `succeeded` / `failed` / `expired` / `cancelled`。
+认不出的上游状态**收敛为 `running`（非终态）** 并带回 `status_raw` ——
+当终态落库会提前释放槽位、提前对账，而且客户端再也不会来查。
 
-档位（上游按 `(resolution, duration)` 独立计价，**且价格随模型版本变**）：
+| 纪律 | 为什么 |
+|---|---|
+| 创建回包**只有 `id`** | 受理 ≠ 成功。往里塞 status 就是承诺一个客户端不该依赖的形状 |
+| `content.video_url` 仅 `succeeded` 有值 | 未成功就交地址等于撒谎 |
+| 参数双载体二选一 | body 字段与 prompt 后缀（`--rs/--rt/--dur`）同时出现即 400：优先级不明，且后缀会被模型读进画面 |
+| 幂等 | 同一份意图（指纹相同、未终态、1 小时内）重复提交返回同一个任务，**不重复计费** |
+| 任务映射落盘 | `data/videos.json`，保留 8 天。上游任务活 7 天、产物 24h，只存内存等于重启即丢 id |
+| 回调 | `callback_url` 支持；推送体与查询响应由**同一个序列化器**产出，接收方按 `(id,status)` 幂等 |
 
-| root_model | 720P 5/10/15s | 1080P 5/10/15s |
-|---|---|---|
-| `happyhorse11`（默认） | 30 / 60 / 90 | 40 / 80 / 120 |
-| `happyhorse`（1.0） | 40 / 80 / 120 | 70 / 140 / 210 |
+> 🔴 **旧路径 `POST /v1/videos/generations` 已下线，返回 410**。
+> 它是另一套形状（`prompt` 平铺 + `url` 字段 + `completed` 词表），与 canonical 并存必然字段对不上。
 
-数据来自官方计价接口 `GET /api/v2/credits/pricing`（按 `scene` 分表，`hh11*` 与 `hh*` 两套）。
-**换 `root_model` 必须同步换 `video.pricing`**，否则预算会算错 33%~75%。
+#### 能力矩阵按内核分档（🔴 换内核就换能力）
 
-> ⚠️ 任务 → 账号的映射只在内存保留 2 小时（查询必须用提交它的那个账号的凭据）。
-> 进程重启后旧 `video_` id 会 404。
+取证：上游前端 bundle `qwen-chat-fe/0.3.38/js/main.js`（2026-11-08 只读，零消耗）。
+原文常量 `ss = {"happyhorse-1.1":["standard","multi-reference"], "wan-2.7":["standard","first-last-frame"]}`、
+`ms = {standard:1, "multi-reference":9, "first-last-frame":2}`。
+
+| 内核 | 文生 | 多参考图 | 首帧 / 首尾帧 |
+|---|---|---|---|
+| `happyhorse11`（默认） | ✅ | ✅ 最多 9 张 | ❌ |
+| `happyhorse`（1.0） | ✅ | ✅ 最多 9 张 | ❌ |
+| `wan27`（wan-2.7） | ✅ | ❌ | ✅ 2 张（首帧 + 尾帧） |
+
+- 参考图用 `role: "reference_image"`；首尾帧必须两张都显式给 `role`（`first_frame` + `last_frame`）。
+- 首帧/尾帧与参考图**混用即 400**：这是三种不同任务，混着发上游按自己的默认解释，产物与预期不同且已计费。
+- 参考视频 / 参考音频：上游 `attachments` 只接受 `{type:"image"}` ⇒ 明确 400，不是「未取证」。
+- 比例域是 **6 档**：`16:9` / `4:3` / `1:1` / `3:4` / `9:16` / `adaptive`（上游叫 `original`，发上去是 `origin`）。
+  此前只按 UI 放了 3 个 —— 「未测 ≠ 不支持」的活例子。
+
+> ⚠️ 参考素材的 `materialId` 链路**尚未实测**：上游 biz_data 形态已确证为
+> `params.attachments=[{type:"image", materialId:"<素材 id>"}]`，但网关 `files[]`
+> 上传后拿到的 id 能不能直接当 materialId 未验证。默认**明确拒绝并说明原因**
+> （不赌「200 但没 task_id」的静默失败，那种失败钱照扣）；实测时用
+> `QWEN2API_VIDEO_MATERIAL_PROBE=1` 打开。
 
 ### `POST /v1/files` + 文件提问
 
@@ -304,7 +328,7 @@ curl -s localhost:8400/v1/chat/completions -H 'Authorization: Bearer <key>' \
   {"id": "qwen3.7-plus",   "media": "text",  "thinking": true, "vision": true},
   {"id": "qwen-image-3.0", "media": "image", "endpoint": "/v1/images/generations",
    "params": {"sizes": ["1:1","4:3","3:4","16:9","9:16"], "max_n": 4}},
-  {"id": "happyhorse11",   "media": "video", "endpoint": "/v1/videos/generations",
+  {"id": "happyhorse11",   "media": "video", "endpoint": "/v1/videos",
    "params": {"resolutions": ["720P","1080P"], "durations": [5,10,15],
               "credits": {"720P": {"5": 30, "10": 60, "15": 90}}}}
 ]
@@ -671,7 +695,7 @@ internal/reqlog/     请求流水（环形缓冲 + stdout 一行）
 | **文件解析** `/v1/files` + chat | ✅ 上传 95B txt → 提问 14.8s，原样答出文件内关键词 |
 | **联网搜索** | ✅ `thinking:auto` + 明确要求，82s 返回当日科技新闻（带来源与 `[[40]]` 引用） |
 | **文生图 b64** `response_format:"b64_json"` | ✅ 71.4s，7.5MB base64（含 CDN 就绪重试，见下） |
-| **文生视频** `/v1/videos/generations` | ✅ 2.7s 拿到 `tsk_…` |
+| **文生视频** `POST /v1/videos` | ✅ 2.7s 拿到 `tsk_…`（回包只有 `id`） |
 | **视频轮询 + 产物** | ✅ 约 15 分钟 `queued → in_progress → completed`，产物 `cdn.qwenlm.ai/.../t2v/….mp4`，1.7MB 可下 |
 
 ## 视频按积分计费（余额是唯一真口径）
@@ -764,7 +788,8 @@ GET /stats → pool[].credit_balance = 280, credit_known = true
   那就不是网关而是另一个客户端了。详见 `docs/UPSTREAM.md` §4.9。
 - **MCP 工具（code interpreter / amap 等）**：模型自决调用，走的是工具调用帧。
   本仓已能解析 `image_gen` 系；其它 phase 会**记日志**（不再静默丢弃），但尚未翻译成结构化产物。
-- **视频任务映射不持久化**：只在内存留 2h，重启后旧 id 404（任务在上游，重查要新 id）。
+- **视频任务映射已落盘**：`data/videos.json`，保留 8 天（上游任务 ID 活 7 天）。
+  早前只存内存 2h，重启即丢客户端手里的 id —— 那是契约破坏，已修。
 - **工具调用未实现**：上游网页端没有函数调用通道，网关不伪造 `tool_calls`。
 - **无排队**：容量不足直接 429（这是同步链路，排队只会让客户端以为卡死）。
 - **多轮靠拍平**：网关无状态、每请求新建会话，历史被拼进单条 prompt。省 token 的
