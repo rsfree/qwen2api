@@ -1277,7 +1277,8 @@ bundle 的模式表 `hn` 里 Agent 项固定 `{chatType:"agent_mode", subChatTyp
 
 | 维度 | 做法 | 理由 |
 |---|---|---|
-| 对话键 | `X-Dialog-Id` → `user` → `hash(model + 首条 user 消息)` | 前两级是显式契约；第三级零改造。**不能用整串 messages 的 hash**（每轮都在变） |
+| 对话键 | `X-Dialog-Id` → `user` → `hash(model + 全部 system + 首条 user 全文)` | 前两级是显式契约；第三级零改造。锚点取**全文**，且 system 参与（把不同应用分开）。**不能用整串 messages 的 hash**（每轮都在变） |
+| 键强度 | 首条用户消息 < 8 字符 ⇒ 不启用 hash 兜底 | "你好"/"1"/"继续" 在真实流量里高度重复，撞键 = 串上下文。宁可少省一次 cache |
 | 选号 | `pool.Acquire(绑定号)`，判定与 `pick` 完全一致（authDead/冷却/在途满） | 粘到冷却号上会直接 401/429，比换个号重开更糟 |
 | 并发 | `TryLock` 拿不到 ⇒ **换新号开新会话**，不排队、不 409 | 同一 parentId 并发会让上游对话链分叉；agent 一轮 10s~3min，排队等于让调用方挂死 |
 | 降级 | 号不可用 ⇒ 新号 + 新会话，`parentID` 归零 | 宁可丢历史继续跑，也不让请求卡住 |

@@ -12,7 +12,9 @@ import (
 // ---------- 对话键 ----------
 
 func TestDialogKeyPriority(t *testing.T) {
-	msgs := []ChatMessage{{Role: "user", Content: json.RawMessage(`"你好"`)}}
+	// 锚点必须够长（dialogMinAnchor），否则 hash 会撞 —— 这里用一句真实的任务描述。
+	long := `"帮我总结这份季度财报里的三个主要风险点，并给出应对建议"`
+	msgs := []ChatMessage{{Role: "user", Content: json.RawMessage(long)}}
 
 	// 1. 显式头最高
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
@@ -47,6 +49,42 @@ func TestDialogKeyPriority(t *testing.T) {
 	empty := []ChatMessage{{Role: "system", Content: json.RawMessage(`"sys"`)}}
 	if k, src := dialogKeyOf(r, "", "m", empty); k != "" || src != "" {
 		t.Fatalf("无用户消息应返回空键: %q %q", k, src)
+	}
+}
+
+// 短首句不能当锚点：真实流量里"你好/1/继续"高度重复，撞键会串对话。
+func TestDialogKeyRejectsShortAnchor(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	for _, short := range []string{"你好", "1", "继续", "在吗", "ok"} {
+		msgs := []ChatMessage{{Role: "user", Content: json.RawMessage(`"` + short + `"`)}}
+		if k, src := dialogKeyOf(r, "", "m", msgs); k != "" || src != "" {
+			t.Fatalf("短首句 %q 不该产生对话键，得到 %q/%q", short, k, src)
+		}
+	}
+	// 但显式 key 不受长度限制
+	if k, _ := dialogKeyOf(r, "user-x", "m", []ChatMessage{{Role: "user", Content: json.RawMessage(`"1"`)}}); k != "u:user-x" {
+		t.Fatalf("显式 user 不该被长度限制影响: %q", k)
+	}
+}
+
+// system 参与锚点：不同应用即使首句相同也要分开。
+func TestDialogKeyIncludesSystem(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	user := ChatMessage{Role: "user", Content: json.RawMessage(`"帮我把这段话翻译成英文，保持语气"`)}
+
+	a := []ChatMessage{{Role: "system", Content: json.RawMessage(`"你是翻译助手"`)}, user}
+	b := []ChatMessage{{Role: "system", Content: json.RawMessage(`"你是客服机器人"`)}, user}
+	ka, _ := dialogKeyOf(r, "", "m", a)
+	kb, _ := dialogKeyOf(r, "", "m", b)
+	if ka == kb {
+		t.Fatalf("不同 system 应算出不同键: %q", ka)
+	}
+	// 同一段对话的第二轮（system 不变）必须同一个键
+	c := append(a,
+		ChatMessage{Role: "assistant", Content: json.RawMessage(`"ok"`)},
+		ChatMessage{Role: "user", Content: json.RawMessage(`"再来一遍"`)})
+	if kc, _ := dialogKeyOf(r, "", "m", c); kc != ka {
+		t.Fatalf("多轮后键变了: %q vs %q", ka, kc)
 	}
 }
 
@@ -215,5 +253,32 @@ func TestPlainModelIgnoresDialog(t *testing.T) {
 		"messages":[{"role":"user","content":"你好"}]}`))
 	if got := up.gotSubmit["parentId"]; got != "" {
 		t.Fatalf("普通模型不该有 parentId: %v", got)
+	}
+}
+
+// 完全不传 user / X-Dialog-Id 时，靠"首条长消息"的 hash 也要能粘住。
+// 这是零改造路径 —— 多数现有客户端就长这样。
+func TestAgentDialogHashSticky(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	up.dynamicChats = true
+	h := newTestServer(t, up, 2, nil)
+
+	const first = "帮我写一个 Python 脚本，把目录下所有 png 批量转成 webp"
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.8-flash-agent","stream":false,
+		"messages":[{"role":"user","content":"`+first+`"}]}`))
+	a := up.gotSubmit["chatId"]
+
+	// 第二轮：同一首句 + 历史 + 新问题
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.8-flash-agent","stream":false,
+		"messages":[{"role":"user","content":"`+first+`"},
+		            {"role":"assistant","content":"好"},
+		            {"role":"user","content":"再加个 --quality 参数"}]}`))
+	b := up.gotSubmit["chatId"]
+
+	if a != b {
+		t.Fatalf("hash 兜底未复用同一会话: %v vs %v", a, b)
+	}
+	if up.gotSubmit["parentId"] != "resp-1" {
+		t.Fatalf("parentId 未接上: %v", up.gotSubmit["parentId"])
 	}
 }

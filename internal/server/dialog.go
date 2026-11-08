@@ -27,6 +27,14 @@ const (
 
 	// dialogHeader 显式对话 id 的请求头。
 	dialogHeader = "X-Dialog-Id"
+
+	// dialogMinAnchor 首条用户消息至少这么长（rune），才拿它当对话锚点。
+	//
+	// 为什么要有下限：短首句（"你好" / "1" / "继续" / "在吗"）在真实流量里高度重复，
+	// hash 撞键会把两段**无关**对话并成一段 —— 后果是答非所问 + 泄漏别人上下文，
+	// 不是省钱的问题。宁可少省一次 cache，也不能串对话。
+	// 想放宽/收紧就改这个常量（或用 X-Dialog-Id 显式指定，那条路不受限制）。
+	dialogMinAnchor = 8
 )
 
 // dialogEntry 一段可复用的上游会话。
@@ -226,27 +234,43 @@ func dialogKeyOf(r *http.Request, user, model string, messages []ChatMessage) (k
 	if v := strings.TrimSpace(user); v != "" {
 		return "u:" + v, "user"
 	}
-	if first := firstUserText(messages); first != "" {
-		sum := sha256.Sum256([]byte(model + "\x00" + first))
+	if anchor := dialogAnchor(model, messages); anchor != "" {
+		sum := sha256.Sum256([]byte(anchor))
 		return "f:" + hex.EncodeToString(sum[:12]), "first_message"
 	}
 	return "", ""
 }
 
-// firstUserText 取首条 user 消息的纯文本（跳过 system / 多模态段）。
+// dialogAnchor 拼出"这段对话的身份指纹"：model + 所有 system 消息 + 首条 user 消息。
 //
-// 为什么是"第一条"而不是"最后一条"：多轮请求里首条是不动的锚点，
-// 最后一条每轮都在变。
-func firstUserText(messages []ChatMessage) string {
+// 三个组成部分各有理由：
+//   - model：上游会话建的时候 models[] 就定死了，换模型必须换会话；
+//   - system：同一个应用内稳定，**跨应用能立即区分**（多数撞键是不同应用撞的）；
+//   - 首条 user：同一应用内区分不同对话的锚点，多轮里它不动。
+//
+// 为什么不把后续消息也算进去：它们每轮都在增长，算出来的键只能活一轮。
+//
+// 返回空串 = 锚点太弱（首句短于 dialogMinAnchor），调用方应视为"不做粘性"。
+func dialogAnchor(model string, messages []ChatMessage) string {
+	var sys, first strings.Builder
 	for _, m := range messages {
-		if !strings.EqualFold(strings.TrimSpace(m.Role), "user") {
-			continue
-		}
-		if s := plainText(m.Content); s != "" {
-			return s
+		switch strings.ToLower(strings.TrimSpace(m.Role)) {
+		case "system", "developer":
+			if t := plainText(m.Content); t != "" {
+				sys.WriteString(t)
+				sys.WriteByte('\n')
+			}
+		case "user":
+			if first.Len() == 0 {
+				first.WriteString(plainText(m.Content))
+			}
 		}
 	}
-	return ""
+	anchor := strings.TrimSpace(first.String())
+	if len([]rune(anchor)) < dialogMinAnchor {
+		return ""
+	}
+	return model + "\x00" + sys.String() + "\x00" + anchor
 }
 
 // plainText 从 content（string 或 content part 数组）里抽出文本。
