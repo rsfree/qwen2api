@@ -724,8 +724,16 @@ params  = { resolution, size, duration, audio: true,
    不是 `genMode`。首尾帧与纯文生的 `genMode` 都是 `vid_gen`；漏掉 `videoGenerationMode`
    时上游按纯文生处理 —— 只吃 `attachments[0]`，第二张静默丢弃，接口一路 200、积分照扣。
 2. ✅ `files[]` 上传后的 `id`（`img-<uuid>`）**可以直接当 `materialId`**（第二次实测尾帧生效）。
-3. ⚠️ 首帧/首尾帧/参考图场景下 `ratio` 由**输入图**决定：请求 `16:9`、输入 512²，产物 960×960。
-   要控制画幅就控制输入图，别指望 `ratio`。
+3. ⚠️ `ratio` 在三种场景下行为**不同**：
+
+| 场景 | videoGenerationMode | 请求 16:9 的实际产物 |
+|---|---|---|
+| 多参考图 | `multi-reference` | **1280×720（ratio 生效）** |
+| 首尾帧 | `first-last-frame` | 960×960（输入 512²，ratio 被覆盖） |
+| 首帧 | `standard` | 同首尾帧（跟随输入图） |
+
+   多参考图实测：两张纯色图（红/蓝）+ prompt「左红右蓝」⇒ 产物左半 R=239/B=9、
+   右半 R=83/B=158，两图都被用上；帧 0 与帧 75 分布稳定。
 
 网关的紧急退回开关：`QWEN2API_VIDEO_MATERIAL_DISABLE=1`（纯文生，不必回滚版本）。
 
