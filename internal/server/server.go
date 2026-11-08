@@ -314,7 +314,12 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) wrap(path string, h func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.authorized(r) {
-			writeError(w, http.StatusUnauthorized, "authentication_error", "无效的 API Key")
+			// 带 code 而不是裸两键：鉴权是**横切**错误，视频端点的方舟客户端
+			// 会按 error.code 分支（换 key / 放弃重试），这里缺了就拿到空值。
+			// 同一份信封服务所有端点，所以码只能取一套词表 —— 用方舟的
+			// AuthenticationError；OpenAI 客户端不读 code 的取值，不受影响。
+			writeErrorCode(w, http.StatusUnauthorized, "authentication_error",
+				errCodeAuth, "", "无效的 API Key")
 			return
 		}
 		h(w, r)
@@ -477,6 +482,14 @@ func itoa(n int) string {
 	}
 	return string(b[i:])
 }
+
+// errCodeAuth 鉴权失败的 code（方舟词表）。
+//
+// 🔴 为什么放在信封这一层而不是 videoprotocol.go：401 由 `wrap` 产生，
+// 作用于 chat / images / messages / videos 全部端点。协议专属的码（MissingParameter
+// 之类）跟着各自协议层走，横切码跟着信封走 —— 否则 chat 请求会因为「视频协议的常量」
+// 而依赖一个它根本不该知道的文件。
+const errCodeAuth = "AuthenticationError"
 
 // writeErrorCode 带 code 的四键信封。
 //

@@ -437,19 +437,31 @@ Claude Code / Cline 这类客户端把 Base URL 指向本服务即可。按 Anth
 
 ### 错误语义（客户端看到什么）
 
-| 场景 | HTTP | `error.type` | `message` |
-|---|---|---|---|
-| 上游 180s 只发心跳、无产物 | **504** | `upstream_timeout` | `upstream timeout, please retry later` |
-| 上游 5xx / 传输失败 / 形态不符 | **502** | `upstream_error` | `upstream error, please retry later` |
-| 无可用账号（全冷却/失效） | **503** | `service_unavailable` | `no available upstream account, please retry later` |
-| 上游凭据坏了（网关侧） | 502 | `upstream_error` | `upstream authentication failed` |
-| 额度/限流 | 429 | `insufficient_quota` / `rate_limit_error` | 具体到"哪个额度、差多少"（中文） |
-| 参数写错 | 4xx | `invalid_request_error` | 具体到字段（中文） |
+| 场景 | HTTP | `error.type` | `error.code` | `message` |
+|---|---|---|---|---|
+| API Key 缺失 / 无效 | **401** | `authentication_error` | `AuthenticationError` | `无效的 API Key` |
+| 上游 180s 只发心跳、无产物 | **504** | `upstream_timeout` | — | `upstream timeout, please retry later` |
+| 上游 5xx / 传输失败 / 形态不符 | **502** | `upstream_error` | — | `upstream error, please retry later` |
+| 无可用账号（全冷却/失效） | **503** | `service_unavailable` | — | `no available upstream account, please retry later` |
+| 上游凭据坏了（网关侧） | 502 | `upstream_error` | — | `upstream authentication failed` |
+| 额度/限流 | 429 | `insufficient_quota` / `rate_limit_error` | — | 具体到"哪个额度、差多少"（中文） |
+| 参数写错 | 4xx | `invalid_request_error` | 见下 | 具体到字段（中文） |
 
-> 📌 视频端点的 `error.code` 用**方舟词表**：`MissingParameter` / `InvalidParameter` /
-> `InvalidParameter.UnsupportedParameter` / `InvalidParameter.TaskTypeConstraint` /
-> `InvalidParameter.OperationDenied` / `ResourceNotFound`。
-> 它与 `error.type` 分工不同：`type` 决定「要不要重试」，`code` 决定「要不要改参数」。
+> 📌 `error.code` 用**方舟词表**，与 `error.type` 分工不同：
+> `type` 决定「要不要重试」，`code` 决定「要不要改参数」。
+>
+> | `code` | 场景 |
+> |---|---|
+> | `AuthenticationError` | 401 —— **全端点**（鉴权是横切错误，`wrap` 统一产生） |
+> | `MissingParameter` | 视频：缺 `content` / `model` |
+> | `InvalidParameter` | 视频：值格式不对 |
+> | `InvalidParameter.UnsupportedParameter` | 视频：上游没有这个能力（首尾帧换内核、比例、时长、分辨率） |
+> | `InvalidParameter.TaskTypeConstraint` | 视频：首帧/尾帧与参考图混用 |
+> | `InvalidParameter.OperationDenied` | 视频：非终态 DELETE（上游无取消端点） |
+> | `ResourceNotFound` | 视频：未知任务 id |
+>
+> chat / images / messages 的参数错目前只给 `type`（OpenAI 的 `code` 本就是可空字段），
+> 只有 401 是双方共用的 —— 它必须带码，否则方舟客户端按 `code` 分支时拿到空值。
 
 **5xx 一律是短英文 + 稳定 type**（客户端/SDK 要的是机器可读，不是排查指南）；
 "额度将尽 or 上游抖动 / 建议换号"这类判断只进**请求流水与容器日志**，
