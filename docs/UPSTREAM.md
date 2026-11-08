@@ -1287,6 +1287,20 @@ bundle 的模式表 `hn` 里 Agent 项固定 `{chatType:"agent_mode", subChatTyp
 `parentId` 的来源：本轮 SSE 的 `response.created.response_id`（§10.4 实测，多轮的
 `parentId` 就是上一轮的 `response_id`，**不是消息 id**）。
 
+🔴 **账号级并发槽 = 1**（2026-11-08 线上实测）：同一个号**同时只能跑一个 agent 任务**，
+第二个请求立刻拿到
+
+```
+{"error":{"code":"user.too_many_concurrent",
+          "details":"当前运行的任务数已达上限，请等待其他任务完成，或升级订阅以运行更多任务。"}}
+```
+
+它是**明确未受理**（HTTP 200 包在流里），可以安全重试。网关的处置顺序是
+「等 1.2s 重试同号同会话 → 还满才换号」：直接换号会丢掉整段对话的 cache（约 14k）。
+
+**线上验证（0.0.63）**：同一 `user` 连续两轮，第一轮 `dlg=new` 11.2s（含建会话 3.2s），
+第二轮 `dlg=hit` **2.4s**（`chat=cached`，命中 prompt cache）。
+
 **线上验证（0.0.60，2026-11-08）**：
 
 | 场景 | 结果 |

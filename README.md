@@ -433,6 +433,10 @@ Agent 模式的上游**模型面是独立清单**（`GET /api/v2/models/agent_mo
     绝不阻塞、绝不回 409 —— 代价只是一次 cache miss。
 - ⚠️ 并发同一个对话：**自动降级为新号新会话**（同一 `parentId` 并发会让上游对话链分叉）。
     流水里 `dlg=hit` / `dlg=new` 就是这套机制的观测口径。
+- 🔴 **上游 agent 的账号级并发槽只有 1 个**（实测 `user.too_many_concurrent`）：
+    第二轮紧接着发会被拒。网关的处理是「等 1.2s 重试同号保 cache → 还满才换号」，
+    不会把这条"稍等"直接变成 502。
+- 📈 实测收益：同一对话第二轮 **11.2s → 2.4s**（`dlg=hit` + `chat=cached`）。
 
 🔴 **上游没有独立的图片/视频模型 id** —— 2026-10-30 实测 `GET /api/v2/models/` 只有
 7 个 chat 模型；图片靠 `extra.meta.model`（`qwen-image-3.0`）选内核，视频靠
