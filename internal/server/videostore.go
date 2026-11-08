@@ -183,28 +183,73 @@ func (v *videoStore) FindLive(fp string, now time.Time) (*videoRecord, bool) {
 	return &cp, true
 }
 
-// List 按创建时间倒序列出，支持 after（游标 = 上一条的 created_at）与 limit。
-func (v *videoStore) List(limit int, after int64) []*videoRecord {
+// videoQuery 列表筛选（方舟 `filter.*` + 分页）。
+//
+// 方舟原生参数：
+//
+//	filter.model / filter.status / filter.task_ids（重复参数名）
+//	page_num [1,500]（默认 1） / page_size [1,500]（默认 20）
+//
+// `filter.service_tier` 本网关不支持（上游没有服务等级概念）—— 不实现就忽略，
+// 但要在文档声明：传了它不会过滤，而不是假装过滤了。
+type videoQuery struct {
+	Model    string
+	Status   string
+	IDs      []string
+	PageNum  int
+	PageSize int
+}
+
+// Query 按方舟参数筛选并分页，返回当前页与**过滤后的总数**。
+func (v *videoStore) Query(q videoQuery) ([]*videoRecord, int) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	out := make([]*videoRecord, 0, len(v.items))
+
+	idSet := map[string]struct{}{}
+	for _, id := range q.IDs {
+		idSet[id] = struct{}{}
+	}
+	all := make([]*videoRecord, 0, len(v.items))
 	for _, rec := range v.items {
-		if after > 0 && rec.CreatedAt >= after {
+		if q.Model != "" && rec.Model != q.Model {
 			continue
 		}
-		cp := *rec
-		out = append(out, &cp)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].CreatedAt == out[j].CreatedAt {
-			return out[i].ID > out[j].ID
+		if q.Status != "" && rec.Status != q.Status {
+			continue
 		}
-		return out[i].CreatedAt > out[j].CreatedAt
-	})
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
+		if len(idSet) > 0 {
+			if _, ok := idSet[rec.ID]; !ok {
+				continue
+			}
+		}
+		cp := *rec
+		all = append(all, &cp)
 	}
-	return out
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].CreatedAt == all[j].CreatedAt {
+			return all[i].ID > all[j].ID
+		}
+		return all[i].CreatedAt > all[j].CreatedAt
+	})
+
+	total := len(all)
+	pageSize := q.PageSize
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	pageNum := q.PageNum
+	if pageNum <= 0 {
+		pageNum = 1
+	}
+	start := (pageNum - 1) * pageSize
+	if start >= total {
+		return nil, total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	return all[start:end], total
 }
 
 // Count 记录总数（列表端点的 total 语义是「一共有多少条」，不是本页条数）。

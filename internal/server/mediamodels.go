@@ -80,11 +80,11 @@ func (s *Server) mediaModels() []ModelInfo {
 			OwnedBy:  "qwen",
 			Title:    videoTitle(id),
 			Media:    "video",
-			Endpoint: "/v1/videos",
+			Endpoint: videoTaskPath,
 			Verified: true,
 			Params:   params,
-			Notes: "更自然稳定。异步任务：POST /v1/videos 提交只回 {id}，再 GET /v1/videos/{id} " +
-				"轮询 status；产物在 content.video_url（仅 succeeded 有值）。" +
+			Notes: "更自然稳定。火山方舟原生协议：POST " + videoTaskPath + " 只回 {id}，" +
+				"再 GET {id} 轮询 status；产物在 content.video_url（仅 succeeded 有值）。" +
 				videoPriceNote(s.conf().Video.Pricing),
 		})
 	}
@@ -266,7 +266,7 @@ func (s *Server) mediaEndpoint(model string) string {
 		return "/v1/images/generations"
 	}
 	if id := strings.TrimSpace(s.conf().Video.RootModel); id != "" && sameModelName(m, id) {
-		return "/v1/videos"
+		return videoTaskPath
 	}
 	return ""
 }

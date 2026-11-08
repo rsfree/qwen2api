@@ -277,14 +277,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", s.wrap("/v1/models", s.handleModels))
 	mux.HandleFunc("POST /v1/images/generations", s.wrap("/v1/images/generations", s.handleImages))
 	mux.HandleFunc("POST /v1/images/edits", s.wrap("/v1/images/edits", s.handleImageEdits))
-	// 视频：canonical 契约（video-adapter §2）。
-	// 旧路径 /v1/videos/generations 显式 410 —— 两套形状并存必然出现字段对不上。
-	mux.HandleFunc("POST /v1/videos", s.wrap("/v1/videos", s.handleVideoCreate))
-	mux.HandleFunc("GET /v1/videos", s.wrap("/v1/videos", s.handleVideoList))
-	mux.HandleFunc("POST /v1/videos/generations", s.wrap("/v1/videos/generations", s.handleVideoLegacy))
-	mux.HandleFunc("GET /v1/videos/{id}", s.wrap("/v1/videos/{id}", s.handleVideoGet))
-	mux.HandleFunc("DELETE /v1/videos/{id}", s.wrap("/v1/videos/{id}", s.handleVideoDelete))
-	mux.HandleFunc("GET /v1/videos/{id}/content", s.wrap("/v1/videos/{id}/content", s.handleVideoContent))
+	// 视频：火山方舟（Ark）原生协议。
+	// 路径逐字等于方舟数据面，客户端 base_url 设 https://<host>/api/v3 即可直接对接。
+	mux.HandleFunc("POST "+videoTaskPath, s.wrap(videoTaskPath, s.handleVideoCreate))
+	mux.HandleFunc("GET "+videoTaskPath, s.wrap(videoTaskPath, s.handleVideoList))
+	mux.HandleFunc("GET "+videoTaskPath+"/{id}", s.wrap(videoTaskPath+"/{id}", s.handleVideoGet))
+	mux.HandleFunc("DELETE "+videoTaskPath+"/{id}", s.wrap(videoTaskPath+"/{id}", s.handleVideoDelete))
+	mux.HandleFunc("GET "+videoTaskPath+"/{id}/content", s.wrap(videoTaskPath+"/{id}/content", s.handleVideoContent))
+	// 旧出口全部 410：两套形状并存必然出现「两边字段对不上」。
+	mux.HandleFunc("/v1/videos", s.wrap("/v1/videos", s.handleVideoLegacy))
+	mux.HandleFunc("/v1/videos/", s.wrap("/v1/videos/", s.handleVideoLegacy))
 	mux.HandleFunc("POST /v1/files", s.wrap("/v1/files", s.handleFiles))
 	mux.HandleFunc("GET /v1/files/{id}", s.wrap("/v1/files/{id}", s.handleFileGet))
 	// 🔴 免鉴权：上游来拉图时不会带我们的 API Key。

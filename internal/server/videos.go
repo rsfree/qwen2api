@@ -1,23 +1,28 @@
 package server
 
-// canonical 视频前门（`POST /v1/videos` + `GET /v1/videos/{id}`）。
+// 视频前门：**火山方舟（Ark）原生协议**。
 //
 // 与文本/图片是两条读法：上游是**异步任务**——`POST completions`（stream:false）
-// 同步回一个 `tsk_…` 任务 id，产物靠 `GET /api/v2/task/status/<id>` 轮询十几分钟。
+// 同步回一个 `tsk_…` 任务 id，产物靠 `GET /api/v2/task/status/<id>` 轮询。
 //
-// 契约形状遵循 video-adapter §2「canonical 任务对象」：
+// 出口按方舟数据面的四个 surface 落（`references/protocol.md` §1）：
 //
-//	POST /v1/videos          → {"id":"video_xxx"}          ← 只有 id，受理 ≠ 成功
-//	GET  /v1/videos/{id}     → {id, status, content:{video_url}, error, usage, …}
-//	GET  /v1/videos/{id}/content → 成片字节（网关代取，绕开 CDN 的 UA 拦截）
-//	GET  /v1/videos?limit=20 → {items[], total}             ← 本地快照，不打上游
-//	DELETE /v1/videos/{id}   → 只对终态生效（上游没有取消端点）
+//	POST   /api/v3/contents/generations/tasks      → {"id":"cgt-…"}   ← 只有 id，受理 ≠ 成功
+//	GET    /api/v3/contents/generations/tasks/{id} → 完整任务对象
+//	GET    /api/v3/contents/generations/tasks      → {items[], total}
+//	DELETE /api/v3/contents/generations/tasks/{id} → 200 + {"Result":{}}
+//	GET    /api/v3/contents/generations/tasks/{id}/content
+//	                                               → 成片字节（**网关扩展**，方舟无此端点）
 //
-// 🔴 三个不能省的纪律：
+// 🔴 五条不能省的纪律：
 //  1. 创建回包只有 id。往里塞 status 就是承诺一个客户端不该依赖的形状。
 //  2. `content.video_url` 只在 succeeded 时有值。未成功就交地址等于撒谎。
 //  3. 任务 → 账号的映射必须落盘。上游任务活 7 天、产物 24h，
-//     而一个片子要 10~15 分钟才出 —— 内存 2h 撑不到终态就是契约破坏。
+//     而 t2v 实测要 7 分钟才出 —— 内存 2h 撑不到终态就是契约破坏。
+//  4. `usage` 的两个 token 字段承载**积分**（上游不统计 token）。语义借用，
+//     必须在文档里写明，否则对账会把它当 token 读。
+//  5. 方舟的 `queued` 可取消，本上游**没有取消端点** —— 非终态 DELETE 要明确拒绝，
+//     不能假装取消成功（那会让调用方以为停了，实际还在跑并计费）。
 
 import (
 	"bytes"
@@ -34,6 +39,9 @@ import (
 	"github.com/yuanjie-ai/qwen2api/internal/reqlog"
 	"github.com/yuanjie-ai/qwen2api/internal/upstream"
 )
+
+// videoTaskPath 方舟数据面的任务端点前缀（逐字等于原生，不加自己的段）。
+const videoTaskPath = "/api/v3/contents/generations/tasks"
 
 // videoPollMinInterval 同一个任务两次上游查询的最小间隔。
 //
@@ -52,11 +60,11 @@ const videoCallbackMaxTries = 3
 
 // ---------- 创建 ----------
 
-// handleVideoCreate `POST /v1/videos`。
+// handleVideoCreate `POST /api/v3/contents/generations/tasks`。
 func (s *Server) handleVideoCreate(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	entry := reqlog.Entry{
-		ID: "vid-" + upstream.UUID()[:8], Path: "/v1/videos",
+		ID: "vid-" + upstream.UUID()[:8], Path: videoTaskPath,
 		ClientIP: clientIP(r), UserAgent: truncateUA(r.UserAgent()),
 	}
 
@@ -220,7 +228,8 @@ func (s *Server) createVideo(w http.ResponseWriter, r *http.Request, plan *video
 
 	now := time.Now()
 	rec := &videoRecord{
-		ID: "video_" + strings.TrimPrefix(taskID, "tsk_"), UpstreamID: taskID,
+		// 对外 id 用方舟格式 `cgt-…`，上游 `tsk_` 只留在 UpstreamID 里。
+		ID: videoTaskID(now), UpstreamID: taskID,
 		Account: acct, Model: plan.EchoModel, Fingerprint: plan.Fingerprint, Scene: plan.Scene,
 		Resolution: plan.EchoResolution, Ratio: plan.EchoRatio,
 		Duration: plan.EchoDuration, Audio: plan.EchoAudio,
@@ -280,18 +289,17 @@ func (s *Server) videoSpec(ctxReq *http.Request, plan *videoPlan, rootModel stri
 
 // ---------- 查询 ----------
 
-// handleVideoGet `GET /v1/videos/{id}`。
+// handleVideoGet `GET /api/v3/contents/generations/tasks/{id}`。
 func (s *Server) handleVideoGet(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/v1/videos/")
+	id := strings.TrimPrefix(r.URL.Path, videoTaskPath+"/")
 	if id == "" || strings.Contains(id, "/") {
-		writeErrorCode(w, http.StatusBadRequest, "invalid_request_error", "invalid_request", "",
-			"缺少视频 id")
+		writeErrorCode(w, http.StatusBadRequest, "invalid_request_error", arkMissing, "", "缺少任务 id")
 		return
 	}
 	rec, ok := s.videos.Get(id)
 	if !ok {
-		writeErrorCode(w, http.StatusNotFound, "invalid_request_error", "not_found", "",
-			"未知的视频 id（本地记录保留 8 天；上游任务 id 本身活 7 天）")
+		writeErrorCode(w, http.StatusNotFound, "invalid_request_error", arkNotFound, "",
+			"未知的任务 id（本地记录保留 8 天；上游任务 id 本身活 7 天）")
 		return
 	}
 	// refresh=1 跳过 2 秒节流：客户端明确要最新状态时不该让它看缓存。
@@ -300,7 +308,11 @@ func (s *Server) handleVideoGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, videoTaskPayload(rec))
 }
 
-// handleVideoContent `GET /v1/videos/{id}/content` —— 代理下载成片。
+// handleVideoContent `GET /api/v3/contents/generations/tasks/{id}/content` —— 代理下载成片。
+//
+// ⚠️ **网关扩展**：方舟协议没有这个端点（它的 `content.video_url` 是 CDN 直链）。
+// 加它是因为上游 CDN 的 WAF 会把 curl 类 UA 挡成 404，而方舟的 `video_url` 没有
+// 「带浏览器 UA 的代取」入口。纯增量端点，不改变任何方舟契约。
 //
 // 为什么需要它：上游 CDN 的 WAF 只放行浏览器类 UA —— 客户端用 curl 默认 UA
 // 直下会拿到 404（226 字节 HTML，和「还没转存完」无法区分）。
@@ -308,11 +320,10 @@ func (s *Server) handleVideoGet(w http.ResponseWriter, r *http.Request) {
 //
 // Referer 不是必要条件：不带就 200，带外站值反而 403。
 func (s *Server) handleVideoContent(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/videos/"), "/content")
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, videoTaskPath+"/"), "/content")
 	rec, ok := s.videos.Get(id)
 	if !ok {
-		writeErrorCode(w, http.StatusNotFound, "invalid_request_error", "not_found", "",
-			"未知的视频 id")
+		writeErrorCode(w, http.StatusNotFound, "invalid_request_error", arkNotFound, "", "未知的任务 id")
 		return
 	}
 	rec = s.refreshVideo(rec, false)
@@ -333,66 +344,78 @@ func (s *Server) handleVideoContent(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-// handleVideoList `GET /v1/videos?limit=&after=`。
+// handleVideoList `GET /api/v3/contents/generations/tasks`。
 //
-// 只读本地快照，**不触发上游查询**：上游列表 QPS 只有 1（账号维度），
-// 一次列表把池子打一遍不现实。需要最新状态就查单个任务。
+// 参数按方舟原生：`filter.model` / `filter.status` / `filter.task_ids`（可重复）
+// / `page_num` / `page_size`。
+//
+// 只读本地快照，**不触发上游查询**：方舟的列表接口账号级 QPS 只有 1，
+// 而我们要的状态在上游得一条条查 —— 拿列表当轮询入口会把池子打穿。
+// 需要最新状态就查单个任务（`GET /{id}`，QPS 20）。
 func (s *Server) handleVideoList(w http.ResponseWriter, r *http.Request) {
-	limit := 20
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
-			limit = n
+	q := r.URL.Query()
+	nums := func(key string, def, lo, hi int) int {
+		n, err := strconv.Atoi(q.Get(key))
+		if err != nil || n < lo {
+			return def
 		}
-	}
-	var after int64
-	if v := r.URL.Query().Get("after"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			after = n
+		if n > hi {
+			return hi
 		}
+		return n
 	}
-	recs := s.videos.List(limit, after)
+	recs, total := s.videos.Query(videoQuery{
+		Model:    strings.TrimSpace(q.Get("filter.model")),
+		Status:   strings.TrimSpace(q.Get("filter.status")),
+		IDs:      q["filter.task_ids"],
+		PageNum:  nums("page_num", 1, 1, 500),
+		PageSize: nums("page_size", 20, 1, 500),
+	})
 	items := make([]map[string]any, 0, len(recs))
 	for _, rec := range recs {
 		items = append(items, videoTaskPayload(rec))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items,
-		"total": s.videos.Count(),
+		"total": total,
 	})
 }
 
-// handleVideoDelete `DELETE /v1/videos/{id}`。
+// handleVideoDelete `DELETE /api/v3/contents/generations/tasks/{id}`。
 //
-// 上游没有取消端点（`DELETE /tasks/{id}` 是方舟的形态，qwen 网页端没有）。
-// 所以：
-//   - 终态 ⇒ 删本地记录（此后查不到，这是「忘掉」不是「取消」）；
-//   - 非终态 ⇒ 409 明确说「本上游不支持取消」，绝不假装取消成功 ——
-//     假装的结果是客户端以为任务停了，实际还在跑并继续计费。
+// 方舟的 DELETE 状态矩阵：`queued` 可取消 → `cancelled`；`running` 不支持；
+// 终态删记录。**本上游一条都不满足**（qwen 网页端没有取消端点），所以：
+//
+//   - 非终态 ⇒ 400 `InvalidParameter.OperationDenied` 明确说「不支持取消」。
+//     绝不假装取消成功 —— 那会让调用方以为任务停了，实际还在跑并继续计费。
+//   - 终态 ⇒ 删本地记录（此后查不到），回方舟的 `{"Result":{}}`。
+//
+// 这是协议与上游能力的真实缺口，写进 README 的「已知偏差」，不靠猜。
 func (s *Server) handleVideoDelete(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/v1/videos/")
+	id := strings.TrimPrefix(r.URL.Path, videoTaskPath+"/")
 	rec, ok := s.videos.Get(id)
 	if !ok {
-		writeErrorCode(w, http.StatusNotFound, "invalid_request_error", "not_found", "", "未知的视频 id")
+		writeErrorCode(w, http.StatusNotFound, "invalid_request_error", arkNotFound, "", "未知的任务 id")
 		return
 	}
 	if !IsTerminalVideoStatus(rec.Status) {
-		writeErrorCode(w, http.StatusConflict, "invalid_request_error", "unsupported_operation", "",
-			"本上游没有取消端点：status="+rec.Status+" 的任务无法取消，只能等它终态")
+		writeErrorCode(w, http.StatusBadRequest, "invalid_request_error", arkDenied, "",
+			"本上游没有取消端点：status="+rec.Status+" 的任务无法取消，只能等它终态"+
+				"（方舟的 queued 可取消，这里做不到）")
 		return
 	}
 	s.videos.Delete(id)
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "deleted": true})
+	writeJSON(w, http.StatusOK, map[string]any{"Result": map[string]any{}})
 }
 
-// handleVideoLegacy 旧路径的下线应答。
+// handleVideoLegacy 旧路径（`/v1/videos*`）的下线应答。
 //
-// 不做静默兼容：旧形状（prompt 平铺 + `url` 字段 + `completed` 词表）与 canonical
-// 是两套契约，同时存在必然出现「两边字段对不上」。410 是诚实的答复 ——
-// 404 会让调用方以为打错了地址，一直重试。
+// 视频出口统一到方舟原生路径，`/v1/videos` 与更早的 `/v1/videos/generations` 都下线。
+// 410 是诚实的答复 —— 404 会让调用方以为打错了地址，一直重试；
+// 而静默兼容会让两套形状（`url` 平铺 / `content.video_url`）并存，字段永远对不上。
 func (s *Server) handleVideoLegacy(w http.ResponseWriter, r *http.Request) {
-	writeErrorCode(w, http.StatusGone, "invalid_request_error", "endpoint_retired", "",
-		"该端点已下线：请改用 POST /v1/videos（canonical 契约：content[] 入参、只回 {id}、"+
-			"查询见 GET /v1/videos/{id} 的 content.video_url）")
+	writeErrorCode(w, http.StatusGone, "invalid_request_error", "EndpointRetired", "",
+		"视频出口已改为火山方舟原生协议：POST/GET/DELETE "+videoTaskPath)
 }
 
 // ---------- 刷新 ----------
@@ -539,16 +562,30 @@ func videoTaskPayload(rec *videoRecord) map[string]any {
 		}
 	}
 
-	// usage 只在上游真给了才下发：填一对 0 等于宣称「确实没用量」。
-	if rec.CompletionTokens > 0 || rec.TotalTokens > 0 {
+	// usage：方舟的 token 字段在本网关承载**积分**。
+	//
+	// Qwen 视频不统计 token（只扣积分），而方舟客户端普遍读 usage 做计费对账。
+	// 三个选择：编一个 token 数（对账必然错）、省略（客户端当 0，以为免费）、
+	// 把**真实积分**放进 token 字段。这里选第三个，并同时给 credits。
+	//
+	// 🔴 语义借用，文档必须写明：别拿 completion_tokens 反推帧数或时长，
+	//    它是「这次扣了几个积分」，不是模型消耗的 token。
+	if rec.Credits > 0 {
+		usage := map[string]any{
+			"completion_tokens": rec.Credits,
+			"total_tokens":      rec.Credits,
+			"credits":           rec.Credits,
+		}
+		// 上游将来若真给了 token，单独放一个键，别和积分混在同一字段里。
+		if rec.CompletionTokens > 0 {
+			usage["upstream_tokens"] = rec.CompletionTokens
+		}
+		out["usage"] = usage
+	} else if rec.CompletionTokens > 0 {
 		out["usage"] = map[string]any{
 			"completion_tokens": rec.CompletionTokens,
 			"total_tokens":      rec.TotalTokens,
 		}
-	}
-	// credits 是网关自己的计费证据（视频不统计 token，这是唯一能对账的数字）。
-	if rec.Credits > 0 {
-		out["credits"] = rec.Credits
 	}
 	// 排查用扩展：上游状态原文 + 是否收敛过。
 	if rec.StatusRaw != "" {

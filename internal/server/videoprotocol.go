@@ -17,6 +17,7 @@ package server
 // resolution / duration / frames / ratio 属于计费相关，错值一律 400，绝不回落默认。
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -25,6 +26,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // 六态。非终态：queued / running；终态：succeeded / failed / expired / cancelled。
@@ -125,6 +127,24 @@ var videoKnownKeys = map[string]struct{}{
 // 给 64MB 是留给「图片走 data URI」的内联场景（与图像协议同口径）。
 const videoMaxBody = 64 << 20
 
+// 方舟错误码（`error.code` 的取值）。
+//
+// 🔴 官方错误码页明确「未提供通用 HTTP 错误响应体的 JSON 形状」，
+// 所以四键信封是本协议自己的契约，code 用方舟的**码字符串**只为让方舟客户端能按类别分支 ——
+// 不是「照官方回包」。三处必须分清：
+//   type   —— 哪一类错（OpenAI 词表，客户端按它决定重试策略）
+//   code   —— 具体是什么（方舟词表，客户端按它决定要不要改参数）
+//   param  —— 指到真实字段（指错比不指更糟）
+const (
+	arkMissing      = "MissingParameter"
+	arkInvalid      = "InvalidParameter"
+	arkUnsupported  = "InvalidParameter.UnsupportedParameter"
+	arkTaskType     = "InvalidParameter.TaskTypeConstraint"
+	arkDenied       = "InvalidParameter.OperationDenied"
+	arkNotFound     = "ResourceNotFound"
+	arkContentFilte = "InputVideoSensitiveContentDetected"
+)
+
 // videoReject 协议级拒绝（转换点 ⑥ 的提交期分支）。
 //
 // 四键信封只在这一层产生：按「谁的错」翻，不照抄上游的码。
@@ -141,17 +161,21 @@ type videoReject struct {
 func (e *videoReject) Error() string { return e.Message }
 
 func rejectInvalid(param, msg string) *videoReject {
-	return &videoReject{
-		Status: 400, Type: "invalid_request_error", Code: "invalid_request",
-		Param: param, Message: msg,
-	}
+	return &videoReject{Status: 400, Type: "invalid_request_error", Code: arkInvalid, Param: param, Message: msg}
+}
+
+// rejectMissing 缺参数（方舟把「没给」与「给错」分成两个码）。
+func rejectMissing(param, msg string) *videoReject {
+	return &videoReject{Status: 400, Type: "invalid_request_error", Code: arkMissing, Param: param, Message: msg}
 }
 
 func rejectUnsupported(param, msg string) *videoReject {
-	return &videoReject{
-		Status: 400, Type: "invalid_request_error", Code: "unsupported_parameter",
-		Param: param, Message: msg,
-	}
+	return &videoReject{Status: 400, Type: "invalid_request_error", Code: arkUnsupported, Param: param, Message: msg}
+}
+
+// rejectTaskType 三类互斥场景混用 —— 方舟有专门的码。
+func rejectTaskType(param, msg string) *videoReject {
+	return &videoReject{Status: 400, Type: "invalid_request_error", Code: arkTaskType, Param: param, Message: msg}
 }
 
 // decodeVideoRequest 解 JSON 体并收集未知键。
@@ -305,7 +329,7 @@ func (s *Server) validateVideoRequest(req *VideoRequest) (*videoPlan, *videoReje
 
 	// ---- ① content ----
 	if len(req.Content) == 0 {
-		return nil, rejectInvalid("content", `'content' 必须是非空数组，至少一项（纯文生视频也要一项 text）`)
+		return nil, rejectMissing("content", `'content' 必须是非空数组，至少一项（纯文生视频也要一项 text）`)
 	}
 	texts := make([]string, 0, 2)
 	images := make([]videoClip, 0, 4)
@@ -368,7 +392,7 @@ func (s *Server) validateVideoRequest(req *VideoRequest) (*videoPlan, *videoReje
 	// ---- ② model ----
 	plan.EchoModel = strings.TrimSpace(req.Model)
 	if plan.EchoModel == "" {
-		return nil, rejectInvalid("model", "缺少 model（路由名，可以是视频内核名，也可以是任意 chat 模型名）")
+		return nil, rejectMissing("model", "缺少 model（路由名，可以是视频内核名，也可以是任意 chat 模型名）")
 	}
 
 	// ---- ③ 场景互斥 ----
@@ -506,11 +530,11 @@ func judgeVideoScene(images, videos, audios []videoClip) (string, *videoReject) 
 	}
 
 	if firsts+lasts > 0 && refs > 0 {
-		return "", rejectInvalid("content",
+		return "", rejectTaskType("content",
 			"首帧/尾帧（first_frame/last_frame）与参考图（reference_image）不能混用：它们是两种不同任务")
 	}
 	if hasRefVideo && (firsts+lasts > 0) {
-		return "", rejectInvalid("content",
+		return "", rejectTaskType("content",
 			"参考视频/音频只能与 reference_image 组合（全模态参考场景），不能与首帧/尾帧混用")
 	}
 
@@ -527,12 +551,12 @@ func judgeVideoScene(images, videos, audios []videoClip) (string, *videoReject) 
 	case len(images) == 2 && firsts == 1 && lasts == 1 && !hasRefVideo:
 		return "first_last", nil
 	case lasts > 0 && firsts == 0:
-		return "", rejectInvalid("content",
+		return "", rejectTaskType("content",
 			"只给了尾帧（last_frame）没有首帧：首尾帧场景要求两张图都显式给 role")
 	case refs == len(images) && refs > 0:
 		return "omni_ref", nil
 	}
-	return "", rejectInvalid("content",
+	return "", rejectTaskType("content",
 		fmt.Sprintf("图片组合不合法（首帧 %d / 尾帧 %d / 参考图 %d）："+
 			"首帧场景 1 张、首尾帧场景 2 张且 role 显式、参考图场景全部标 reference_image",
 			firsts, lasts, refs))
@@ -835,6 +859,20 @@ func videoFingerprint(p *videoPlan) string {
 		b.WriteString(c.Ref)
 	}
 	return hashString(b.String())
+}
+
+// videoTaskID 生成方舟格式的任务 ID：`cgt-<YYYYMMDDhhmmss>-<8 位十六进制>`。
+//
+// 方舟原生是 `cgt-20261105010835-xxxxx`。客户端不该解析 ID，但格式对齐能让
+// 「这个 id 是谁家的」一眼可辨 —— 出问题时少一轮确认。
+func videoTaskID(now time.Time) string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// 随机源不可用时退化成纳秒尾巴：ID 只要求这次进程内不撞。
+		sum := sha256.Sum256([]byte(strconv.FormatInt(now.UnixNano(), 10)))
+		copy(b[:], sum[:4])
+	}
+	return "cgt-" + now.Format("20060102150405") + "-" + hex.EncodeToString(b[:])
 }
 
 // hashString 指纹用的短哈希（sha256 前 16 字节，够用且日志里不刺眼）。

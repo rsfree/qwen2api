@@ -176,12 +176,12 @@ func TestVideoUnknownIDIs404(t *testing.T) {
 	up := newFakeUpstream(t, 0)
 	h := newTestServer(t, up, 1, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/videos/video_nope", nil)
+	req := httptest.NewRequest(http.MethodGet, videoTaskPath+"/cgt-nope", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("未知视频 id 应 404，得到 %d", rec.Code)
+		t.Fatalf("未知任务 id 应 404，得到 %d", rec.Code)
 	}
 }
 

@@ -515,7 +515,7 @@ button.xs { white-space:nowrap; }
         <div class="pad" id="keyWarn" hidden></div>
         <div id="keyRows"><div class="pad hint">加载中…</div></div>
         <div class="pad" style="border-top:1px solid var(--line-soft)">
-          <div class="hint" style="margin-bottom:6px">Base URL（OpenAI 兼容：/v1/chat/completions · /v1/images/generations · /v1/videos）</div>
+          <div class="hint" style="margin-bottom:6px">Base URL（OpenAI 兼容：/v1/chat/completions · /v1/images/generations；视频走方舟原生：/api/v3/contents/generations/tasks）</div>
           <div class="codebox" id="keyBase">-</div>
           <div class="hint" style="margin:12px 0 6px">最小可用示例（key 放环境变量，别写死在脚本里）</div>
           <div class="codebox" id="keyCurl">-</div>
@@ -1584,7 +1584,7 @@ const DBG_BASE = '/panel/api/debug';
 const DBG_EP = {
   text: '/v1/chat/completions',
   image: '/v1/images/generations',
-  video: '/v1/videos',
+  video: '/api/v3/contents/generations/tasks',
 };
 // DBG_MAX_REFS 与后端 maxInputImages 对齐（服务端超出直接 400）
 const DBG_MAX_REFS = 20;
@@ -1845,7 +1845,7 @@ async function dbgSendVideo(turn, model, prompt) {
     await new Promise(res => setTimeout(res, 3000));
     let pr = null;
     try {
-      const rr = await fetch(DBG_BASE + '/v1/videos/' + encodeURIComponent(id), { headers: hdrs() });
+      const rr = await fetch(DBG_BASE + DBG_EP.video + '/' + encodeURIComponent(id), { headers: hdrs() });
       pr = await rr.json();
     } catch (e) { continue; }
     if (!pr) continue;
@@ -1859,7 +1859,7 @@ async function dbgSendVideo(turn, model, prompt) {
       v.controls = true;
       v.style.cssText = 'max-width:100%;margin-top:9px;border-radius:8px;border:1px solid var(--line)';
       turn.body.append(v);
-      try { v.src = await dbgBlobURL(DBG_BASE + '/v1/videos/' + encodeURIComponent(id) + '/content'); }
+      try { v.src = await dbgBlobURL(DBG_BASE + DBG_EP.video + '/' + encodeURIComponent(id) + '/content'); }
       catch (e) { turn.body.append(dbgNode('div', 'err', '取回成片失败：' + e.message)); }
       const src = (pr.content && pr.content.video_url) || '';
       if (src) {

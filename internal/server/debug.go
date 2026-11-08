@@ -10,7 +10,7 @@ package server
 // 以内部身份调用前门 handler。所以这些路由**只能挂在面板下**（Panel 已在
 // ServeHTTP 顶部挡掉未登录请求），绝不能注册到公开 mux。
 //
-// 路径改写是必需的：前门 handler 读的是 r.URL.Path（如 /v1/videos/{id} 用
+// 路径改写是必需的：前门 handler 读的是 r.URL.Path（如方舟任务路径用
 // TrimPrefix 取 id），不是 PathValue。
 
 import (
@@ -39,11 +39,11 @@ func (s *Server) DebugHandler() http.Handler {
 			s.handleImages(w, r)
 		case p == "/v1/images/edits" && r.Method == http.MethodPost:
 			s.handleImageEdits(w, r)
-		case p == "/v1/videos" && r.Method == http.MethodPost:
+		case p == videoTaskPath && r.Method == http.MethodPost:
 			s.handleVideoCreate(w, r)
-		case strings.HasSuffix(p, "/content") && strings.HasPrefix(p, "/v1/videos/"):
+		case strings.HasSuffix(p, "/content") && strings.HasPrefix(p, videoTaskPath+"/"):
 			s.handleVideoContent(w, r)
-		case strings.HasPrefix(p, "/v1/videos/") && r.Method == http.MethodGet:
+		case strings.HasPrefix(p, videoTaskPath+"/") && r.Method == http.MethodGet:
 			s.handleVideoGet(w, r)
 		case p == "/v1/models" && r.Method == http.MethodGet:
 			s.handleModels(w, r)

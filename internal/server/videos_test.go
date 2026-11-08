@@ -128,7 +128,7 @@ func videoBody(extra string) string {
 
 func postVideo(h http.Handler, body string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(body)))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, videoTaskPath, strings.NewReader(body)))
 	return rec
 }
 
@@ -152,8 +152,13 @@ func TestVideoCreateResponseOnlyID(t *testing.T) {
 	if len(obj) != 1 {
 		t.Fatalf("创建回包只该有 id，实际 %v", obj)
 	}
-	if id, _ := obj["id"].(string); !strings.HasPrefix(id, "video_") {
-		t.Fatalf("id 应以 video_ 开头: %v", obj)
+	id, _ := obj["id"].(string)
+	if !strings.HasPrefix(id, "cgt-") {
+		t.Fatalf("id 应为方舟格式 cgt-<时间戳>-<随机>: %v", obj)
+	}
+	// 方舟原生形态：cgt-20261105010835-xxxxx（时间戳 14 位 + 8 位十六进制）。
+	if len(strings.Split(id, "-")) != 3 || len(strings.Split(id, "-")[1]) != 14 {
+		t.Fatalf("id 形状不对: %q", id)
 	}
 }
 
@@ -235,8 +240,8 @@ func TestVideoRejectsUnknownTier(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
 		t.Fatal(err)
 	}
-	if e.Error.Code != "unsupported_parameter" || e.Error.Param != "duration" {
-		t.Fatalf("应报 unsupported_parameter/duration，实际 %+v", e.Error)
+	if e.Error.Code != "InvalidParameter.UnsupportedParameter" || e.Error.Param != "duration" {
+		t.Fatalf("应报 InvalidParameter.UnsupportedParameter/duration，实际 %+v", e.Error)
 	}
 	if n := up.submitCount(); n != 0 {
 		t.Fatalf("非法档位不该提交上游，实际 %d", n)
@@ -342,14 +347,22 @@ func TestVideoLegacyPathRetired(t *testing.T) {
 	up := newVideoUpstream(t, 100)
 	h := newVideoServer(t, up, nil)
 
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/videos/generations",
-		strings.NewReader(`{"prompt":"猫"}`)))
-	if rec.Code != http.StatusGone {
-		t.Fatalf("旧路径应 410，得到 %d: %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "endpoint_retired") {
-		t.Fatalf("应带 endpoint_retired code: %s", rec.Body.String())
+	// 三代旧路径都要 410：更早的 generations、上一版的 canonical、以及它的查询/删除。
+	for _, probe := range []struct{ method, path string }{
+		{http.MethodPost, "/v1/videos/generations"},
+		{http.MethodPost, "/v1/videos"},
+		{http.MethodGet, "/v1/videos/cgt-1"},
+		{http.MethodDelete, "/v1/videos/cgt-1"},
+		{http.MethodGet, "/v1/videos/cgt-1/content"},
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(probe.method, probe.path, strings.NewReader(`{"prompt":"猫"}`)))
+		if rec.Code != http.StatusGone {
+			t.Fatalf("%s %s 应 410，得到 %d: %s", probe.method, probe.path, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "EndpointRetired") {
+			t.Fatalf("%s %s 应带 EndpointRetired: %s", probe.method, probe.path, rec.Body.String())
+		}
 	}
 	if up.submitCount() != 0 {
 		t.Fatal("旧路径不该提交上游")
@@ -484,8 +497,8 @@ func TestVideoRejectsUnprovenReference(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("未取证的首帧能力应 400，得到 %d: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "unsupported_parameter") {
-		t.Fatalf("应报 unsupported_parameter: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "InvalidParameter.UnsupportedParameter") {
+		t.Fatalf("应报 InvalidParameter.UnsupportedParameter: %s", rec.Body.String())
 	}
 	if up.submitCount() != 0 {
 		t.Fatal("被拒绝的请求不该提交上游")
@@ -504,7 +517,7 @@ func TestVideoListAndDelete(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &created)
 
 	lrec := httptest.NewRecorder()
-	h.ServeHTTP(lrec, httptest.NewRequest(http.MethodGet, "/v1/videos?limit=10", nil))
+	h.ServeHTTP(lrec, httptest.NewRequest(http.MethodGet, videoTaskPath+"?page_size=10", nil))
 	var list struct {
 		Items []map[string]any `json:"items"`
 		Total int              `json:"total"`
@@ -516,20 +529,28 @@ func TestVideoListAndDelete(t *testing.T) {
 		t.Fatalf("列表应有 1 条: %+v", list)
 	}
 
-	// 非终态 DELETE：上游没有取消端点，必须 409 而不是假装成功。
+	// 非终态 DELETE：上游没有取消端点，必须明确拒绝而不是假装成功。
 	drec := httptest.NewRecorder()
-	h.ServeHTTP(drec, httptest.NewRequest(http.MethodDelete, "/v1/videos/"+created.ID, nil))
-	if drec.Code != http.StatusConflict {
-		t.Fatalf("非终态 DELETE 应 409，得到 %d: %s", drec.Code, drec.Body.String())
+	h.ServeHTTP(drec, httptest.NewRequest(http.MethodDelete, videoTaskPath+"/"+created.ID, nil))
+	if drec.Code != http.StatusBadRequest ||
+		!strings.Contains(drec.Body.String(), "InvalidParameter.OperationDenied") {
+		t.Fatalf("非终态 DELETE 应 400 OperationDenied，得到 %d: %s", drec.Code, drec.Body.String())
 	}
 
 	// 终态 DELETE：删本地记录。
 	up.setStatus("SUCCESS", "https://cdn.example/v.mp4")
 	getVideo(t, h, created.ID) // 刷新成终态
 	drec = httptest.NewRecorder()
-	h.ServeHTTP(drec, httptest.NewRequest(http.MethodDelete, "/v1/videos/"+created.ID, nil))
+	h.ServeHTTP(drec, httptest.NewRequest(http.MethodDelete, videoTaskPath+"/"+created.ID, nil))
 	if drec.Code != http.StatusOK {
 		t.Fatalf("终态 DELETE 应 200，得到 %d: %s", drec.Code, drec.Body.String())
+	}
+	// 方舟 DELETE 的响应体是 `{"Result":{}}`，不是自定义的 {id, deleted}。
+	var del struct {
+		Result map[string]any `json:"Result"`
+	}
+	if err := json.Unmarshal(drec.Body.Bytes(), &del); err != nil || del.Result == nil {
+		t.Fatalf("DELETE 应回 {\"Result\":{}}，得到 %s", drec.Body.String())
 	}
 }
 
@@ -538,7 +559,7 @@ func TestVideoListAndDelete(t *testing.T) {
 func getVideo(t *testing.T, h http.Handler, id string) map[string]any {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/videos/"+id+"?refresh=1", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, videoTaskPath+"/"+id+"?refresh=1", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("查询 %s 失败 %d: %s", id, rec.Code, rec.Body.String())
 	}
@@ -592,8 +613,9 @@ func TestVideoRatioDomain(t *testing.T) {
 	// 21:9 上游没有这个档位：必须 400，不许静默回落 16:9（那是另一条片子）。
 	rec = postVideo(h, `{"model":"m","content":[{"type":"text","text":"猫"}],`+
 		`"resolution":"720p","duration":5,"ratio":"21:9"}`)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "unsupported_parameter") {
-		t.Fatalf("21:9 应 400 unsupported_parameter，得到 %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest ||
+		!strings.Contains(rec.Body.String(), "InvalidParameter.UnsupportedParameter") {
+		t.Fatalf("21:9 应 400 InvalidParameter.UnsupportedParameter，得到 %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -745,5 +767,89 @@ func TestVideoMaterialKillSwitch(t *testing.T) {
 	}
 	if up.submitCount() != 0 {
 		t.Fatal("被拒绝的请求不该提交上游")
+	}
+}
+
+// TestVideoUsageCarriesCredits usage 的 token 字段承载**积分**。
+//
+// Qwen 视频不统计 token（只扣积分），而方舟客户端读 completion_tokens 做计费。
+// 这里钉住语义：token 字段 == 本次真扣的积分，且另给 credits 明文标注。
+// 别让它被「优化」成编造的 token 数 —— 那会让对账永远对不上。
+func TestVideoUsageCarriesCredits(t *testing.T) {
+	up := newVideoUpstream(t, 1000)
+	h := newVideoServer(t, up, nil)
+
+	rec := postVideo(h, videoBody(""))
+	var created struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &created)
+
+	up.setStatus("SUCCESS", "https://cdn.example/v.mp4")
+	got := getVideo(t, h, created.ID)
+
+	usage, _ := got["usage"].(map[string]any)
+	if usage == nil {
+		t.Fatalf("终态任务应下发 usage: %v", got)
+	}
+	// 720p/5s = 30 积分。
+	if usage["completion_tokens"] != float64(30) || usage["total_tokens"] != float64(30) {
+		t.Fatalf("token 字段应为积分数 30（不是编造的 token）: %v", usage)
+	}
+	if usage["credits"] != float64(30) {
+		t.Fatalf("credits 应显式给出 30: %v", usage)
+	}
+}
+
+// TestVideoListFilterAndPaging 列表按方舟参数过滤分页。
+//
+// filter.model / filter.status / page_num / page_size 都走本地快照，
+// 不打上游（方舟列表 QPS=1，拿它轮询会把池子打穿）。
+func TestVideoListFilterAndPaging(t *testing.T) {
+	up := newVideoUpstream(t, 100000)
+	h := newVideoServer(t, up, func(c *config.Config) { c.Pool.MaxVideoPerDay = 0 })
+
+	// 三个不同 prompt ⇒ 三个不同指纹 ⇒ 三个任务（幂等不会合并）。
+	for _, p := range []string{"a", "b", "c"} {
+		rec := postVideo(h, `{"model":"happyhorse11","content":[{"type":"text","text":"`+p+
+			`"}],"resolution":"720p","duration":5}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("创建 %s 失败: %s", p, rec.Body.String())
+		}
+	}
+	if rec := postVideo(h, `{"model":"wan27","content":[{"type":"text","text":"d"}],`+
+		`"resolution":"720p","duration":5}`); rec.Code != http.StatusOK {
+		t.Fatalf("wan27 创建失败: %s", rec.Body.String())
+	}
+
+	list := func(query string) (int, int) {
+		lrec := httptest.NewRecorder()
+		h.ServeHTTP(lrec, httptest.NewRequest(http.MethodGet, videoTaskPath+query, nil))
+		var out struct {
+			Items []map[string]any `json:"items"`
+			Total int              `json:"total"`
+		}
+		if err := json.Unmarshal(lrec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("解析列表失败: %v（%s）", err, lrec.Body.String())
+		}
+		return out.Total, len(out.Items)
+	}
+
+	if total, n := list(""); total != 4 || n != 4 {
+		t.Fatalf("全量应 4 条: total=%d page=%d", total, n)
+	}
+	if total, n := list("?filter.model=wan27"); total != 1 || n != 1 {
+		t.Fatalf("filter.model=wan27 应 1 条: total=%d page=%d", total, n)
+	}
+	// 任务刚创建都是 queued，还没有终态。
+	if total, _ := list("?filter.status=succeeded"); total != 0 {
+		t.Fatalf("filter.status=succeeded 应 0 条，得到 %d", total)
+	}
+	// 分页：total 是过滤后的总数，不是本页条数。
+	if total, n := list("?page_size=2&page_num=2"); total != 4 || n != 2 {
+		t.Fatalf("分页: total=%d 第二页应 2 条，得到 %d", total, n)
+	}
+	if total, n := list("?page_size=2&page_num=9"); total != 4 || n != 0 {
+		t.Fatalf("越界页: total=%d 应 0 条，得到 %d", total, n)
 	}
 }

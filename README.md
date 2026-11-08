@@ -39,7 +39,7 @@
 | 🤝 **三协议前门** | `POST /v1/chat/completions`（OpenAI）· `POST /v1/messages`（Anthropic Messages，Claude Code 可接）· `POST /v1/responses`（Responses 形态） |
 | 🖼️ **图片输入（多模态）** | chat 的 content 段支持图片：URL / data URI / 裸 base64，`image_url` / `input_image` / Anthropic `image` 三种写法全收；走 `getstsToken` → OSS 上传 → `files[]`（`file_class=vision`），上传与提交**同账号** |
 | 🎨 **图片生成/编辑** | `POST /v1/images/generations`（文生图 + **图生图**）与 `POST /v1/images/edits`（multipart 前门）。字段集对齐 image-adapter 规范；`image` 支持 URL / data URI / 裸 base64，**参考图自动走 `getstsToken` → OSS V4 签名 PUT 上传** |
-| 🎬 **视频生成** | `POST /v1/videos` 提交异步任务（只回 `id`）+ `GET /v1/videos/{id}` 轮询。canonical 六态、`content.video_url`、幂等、回调、任务落盘。支持 720P/1080P × 5/10/15s × 6 档比例 |
+| 🎬 **视频生成** | **火山方舟原生协议**：`POST/GET/DELETE /api/v3/contents/generations/tasks`。创建只回 `id`、六态、`content.video_url`、幂等、回调、任务落盘。支持 720P/1080P × 5/10/15s × 6 档比例、文生 / 首帧 / 首尾帧 / 多参考图 |
 | 🖼️ **媒体产物** | 图片返回带签名的 CDN 直链（`cdn.qwenlm.ai`），可选 `b64_json` 内联；视频返回 `tsk_` 任务的产物 URL |
 | 📄 **文件解析** | `POST /v1/files` 上传（PDF/txt/任意文档）→ 在 chat 的 content part 里引用 `file_id`，模型直读内容。**实测**：95 字节 txt 里埋「紫色大象 42」，提问后原样答出 |
 | 🔍 **联网搜索** | 上游 `feature_config.auto_search` 默认开启；`thinking: auto` + 明确要求即可检索当日新闻并附来源链接 |
@@ -226,48 +226,72 @@ curl -s localhost:8400/v1/images/generations \
 > 3. 判真假看 **magic bytes**，不看 `Content-Type`（真图可能回 `application/octet-stream`）；
 >    `/v1/media` 在 `Content-Type` 不是 `image/*` 时按扩展名兜底。
 
-### `POST /v1/videos` + `GET /v1/videos/{id}`（canonical 异步视频）
+### `POST /api/v3/contents/generations/tasks`（火山方舟原生协议）
 
-契约按 `video-adapter` 的 canonical 形状落地。与 OpenAI Sora 同名路径，但**更严**：
-创建只回 `id`、产物在 `content.video_url`、状态是六态、错误是 `{code,message}`。
+视频出口**逐字对齐火山方舟数据面**：客户端把 base_url 指到
+`https://qwen2api.1task.cn/api/v3`，方舟 SDK / Seedance 协议客户端可直接对接。
+
+| surface | 方法 | 回什么 |
+|---|---|---|
+| 创建任务 | `POST /contents/generations/tasks` | `{"id":"cgt-…"}`（**只有 id**，受理 ≠ 成功） |
+| 查询任务 | `GET /contents/generations/tasks/{id}` | 完整任务对象 |
+| 查询列表 | `GET /contents/generations/tasks` | `{items[], total}` |
+| 取消 / 删除 | `DELETE /contents/generations/tasks/{id}` | `200 + {"Result":{}}` |
+| 取成片 | `GET /contents/generations/tasks/{id}/content` | mp4 字节（**网关扩展**，方舟无此端点） |
 
 ```bash
-# 提交：content[] 是唯一入参载体；只回 id（受理 ≠ 成功）
-curl -s localhost:8400/v1/videos \
-  -H 'Authorization: Bearer <key>' -H 'Content-Type: application/json' \
+B=https://qwen2api.1task.cn/api/v3/contents/generations/tasks
+
+# 提交（content[] 是唯一入参载体；只回 id）
+curl -s $B -H 'Authorization: Bearer <key>' -H 'Content-Type: application/json' \
   -d '{"model":"happyhorse11",
        "content":[{"type":"text","text":"一只橘猫在窗台上打哈欠"}],
        "ratio":"16:9","resolution":"720p","duration":5,"generate_audio":true}'
-# → {"id":"video_50079dcb…"}
+# → {"id":"cgt-20261108194012-a1b2c3d4"}
 
 # 轮询（?refresh=1 跳过 2 秒节流）
-curl -s 'localhost:8400/v1/videos/video_50079dcb…?refresh=1' -H 'Authorization: Bearer <key>'
-# → {"status":"running","content":{"video_url":null},"error":null,…}
-# → {"status":"succeeded","content":{"video_url":"https://cdn.qwenlm.ai/…mp4"},"duration":5,…}
+curl -s "$B/cgt-20261108194012-a1b2c3d4?refresh=1" -H 'Authorization: Bearer <key>'
+# → {"status":"running","content":{"video_url":null},"error":null,
+#    "usage":{"completion_tokens":30,"total_tokens":30,"credits":30},…}
 
-# 下载成片（推荐走网关代理，见下）
-curl -s localhost:8400/v1/videos/video_50079dcb…/content -H 'Authorization: Bearer <key>' -o out.mp4
+# 列表（本地快照）/ 删除（仅终态）
+curl -s "$B?filter.status=succeeded&page_size=20" -H 'Authorization: Bearer <key>'
+curl -s -X DELETE "$B/cgt-…" -H 'Authorization: Bearer <key>'
 
-# 列表（只读本地快照，不打上游）/ 删除（仅终态）
-curl -s 'localhost:8400/v1/videos?limit=20' -H 'Authorization: Bearer <key>'
-curl -s -X DELETE localhost:8400/v1/videos/video_50079dcb… -H 'Authorization: Bearer <key>'
+# 取成片（推荐：网关带浏览器 UA 代取，绕开 CDN 的 UA 拦截）
+curl -s "$B/cgt-…/content" -H 'Authorization: Bearer <key>' -o out.mp4
 ```
 
+列表参数按方舟原生：`filter.model` / `filter.status` / `filter.task_ids`（重复参数名）
+/ `page_num` / `page_size`（均 `[1,500]`，默认 1 / 20）。`total` 是**过滤后的总数**，不是本页条数。
+
 六态：`queued` / `running` / `succeeded` / `failed` / `expired` / `cancelled`。
-认不出的上游状态**收敛为 `running`（非终态）** 并带回 `status_raw` ——
-当终态落库会提前释放槽位、提前对账，而且客户端再也不会来查。
+认不出的上游状态**收敛为 `running`（非终态）** 并带回 `status_raw`。
 
 | 纪律 | 为什么 |
 |---|---|
 | 创建回包**只有 `id`** | 受理 ≠ 成功。往里塞 status 就是承诺一个客户端不该依赖的形状 |
 | `content.video_url` 仅 `succeeded` 有值 | 未成功就交地址等于撒谎 |
-| 参数双载体二选一 | body 字段与 prompt 后缀（`--rs/--rt/--dur`）同时出现即 400：优先级不明，且后缀会被模型读进画面 |
+| 参数双载体二选一 | body 字段与 prompt 后缀（`--rs/--rt/--dur`）同时出现即 400 |
 | 幂等 | 同一份意图（指纹相同、未终态、1 小时内）重复提交返回同一个任务，**不重复计费** |
 | 任务映射落盘 | `data/videos.json`，保留 8 天。上游任务活 7 天、产物 24h，只存内存等于重启即丢 id |
-| 回调 | `callback_url` 支持；推送体与查询响应由**同一个序列化器**产出，接收方按 `(id,status)` 幂等 |
+| 回调 | `callback_url` 支持；推送体与查询响应由**同一个序列化器**产出，按 `(id,status)` 幂等 |
 
-> 🔴 **旧路径 `POST /v1/videos/generations` 已下线，返回 410**。
-> 它是另一套形状（`prompt` 平铺 + `url` 字段 + `completed` 词表），与 canonical 并存必然字段对不上。
+#### 🔴 与方舟原生的已知偏差（做不到的事，一律显式 400，不静默降级）
+
+| 方舟行为 | 本网关 | 原因 |
+|---|---|---|
+| `usage.completion_tokens` 是 token 数 | **等于本次扣的积分** | Qwen 不统计 token，只扣积分。另给 `usage.credits` 明文标注 |
+| `DELETE` 对 `queued` → `cancelled` | **400 `InvalidParameter.OperationDenied`** | 上游没有取消端点。假装取消 = 客户端以为停了、实际还在跑并计费 |
+| `asset://` 素材 ID | 400 | 上游没有素材库 |
+| `frames` | 400 | 上游只认秒级 duration |
+| `duration=-1`（模型自选） | 400 | 上游不支持；时长直接决定积分 |
+| `duration` 4~30 任意值 | 只 5 / 10 / 15 | 上游档位 |
+| `resolution` 480p / 4k | 只 720p / 1080p | 上游档位 |
+| `ratio` 21:9 | 400 | 上游 6 档不含 21:9 |
+| `watermark` / `seed` / `camera_fixed` / `return_last_frame` / `output_format` / `draft` / `service_tier` / `priority` / `tools` | 接受但不生效，记 `X-Qwen2API-Warnings` 响应头 | 上游无对应参数 |
+| `filter.service_tier` | 忽略（不过滤） | 上游无服务等级概念 |
+| 参考视频 / 参考音频 | 400 | 上游 `attachments` 只接受 `{type:"image"}` |
 
 #### 能力矩阵按内核分档（🔴 换内核就换能力）
 
@@ -282,21 +306,18 @@ curl -s -X DELETE localhost:8400/v1/videos/video_50079dcb… -H 'Authorization: 
 | `wan27`（wan-2.7） | ✅ | ❌ | ✅ 2 张（首帧 + 尾帧） |
 
 - 参考图用 `role: "reference_image"`；首尾帧必须两张都显式给 `role`（`first_frame` + `last_frame`）。
-- 首帧/尾帧与参考图**混用即 400**：这是三种不同任务，混着发上游按自己的默认解释，产物与预期不同且已计费。
-- 参考视频 / 参考音频：上游 `attachments` 只接受 `{type:"image"}` ⇒ 明确 400，不是「未取证」。
+- 首帧/尾帧与参考图**混用即 400 `InvalidParameter.TaskTypeConstraint`**。
 - 比例域是 **6 档**：`16:9` / `4:3` / `1:1` / `3:4` / `9:16` / `adaptive`（上游叫 `original`，发上去是 `origin`）。
-  此前只按 UI 放了 3 个 —— 「未测 ≠ 不支持」的活例子。
 
-> ✅ 参考素材已实测打通（2026-11-08）：`files[]` 上传后的 `id`（`img-<uuid>`）可以直接当
-> `params.attachments[].materialId`。验证方式是用**可机检的纯色图**（首帧纯红、尾帧纯蓝）：
-> 产物路径落在 `.../i2v/...`（文生是 `t2v`），抽帧首帧 R=252/B=0、末帧 R=0/B=244、
-> 第 75 帧 R=235/B=11（正在过渡）⇒ 首尾帧真的生效。
+> ✅ 参考素材已实测打通（2026-11-08）：`files[]` 上传后的 `id`（`img-<uuid>`）可直接当
+> `params.attachments[].materialId`。验证用**可机检的纯色图**：产物路径落在 `.../i2v/...`
+> （文生是 `t2v`），首帧 R=252/B=0、末帧 R=0/B=244、第 75 帧 R=235/B=11（正在过渡）。
 >
 > 🔴 首尾帧的**唯一标识**是 `extra.meta.videoGenerationMode = "first-last-frame"`，
 > 不是 `genMode` —— 首尾帧与纯文生的 `genMode` **都是 `vid_gen`**。
 > 漏了它，上游会按纯文生处理：只吃第一张图，第二张直接丢，而接口一路 200、积分照扣。
 >
-> ⚠️ **`ratio` 按场景分两种行为**（2026-11-08 四场景实测）：
+> ⚠️ `ratio` 按场景分两种行为（2026-11-08 四场景实测）：
 >
 > | 场景 | 请求 16:9 的实际产物 | ratio |
 > |---|---|---|
@@ -305,7 +326,14 @@ curl -s -X DELETE localhost:8400/v1/videos/video_50079dcb… -H 'Authorization: 
 > | 单图首帧 `standard` | 960×960 | ❌ 被输入图覆盖 |
 > | 首尾帧 `first-last-frame` | 960×960 | ❌ 被输入图覆盖 |
 >
-> 要控制首帧系的画幅，就控制输入图尺寸，别指望 `ratio`。
+> 实测耗时（5 秒片）：t2v **约 7 分钟**、单图首帧约 4.5 分钟、首尾帧 47 秒、多参考图 60 秒。
+> 客户端轮询预算别按 i2v 的一分钟设计。
+>
+> 紧急退回纯文生：`QWEN2API_VIDEO_MATERIAL_DISABLE=1`（不必回滚版本）。
+
+> 🔴 **`/v1/videos` 与 `/v1/videos/generations` 已下线，返回 410 `EndpointRetired`**。
+> 视频出口只保留方舟路径 —— 两套形状并存必然出现「两边字段对不上」。
+
 >
 > 紧急退回纯文生：`QWEN2API_VIDEO_MATERIAL_DISABLE=1`（不必回滚版本）。
 
@@ -344,7 +372,7 @@ curl -s localhost:8400/v1/chat/completions -H 'Authorization: Bearer <key>' \
   {"id": "qwen3.7-plus",   "media": "text",  "thinking": true, "vision": true},
   {"id": "qwen-image-3.0", "media": "image", "endpoint": "/v1/images/generations",
    "params": {"sizes": ["1:1","4:3","3:4","16:9","9:16"], "max_n": 4}},
-  {"id": "happyhorse11",   "media": "video", "endpoint": "/v1/videos",
+  {"id": "happyhorse11",   "media": "video", "endpoint": "/api/v3/contents/generations/tasks",
    "params": {"resolutions": ["720P","1080P"], "durations": [5,10,15],
               "credits": {"720P": {"5": 30, "10": 60, "15": 90}}}}
 ]
@@ -390,6 +418,11 @@ Claude Code / Cline 这类客户端把 Base URL 指向本服务即可。按 Anth
 | 上游凭据坏了（网关侧） | 502 | `upstream_error` | `upstream authentication failed` |
 | 额度/限流 | 429 | `insufficient_quota` / `rate_limit_error` | 具体到"哪个额度、差多少"（中文） |
 | 参数写错 | 4xx | `invalid_request_error` | 具体到字段（中文） |
+
+> 📌 视频端点的 `error.code` 用**方舟词表**：`MissingParameter` / `InvalidParameter` /
+> `InvalidParameter.UnsupportedParameter` / `InvalidParameter.TaskTypeConstraint` /
+> `InvalidParameter.OperationDenied` / `ResourceNotFound`。
+> 它与 `error.type` 分工不同：`type` 决定「要不要重试」，`code` 决定「要不要改参数」。
 
 **5xx 一律是短英文 + 稳定 type**（客户端/SDK 要的是机器可读，不是排查指南）；
 "额度将尽 or 上游抖动 / 建议换号"这类判断只进**请求流水与容器日志**，
@@ -711,7 +744,7 @@ internal/reqlog/     请求流水（环形缓冲 + stdout 一行）
 | **文件解析** `/v1/files` + chat | ✅ 上传 95B txt → 提问 14.8s，原样答出文件内关键词 |
 | **联网搜索** | ✅ `thinking:auto` + 明确要求，82s 返回当日科技新闻（带来源与 `[[40]]` 引用） |
 | **文生图 b64** `response_format:"b64_json"` | ✅ 71.4s，7.5MB base64（含 CDN 就绪重试，见下） |
-| **文生视频** `POST /v1/videos` | ✅ 2.7s 拿到 `tsk_…`（回包只有 `id`） |
+| **文生视频** `POST /api/v3/contents/generations/tasks` | ✅ 2.7s 拿到 `tsk_…`（回包只有 `id`） |
 | **视频轮询 + 产物** | ✅ 约 15 分钟 `queued → in_progress → completed`，产物 `cdn.qwenlm.ai/.../t2v/….mp4`，1.7MB 可下 |
 
 ## 视频按积分计费（余额是唯一真口径）

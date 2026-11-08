@@ -185,7 +185,7 @@ func TestModelsListIncludesMediaModels(t *testing.T) {
 	if !ok {
 		t.Fatalf("清单缺少视频模型 happyhorse11: %v", byID)
 	}
-	if vid.Media != "video" || vid.Endpoint != "/v1/videos" {
+	if vid.Media != "video" || vid.Endpoint != videoTaskPath {
 		t.Fatalf("视频模型条目不对: media=%q endpoint=%q", vid.Media, vid.Endpoint)
 	}
 	if vid.Params["resolutions"] == nil {
@@ -213,8 +213,8 @@ func TestChatRejectsMediaModel(t *testing.T) {
 	cases := []struct{ model, wantEndpoint string }{
 		{"qwen-image-3.0", "/v1/images/generations"},
 		{"Qwen-Image 3.0", "/v1/images/generations"}, // 上游 UI 的展示名
-		{"happyhorse11", "/v1/videos"},
-		{"HappyHorse 1.1", "/v1/videos"},
+		{"happyhorse11", videoTaskPath},
+		{"HappyHorse 1.1", videoTaskPath},
 	}
 	for _, c := range cases {
 		rec := doJSON(h, "/v1/chat/completions",
@@ -289,7 +289,7 @@ func TestVideoModelSelectsRoot(t *testing.T) {
 	up := newRoutingUpstream(t)
 	h := newRoutingServer(t, up)
 
-	rec := doJSON(h, "/v1/videos",
+	rec := doJSON(h, videoTaskPath,
 		`{"model":"HappyHorse 1.1","content":[{"type":"text","text":"一只猫"}],"resolution":"720p","duration":5}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("视频提交应 200，得到 %d: %s", rec.Code, rec.Body.String())
