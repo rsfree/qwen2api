@@ -32,7 +32,11 @@
         "15": 120
       }
     },
-    "size": "16:9"
+    "size": "16:9",
+    "// aliases": "模型别名：客户端传的名字 → 内核（happyhorse11 / happyhorse / wan27）。只在路由层生效：响应里的 model 仍回显客户端原名。🔴 别名只是路由标签，产物由本网关的上游生成，与 doubao 模型无关 —— 别拿它对照字节的报价单。键按「只留字母数字、全小写」归一后比较",
+    "aliases": {
+      "doubao-seedance-2-0-pro-260628": "happyhorse11"
+    }
   },
   "// expose_reasoning": "是否把上游思考摘要透出为 reasoning_content（默认 true）",
   "expose_reasoning": true,

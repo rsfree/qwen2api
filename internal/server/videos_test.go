@@ -853,3 +853,91 @@ func TestVideoListFilterAndPaging(t *testing.T) {
 		t.Fatalf("越界页: total=%d 应 0 条，得到 %d", total, n)
 	}
 }
+
+// TestVideoAliasRoutesToKernel 配置别名只在路由层生效：
+// 上游拿到的是内核，回显给客户端的仍是它传的原名。
+//
+// 这条钉的是 canonical 的「model 是路由名」：别名不是「假装支持别家的模型」，
+// 而是「这个名字由哪个内核服务」。回显改名会让客户端下一轮找不到模型。
+func TestVideoAliasRoutesToKernel(t *testing.T) {
+	const alias = "doubao-seedance-2-0-pro-260628"
+	up := newVideoUpstream(t, 100000)
+	h := newVideoServer(t, up, func(c *config.Config) {
+		c.Pool.MaxVideoPerDay = 0
+		c.Video.Aliases = map[string]string{alias: "happyhorse11"}
+	})
+
+	rec := postVideo(h, `{"model":"`+alias+`","content":[{"type":"text","text":"猫"}],`+
+		`"resolution":"720p","duration":5}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("别名应被接受，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	up.mu.Lock()
+	body := up.lastSubmit
+	up.mu.Unlock()
+	biz := bizDataOf(t, body)
+	req, _ := biz["req"].(map[string]any)
+	if req["rootModel"] != "happyhorse11" {
+		t.Fatalf("别名应路由到内核 happyhorse11，实际 %v", req["rootModel"])
+	}
+
+	// 回显必须是客户端原名。
+	var created struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &created)
+	got := getVideo(t, h, created.ID)
+	if got["model"] != alias {
+		t.Fatalf("model 应回显客户端原名 %q，实际 %v", alias, got["model"])
+	}
+}
+
+// TestVideoModelsListAliases 模型清单要列出别名，并声明它不是 doubao 模型。
+func TestVideoModelsListAliases(t *testing.T) {
+	const alias = "doubao-seedance-2-0-pro-260628"
+	up := newVideoUpstream(t, 100)
+	h := newVideoServer(t, up, func(c *config.Config) {
+		c.Video.Aliases = map[string]string{alias: "wan27"}
+	})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+
+	var out struct {
+		Data []struct {
+			ID       string `json:"id"`
+			Media    string `json:"media"`
+			Endpoint string `json:"endpoint"`
+			Notes    string `json:"notes"`
+			Params   struct {
+				Modes []string `json:"modes"`
+			} `json:"params"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("解析模型清单失败: %v", err)
+	}
+
+	var found bool
+	for _, m := range out.Data {
+		if m.ID != alias {
+			continue
+		}
+		found = true
+		if m.Media != "video" || m.Endpoint != videoTaskPath {
+			t.Fatalf("别名条目的 media/endpoint 不对: %+v", m)
+		}
+		// wan27 的能力是 t2v + 首帧/首尾帧。
+		if !strings.Contains(strings.Join(m.Params.Modes, ","), "first_last") {
+			t.Fatalf("别名参数应跟内核能力走: %v", m.Params.Modes)
+		}
+		// 🔴 必须声明「不是 doubao 模型」，否则会被当成字节的报价单。
+		if !strings.Contains(m.Notes, "不是 doubao") {
+			t.Fatalf("别名条目要说明产物来源: %s", m.Notes)
+		}
+	}
+	if !found {
+		t.Fatalf("模型清单里没有别名 %q", alias)
+	}
+}

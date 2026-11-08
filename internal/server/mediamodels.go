@@ -46,33 +46,7 @@ func (s *Server) mediaModels() []ModelInfo {
 	}
 
 	if id := strings.TrimSpace(s.conf().Video.RootModel); id != "" {
-		params := map[string]any{
-			"sizes": []string{"16:9", "9:16", "1:1"},
-			"audio": []bool{true, false},
-		}
-		if pricing := s.conf().Video.Pricing; len(pricing) > 0 {
-			resolutions := make([]string, 0, len(pricing))
-			durSet := map[int]struct{}{}
-			for res, byDur := range pricing {
-				resolutions = append(resolutions, res)
-				for ds := range byDur {
-					if n, err := strconv.Atoi(ds); err == nil {
-						durSet[n] = struct{}{}
-					}
-				}
-			}
-			durations := make([]int, 0, len(durSet))
-			for n := range durSet {
-				durations = append(durations, n)
-			}
-			sort.Ints(durations)
-			sort.Slice(resolutions, func(i, j int) bool {
-				return resolutionRank(resolutions[i]) < resolutionRank(resolutions[j])
-			})
-			params["resolutions"] = resolutions
-			params["durations"] = durations
-			params["credits"] = pricing
-		}
+		params := s.videoModelParams(id)
 		out = append(out, ModelInfo{
 			ID:       id,
 			Object:   "model",
@@ -87,9 +61,107 @@ func (s *Server) mediaModels() []ModelInfo {
 				"再 GET {id} 轮询 status；产物在 content.video_url（仅 succeeded 有值）。" +
 				videoPriceNote(s.conf().Video.Pricing),
 		})
+
+		// 配置别名：让做模型发现的客户端也能看到自定义名。
+		//
+		// 🔴 别名只是**路由标签**：产物由本网关的上游生成，与 doubao 模型无关。
+		// notes 里把这句话写死，免得有人拿它去对照字节的报价单。
+		aliases := s.conf().Video.Aliases
+		if len(aliases) > 0 {
+			names := make([]string, 0, len(aliases))
+			for a := range aliases {
+				names = append(names, a)
+			}
+			sort.Strings(names)
+			for _, a := range names {
+				kernel := aliases[a]
+				canon := kernel
+				if k, ok := videoKernelOf(kernel); ok {
+					canon = k
+				}
+				out = append(out, ModelInfo{
+					ID:       a,
+					Object:   "model",
+					Created:  mediaModelCreated,
+					OwnedBy:  "qwen",
+					Title:    videoTitle(kernel),
+					Media:    "video",
+					Endpoint: videoTaskPath,
+					Verified: true,
+					Params:   s.videoModelParams(kernel),
+					Notes: "配置别名（video.aliases）→ 内核 " + canon +
+						"。产物由本网关的上游生成，不是 doubao 模型。" +
+						videoPriceNote(s.conf().Video.Pricing),
+				})
+			}
+		}
 	}
 
 	return out
+}
+
+// videoModelParams 某个内核对外暴露的能力参数。
+//
+// 抽成函数是因为**别名条目必须按自己指向的内核算能力** ——
+// 直接复用主条目的 params 会让「别名指向 wan27、却报 happyhorse 的支持面」，
+// 客户端照着传首帧就会被 400，而且看起来像网关的错。
+func (s *Server) videoModelParams(kernel string) map[string]any {
+	params := map[string]any{
+		// 6 档（前端 Jn 常量实证），不是 UI 上常见的 3 档。
+		"sizes": []string{"16:9", "4:3", "1:1", "3:4", "9:16", "adaptive"},
+		"audio": []bool{true, false},
+		// 能力跟着内核走：客户端据此决定能不能传参考图 / 首尾帧。
+		"modes": videoModesOf(kernel),
+	}
+	pricing := s.conf().Video.Pricing
+	if len(pricing) == 0 {
+		return params
+	}
+	resolutions := make([]string, 0, len(pricing))
+	durSet := map[int]struct{}{}
+	for res, byDur := range pricing {
+		resolutions = append(resolutions, res)
+		for ds := range byDur {
+			if n, err := strconv.Atoi(ds); err == nil {
+				durSet[n] = struct{}{}
+			}
+		}
+	}
+	durations := make([]int, 0, len(durSet))
+	for n := range durSet {
+		durations = append(durations, n)
+	}
+	sort.Ints(durations)
+	sort.Slice(resolutions, func(i, j int) bool {
+		return resolutionRank(resolutions[i]) < resolutionRank(resolutions[j])
+	})
+	params["resolutions"] = resolutions
+	params["durations"] = durations
+	params["credits"] = pricing
+	return params
+}
+
+// videoModesOf 该内核支持的场景（与能力矩阵同源，别在这里另写一份判断）。
+func videoModesOf(kernel string) []string {
+	k, ok := videoKernelOf(kernel)
+	if !ok {
+		k = kernel
+	}
+	caps, ok := videoKernelCapsTable[k]
+	if !ok {
+		return []string{"t2v"}
+	}
+	modes := make([]string, 0, 3)
+	if caps.Standard {
+		modes = append(modes, "t2v")
+	}
+	if caps.FirstLastFrame {
+		modes = append(modes, "first_frame", "first_last")
+	}
+	if caps.MultiReference > 0 {
+		modes = append(modes, "omni_ref")
+	}
+	return modes
 }
 
 // videoTitle 视频模型标题。
@@ -203,6 +275,11 @@ func (s *Server) resolveVideoModel(model string) (chatModel, rootModel string) {
 	if k, ok := videoKernelOf(chatModel); ok {
 		rootModel = k
 		chatModel = ""
+	} else if k, ok := s.videoAliasOf(chatModel); ok {
+		// 配置里的别名（方舟生态常见的 doubao-seedance-* 之类）。
+		// 只在路由层生效：回显仍是客户端原名，内核换成别名指向的那个。
+		rootModel = k
+		chatModel = ""
 	} else if rootModel != "" && sameModelName(chatModel, rootModel) {
 		chatModel = ""
 	}
@@ -213,6 +290,28 @@ func (s *Server) resolveVideoModel(model string) (chatModel, rootModel string) {
 		rootModel = "happyhorse11"
 	}
 	return chatModel, rootModel
+}
+
+// videoAliasOf 查配置里的模型别名（键按 modelKey 归一后比较）。
+//
+// 别名的量级是「几个」，逐个归一化比维护一份预编译索引更简单，
+// 也不会在配置热更时留下过期索引。
+func (s *Server) videoAliasOf(name string) (string, bool) {
+	k := modelKey(name)
+	if k == "" {
+		return "", false
+	}
+	for alias, kernel := range s.conf().Video.Aliases {
+		if modelKey(alias) != k {
+			continue
+		}
+		if canon, ok := videoKernelOf(kernel); ok {
+			return canon, true
+		}
+		// 别名指向未知内核：当成配置错误，退回默认内核而不是把垃圾发上游。
+		return "", false
+	}
+	return "", false
 }
 
 // videoKernelOf 把客户端给的名字归一成上游内核（happyhorse11 / happyhorse / wan27）。

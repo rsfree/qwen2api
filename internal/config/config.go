@@ -117,6 +117,18 @@ type Video struct {
 	// 空表 ⇒ 不启用积分模式，退回 MaxVideoPerDay 的个数口径。
 	// 表里查不到的组合按"最贵档"保守估计，宁可少发也不透支。
 	Pricing map[string]map[string]int `json:"pricing"`
+	// Aliases 模型别名：**客户端传的名字 → 生成内核**。
+	//
+	// 为什么需要它：方舟生态的客户端习惯传 `doubao-seedance-2-0-pro-260628`
+	// 这类名字，而本网关的内核只有 happyhorse11 / happyhorse / wan27。
+	// 别名只在**路由层**生效：响应里的 `model` 仍回显客户端原名，
+	// 真正的内核映射是内部行为（canonical 的 model 本来就是路由名，不是上游模型 ID）。
+	//
+	// 🔴 这不是「假装支持 doubao 模型」：别名只是标签，产物由本网关的上游生成。
+	// 给客户端的文档里必须写清这一点，否则会被当成字节的模型报价。
+	//
+	// 键按"只留字母数字、全小写"归一后比较（`HappyHorse-1.1` 与 `happyhorse11` 等价）。
+	Aliases map[string]string `json:"aliases"`
 }
 
 // VideoCredits 查一次视频的积分单价。
@@ -445,6 +457,9 @@ func Default() Config {
 			Audio:      true,
 			RootModel:  "happyhorse11",
 			Size:       "16:9",
+			// 别名默认空：给什么名字由使用者决定，网关不预设厂商名。
+			// 示例见 config.example.json 的 video.aliases。
+			Aliases: map[string]string{},
 		},
 		Upstream: Upstream{
 			Proxy:              Proxy{Enabled: false},
