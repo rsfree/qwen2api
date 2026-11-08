@@ -188,8 +188,11 @@ func VideoStatusRaw(raw map[string]any) string {
 //   - 参考图在 `params.attachments`，**不是** `files[]` 里的图片会自动被用；
 //   - `attachments` 的顺序就是语义：首尾帧场景 [0]=首帧、[1]=尾帧。
 type VideoExtras struct {
-	// GenMode vid_gen（文生 / 首尾帧）或 multi_ref（多参考图）。
+	// GenMode biz_data.req.genMode：vid_gen（文生 / 首尾帧）或 multi_ref（多参考图）。
 	GenMode string
+	// VideoMode extra.meta.videoGenerationMode：standard / multi-reference / first-last-frame。
+	// 三值，与 GenMode 的两值**不是同一套**，两者都要下发。
+	VideoMode string
 	// Attachments 素材 ID 列表（materialId），顺序即语义。
 	Attachments []string
 }
@@ -201,6 +204,10 @@ type VideoExtras struct {
 // 而且加字段时容易漏逗号。
 func VideoSpecEx(size, resolution string, duration int, audio bool, rootModel string,
 	extras VideoExtras) ChatSpec {
+
+	if extras.VideoMode == "" {
+		extras.VideoMode = "standard"
+	}
 
 	if resolution == "" {
 		resolution = "720P"
@@ -247,7 +254,7 @@ func VideoSpecEx(size, resolution string, duration int, audio bool, rootModel st
 		SubChatType: "zaodian_generate_video",
 		Size:        size,
 		BizData:     string(biz),
-		VideoMode:   "standard",
+		VideoMode:   extras.VideoMode,
 	}
 }
 

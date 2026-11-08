@@ -250,7 +250,7 @@ func (s *Server) createVideo(w http.ResponseWriter, r *http.Request, plan *video
 // 🔴 载体最后决定（skill §3.7 第 3 条）：这一步才可能触发 IO（把 data URI
 // 落成本地托管 URL），越晚绑定越好 —— 前面的校验与幂等判重都不该等下载。
 func (s *Server) videoSpec(ctxReq *http.Request, plan *videoPlan, rootModel string) (upstream.ChatSpec, error) {
-	extras := upstream.VideoExtras{GenMode: plan.GenMode}
+	extras := upstream.VideoExtras{GenMode: plan.GenMode, VideoMode: plan.VideoMode}
 	var files []upstream.FileRef
 
 	if len(plan.Clips) > 0 {

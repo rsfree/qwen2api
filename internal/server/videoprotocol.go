@@ -216,6 +216,15 @@ type videoPlan struct {
 	RootModel string
 	// GenMode 上游 biz_data.req.genMode：vid_gen（文生/首尾帧）或 multi_ref（多参考）。
 	GenMode string
+	// VideoMode 上游 extra.meta.videoGenerationMode：standard / multi-reference / first-last-frame。
+	//
+	// 🔴 同一个「模式」在上游有**两个载体、两套取值**：
+	//   extra.meta.videoGenerationMode ∈ {standard, multi-reference, first-last-frame}
+	//   biz_data.req.genMode             ∈ {vid_gen, multi_ref}
+	// 首尾帧与普通文生的 genMode **都是 vid_gen**，唯一的区分就是 videoGenerationMode。
+	// 只写 genMode 不写它 ⇒ 上游按纯文生处理：attachments[0] 当参考图，第二张直接忽略。
+	// （2026-11-08 实测踩到：红色首帧生效、蓝色尾帧被丢，产物 5 秒全红。）
+	VideoMode string
 
 	// 回显用（客户端原名原值，不许被上游 ID 覆盖）。
 	EchoModel      string
@@ -371,8 +380,17 @@ func (s *Server) validateVideoRequest(req *VideoRequest) (*videoPlan, *videoReje
 	// 能力按内核分档 —— 必须在场景判定之后、能力闸门之前解析。
 	_, plan.RootModel = s.resolveVideoModel(plan.EchoModel)
 	plan.GenMode = "vid_gen"
-	if scene == "omni_ref" {
+	plan.VideoMode = "standard"
+	switch scene {
+	case "omni_ref":
 		plan.GenMode = "multi_ref"
+		plan.VideoMode = "multi-reference"
+	case "first_last":
+		// genMode 仍是 vid_gen；区别只在 videoGenerationMode。
+		plan.VideoMode = "first-last-frame"
+	case "first_frame":
+		// 单图首帧走 standard：前端 ms[standard]=1，一张附件就是它。
+		plan.VideoMode = "standard"
 	}
 	if rj := checkVideoCaps(plan, images, videos, audios); rj != nil {
 		return nil, rj

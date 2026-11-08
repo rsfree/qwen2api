@@ -676,6 +676,29 @@ func TestVideoProbeUnlocksReference(t *testing.T) {
 	if !ok || len(arr) != 2 {
 		t.Fatalf("首尾帧应有 2 项 attachments: %v", params["attachments"])
 	}
+
+	// 🔴 首尾帧的**唯一标识**是 extra.meta.videoGenerationMode，不是 genMode
+	// （首尾帧与纯文生的 genMode 都是 vid_gen）。
+	// 2026-11-08 实测踩过：漏了它，上游按纯文生处理 —— 红色首帧生效、蓝色尾帧被丢，
+	// 5 秒产物全程纯红，而接口一路 200、积分照扣。
+	meta := metaOfSubmit(t, body)
+	if meta["videoGenerationMode"] != "first-last-frame" {
+		t.Fatalf("首尾帧必须下发 videoGenerationMode=first-last-frame，实际 %v",
+			meta["videoGenerationMode"])
+	}
+}
+
+// metaOfSubmit 取上游提交体里的 messages[0].extra.meta。
+func metaOfSubmit(t *testing.T, body map[string]any) map[string]any {
+	t.Helper()
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) == 0 {
+		t.Fatal("提交体没有 messages")
+	}
+	m, _ := msgs[0].(map[string]any)
+	extra, _ := m["extra"].(map[string]any)
+	meta, _ := extra["meta"].(map[string]any)
+	return meta
 }
 
 // bizDataOf 从提交体里取出解析后的 biz_data。
