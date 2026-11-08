@@ -210,6 +210,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	s.pool.MarkOK(sd.acct)
 }
 
+// agentBusyBackoff agent 并发槽满后的等待时长。
+//
+// 上游对 agent 的并发槽是**账号级**的（Free 实测同时只容 1 个任务），
+// 槽满返回 `user.too_many_concurrent`（明确未受理）。等一两秒重试**同一个号**
+// 比换号划算得多：换号等于丢掉整段对话的 prompt cache（约 14k tokens）。
+const agentBusyBackoff = 1200 * time.Millisecond
+
 // openUpstream 选号 → 建会话 → 开流，失败按可重试性换号。
 //
 // blobBase 是图片托管的公网基址（无图片时可为空）。
@@ -273,22 +280,36 @@ func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear, pr
 		// 当成一次换号 —— 3000 个冷号时，一次请求连登 4 个号就把预算用光，
 		// 直接返回 503「没有可用账号」（2026-10-30 实测踩到）。
 		var err error
-		for retried := false; ; retried = true {
+		renewTried, busyTried := false, false
+		for {
 			var o *opened
 			o, err = s.openOnce(actx, acct, cred, model, gear, prompt, blobBase, spec, dlg, dlgKey)
 			if err == nil {
 				o.acct = acct
 				return o, nil
 			}
+			// Agent 并发槽满：先短退避重试**同一个号同一个会话**，保住 cache。
+			// 只试一次 —— 再满说明这个号确实被占着，交给外层换号。
+			if !busyTried && dlg != nil && upstream.IsAgentBusy(err) {
+				busyTried = true
+				log.Printf("[qwen2api] 账号 %s 的 agent 并发槽已满，%s 后重试同号（保 cache）",
+					acct.Name, agentBusyBackoff)
+				time.Sleep(agentBusyBackoff)
+				continue
+			}
 			// 只在"凭据失效 + 还没重试过 + 有密码或 refresh_token"时续期一次。
+			if renewTried {
+				break
+			}
 			renewable := acct.Password != "" || s.pool.RefreshToken(acct.Name) != ""
-			if retried || !renewable || !s.renewableErr(acct, err) {
+			if !renewable || !s.renewableErr(acct, err) {
 				break
 			}
 			if !s.relogin(ctx, acct) {
 				break
 			}
 			cred = s.pool.Credential(acct.Name)
+			renewTried = true
 		}
 
 		s.pool.Release(acct)

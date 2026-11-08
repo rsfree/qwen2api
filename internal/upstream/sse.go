@@ -421,6 +421,9 @@ func extractToolPrompt(args string) string {
 func decodeStreamError(raw json.RawMessage) error {
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
+		if agentBusyText(s) {
+			return NewErr(KindRateLimit, "chat 流", 200, CodeAgentBusy, s, true)
+		}
 		return NewErr(KindUnknown, "chat 流", 200, "", s, false)
 	}
 	var obj struct {
@@ -432,6 +435,11 @@ func decodeStreamError(raw json.RawMessage) error {
 		detail := obj.Details
 		if detail == "" {
 			detail = obj.Message
+		}
+		// Agent 并发槽满：明确未受理（"请等待其他任务完成"）⇒ 可安全重试。
+		// 不识别的话会被归类成 KindUnknown、retrySafe=false，客户端直接吃 502。
+		if agentBusyText(obj.Code + " " + detail) {
+			return NewErr(KindRateLimit, "chat 流", 200, CodeAgentBusy, detail, true)
 		}
 		return NewErr(KindUnknown, "chat 流", 200, obj.Code, detail, false)
 	}

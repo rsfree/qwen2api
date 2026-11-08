@@ -243,3 +243,41 @@ func TestParserTextUsageUnaffected(t *testing.T) {
 		t.Fatalf("t2t 顶层 usage 未采纳: %+v", ev.Usage)
 	}
 }
+
+// Agent 并发槽满（2026-11-08 线上实测）：同一个号同时只能跑一个 agent 任务。
+//
+// 这条必须被认出来 —— 否则归 KindUnknown、retrySafe=false，客户端直接吃 502，
+// 而上游其实只是说"稍等"。
+func TestAgentBusyIsRetryable(t *testing.T) {
+	raw := `{"error":{"code":"user.too_many_concurrent","details":"当前运行的任务数已达上限，请等待其他任务完成，或升级订阅以运行更多任务。"}}`
+	_, _, err := NewParser().Parse([]byte(raw))
+	if err == nil {
+		t.Fatal("并发槽满应判为错误")
+	}
+	if !IsAgentBusy(err) {
+		t.Fatalf("未识别为并发槽满: %v", err)
+	}
+	if !RetrySafe(err) {
+		t.Fatalf("并发槽满是明确未受理，必须可安全重试: %v", err)
+	}
+	if KindOf(err) != KindRateLimit {
+		t.Fatalf("应归 rate_limit（软冷却），得到 %v", KindOf(err))
+	}
+
+	// 字符串形态（上游另一种写法）
+	raw2 := `{"error":"user.too_many_concurrent: 当前运行的任务数已达上限"}`
+	_, _, err2 := NewParser().Parse([]byte(raw2))
+	if !IsAgentBusy(err2) || !RetrySafe(err2) {
+		t.Fatalf("字符串形态未识别: %v", err2)
+	}
+
+	// 普通错误不能被误判
+	raw3 := `{"error":{"code":"invalid_input","details":"bad"}}`
+	_, _, err3 := NewParser().Parse([]byte(raw3))
+	if IsAgentBusy(err3) {
+		t.Fatal("普通错误被误判成并发槽满")
+	}
+	if RetrySafe(err3) {
+		t.Fatal("普通错误不该被判为可重试")
+	}
+}

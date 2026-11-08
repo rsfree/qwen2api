@@ -3,6 +3,7 @@ package upstream
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Kind 上游错误的可机读分类 —— 账号池的处置策略按 Kind 分派，不靠文案匹配。
@@ -44,6 +45,29 @@ func (e *Error) Error() string {
 		detail = ": " + truncate(e.Detail, 240)
 	}
 	return fmt.Sprintf("%s:%s%s%s", e.Op, sb, code, detail)
+}
+
+// CodeAgentBusy 上游 Agent 的**账号级并发槽**已满。
+//
+// 实测（2026-11-08，Free 号）：同一个号在同一时刻只能跑一个 agent 任务，
+// 第二个请求会拿到 `user.too_many_concurrent: 当前运行的任务数已达上限`。
+// 它**不是**配额/限流配额，而是并发槽 —— 语义上"明确未受理"，稍后重试安全。
+const CodeAgentBusy = "TooManyConcurrent"
+
+// IsAgentBusy 是否 Agent 并发槽满。调用方据此决定"短退避重试同号"还是"换号"。
+func IsAgentBusy(err error) bool {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Code == CodeAgentBusy
+	}
+	return false
+}
+
+// agentBusyText 上游文案判定（流内错误的 code 常常为空，只能看 details）。
+func agentBusyText(s string) bool {
+	low := strings.ToLower(s)
+	return strings.Contains(low, "too_many_concurrent") ||
+		strings.Contains(s, "任务数已达上限")
 }
 
 // KindOf 取错误分类；非本包错误返回 KindUnknown。
