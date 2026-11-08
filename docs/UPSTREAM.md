@@ -705,12 +705,29 @@ params  = { resolution, size, duration, audio: true,
 - `attachments` 里**只有 `type:"image"`**：没有任何视频/音频素材的构造路径
   ⇒ 参考视频/音频是「明确不支持」，不是「未取证」。
 
-🔴 **未实测**：`materialId` 是会话素材对象 `{type:"image", id}` 的 `id`。
-网关 `files[]` 上传后拿到的 `id`（`img-<uuid>`）能否直接当 `materialId` —— **没有证据**。
+### 4.7.3 首尾帧实测（✅ 2026-11-08，一次 720p/5s）
 
-所以网关当前对参考素材一律 `400 unsupported_parameter` 并说明边界，而不是静默放行：
-静默放行的最坏结果是「HTTP 200 + 照扣积分 + 生成一条根本没用参考图的片子」，
-排障时没人会想到参数压根没生效。实测开关：`QWEN2API_VIDEO_MATERIAL_PROBE=1`。
+判别式素材：首帧纯红 512²、尾帧纯蓝 512²、prompt 只说"纯色背景没有任何物体"。
+
+| 观测 | 第一次（缺 videoGenerationMode） | 第二次（补齐后） |
+|---|---|---|
+| 提交 | 200 + task id，8.7s | 200 + task id |
+| 产物路径 | `.../i2v/...mp4` | `.../i2v/...mp4` |
+| 首帧平均色 | R=248 B=0 | R=252 B=0 |
+| 末帧平均色 | **R=248 B=0**（还是红） | **R=0 B=244**（蓝） |
+| 第 75 帧 | R=248 B=0 | R=235 B=11（过渡中） |
+| 输出尺寸 | 960×960 | 960×960（输入 512²） |
+
+两条结论：
+
+1. 🔴 **首尾帧的唯一标识是 `extra.meta.videoGenerationMode = "first-last-frame"`**，
+   不是 `genMode`。首尾帧与纯文生的 `genMode` 都是 `vid_gen`；漏掉 `videoGenerationMode`
+   时上游按纯文生处理 —— 只吃 `attachments[0]`，第二张静默丢弃，接口一路 200、积分照扣。
+2. ✅ `files[]` 上传后的 `id`（`img-<uuid>`）**可以直接当 `materialId`**（第二次实测尾帧生效）。
+3. ⚠️ 首帧/首尾帧/参考图场景下 `ratio` 由**输入图**决定：请求 `16:9`、输入 512²，产物 960×960。
+   要控制画幅就控制输入图，别指望 `ratio`。
+
+网关的紧急退回开关：`QWEN2API_VIDEO_MATERIAL_DISABLE=1`（纯文生，不必回滚版本）。
 
 ## 4.7 文件解析：`t2t` + `files[]`（✅ 2026-10-28 本仓实测）
 

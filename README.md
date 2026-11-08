@@ -287,11 +287,19 @@ curl -s -X DELETE localhost:8400/v1/videos/video_50079dcb… -H 'Authorization: 
 - 比例域是 **6 档**：`16:9` / `4:3` / `1:1` / `3:4` / `9:16` / `adaptive`（上游叫 `original`，发上去是 `origin`）。
   此前只按 UI 放了 3 个 —— 「未测 ≠ 不支持」的活例子。
 
-> ⚠️ 参考素材的 `materialId` 链路**尚未实测**：上游 biz_data 形态已确证为
-> `params.attachments=[{type:"image", materialId:"<素材 id>"}]`，但网关 `files[]`
-> 上传后拿到的 id 能不能直接当 materialId 未验证。默认**明确拒绝并说明原因**
-> （不赌「200 但没 task_id」的静默失败，那种失败钱照扣）；实测时用
-> `QWEN2API_VIDEO_MATERIAL_PROBE=1` 打开。
+> ✅ 参考素材已实测打通（2026-11-08）：`files[]` 上传后的 `id`（`img-<uuid>`）可以直接当
+> `params.attachments[].materialId`。验证方式是用**可机检的纯色图**（首帧纯红、尾帧纯蓝）：
+> 产物路径落在 `.../i2v/...`（文生是 `t2v`），抽帧首帧 R=252/B=0、末帧 R=0/B=244、
+> 第 75 帧 R=235/B=11（正在过渡）⇒ 首尾帧真的生效。
+>
+> 🔴 首尾帧的**唯一标识**是 `extra.meta.videoGenerationMode = "first-last-frame"`，
+> 不是 `genMode` —— 首尾帧与纯文生的 `genMode` **都是 `vid_gen`**。
+> 漏了它，上游会按纯文生处理：只吃第一张图，第二张直接丢，而接口一路 200、积分照扣。
+>
+> ⚠️ 首帧/首尾帧/参考图场景下，`ratio` 由**输入图**决定，请求里写的具体比例会被上游
+> 忽略（实测请求 16:9、输入 512²，产物 960×960）。要控制画幅就控制输入图。
+>
+> 紧急退回纯文生：`QWEN2API_VIDEO_MATERIAL_DISABLE=1`（不必回滚版本）。
 
 ### `POST /v1/files` + 文件提问
 

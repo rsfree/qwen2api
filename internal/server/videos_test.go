@@ -613,11 +613,11 @@ func TestVideoCapabilityByKernel(t *testing.T) {
 		t.Fatalf("happyhorse11 首帧应 400，得到 %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// wan27 支持首尾帧，但 materialId 链路未实测 ⇒ 默认仍然拒，且要说清原因。
+	// wan27 支持首帧，且 materialId 链路已实测（2026-11-08）⇒ 放行。
 	rec = postVideo(h, `{"model":"wan27","resolution":"720p","duration":5,"content":[`+
 		`{"type":"text","text":"猫"},`+firstFrame+`]}`)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "materialId") {
-		t.Fatalf("materialId 未实测应 400 并点名原因，得到 %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("wan27 首帧应放行，得到 %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// happyhorse 的参考图上限是 9 张。
@@ -646,9 +646,9 @@ func TestVideoCapabilityByKernel(t *testing.T) {
 // 断言的是**上游收到的 body**：genMode=vid_gen + attachments 两项（顺序=首帧,尾帧）。
 // 若这里漏了 attachments，上游会当纯文生处理 —— 200 + 扣钱 + 出来一条无关的片子。
 func TestVideoProbeUnlocksReference(t *testing.T) {
-	old := videoMaterialProbe
-	videoMaterialProbe = true
-	t.Cleanup(func() { videoMaterialProbe = old })
+	old := videoMaterialEnabled
+	videoMaterialEnabled = true
+	t.Cleanup(func() { videoMaterialEnabled = old })
 
 	up := newVideoUpstream(t, 100)
 	cfg := config.Default()
@@ -723,4 +723,27 @@ func bizDataOf(t *testing.T, body map[string]any) map[string]any {
 		t.Fatalf("biz_data 不是合法 JSON: %v", err)
 	}
 	return out
+}
+
+// TestVideoMaterialKillSwitch 环境开关关闭后，参考素材必须明确拒绝。
+//
+// 保留这个开关是为了「上游哪天改了素材体系」时能一键退回纯文生，
+// 而不用回滚整个版本。退回时不能静默——必须告诉调用方现在只收纯文本。
+func TestVideoMaterialKillSwitch(t *testing.T) {
+	old := videoMaterialEnabled
+	videoMaterialEnabled = false
+	t.Cleanup(func() { videoMaterialEnabled = old })
+
+	up := newVideoUpstream(t, 100000)
+	h := newVideoServer(t, up, func(c *config.Config) { c.Pool.MaxVideoPerDay = 0 })
+
+	rec := postVideo(h, `{"model":"wan27","resolution":"720p","duration":5,"content":[`+
+		`{"type":"text","text":"猫"},`+
+		`{"type":"image_url","image_url":{"url":"https://x/a.png"},"role":"first_frame"}]}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "DISABLE") {
+		t.Fatalf("关闭开关后应 400 并点名开关，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	if up.submitCount() != 0 {
+		t.Fatal("被拒绝的请求不该提交上游")
+	}
 }

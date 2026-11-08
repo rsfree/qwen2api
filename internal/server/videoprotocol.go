@@ -279,16 +279,16 @@ var videoKernelAliases = map[string]string{
 	"wan27":        "wan27",      // wan-2.7
 }
 
-// videoMaterialProbe 素材 ID 链路的实测开关。
+// videoMaterialEnabled 参考素材能力（默认开，可用环境变量紧急关闭）。
 //
-// 上游 biz_data 的参考图形态已确证为
-// `params.attachments=[{type:"image", materialId:"<会话素材 id>"}]`，
-// 但「网关 files[] 上传后拿到的 id 能不能直接当 materialId」**尚未实测**。
-// 未实测就默认放行 = 赌一个可能 200 但没 task_id 的静默失败（钱照扣）。
+// ✅ 2026-11-08 实测通过（wan27 + 首帧纯红/尾帧纯蓝，720p/5s）：
+//   - 提交 200 + task id，47s 出片，产物路径 `.../i2v/...`（文生是 `t2v`）
+//   - 抽帧：首帧 R=252/B=0、末帧 R=0/B=244、第 75 帧 R=235/B=11（正在过渡）
+//   ⇒ `files[]` 上传后拿到的 `id`（`img-<uuid>`）**可以直接当 materialId**。
 //
-// 所以默认拒绝，并如实说明边界；实测确认后把默认值改成 true。
-// 探测时用环境变量临时打开，不必改代码。
-var videoMaterialProbe = os.Getenv("QWEN2API_VIDEO_MATERIAL_PROBE") == "1"
+// 保留开关是为了「上游哪天改了素材体系」时能一键退回纯文生，不必回滚版本：
+// `QWEN2API_VIDEO_MATERIAL_DISABLE=1`。
+var videoMaterialEnabled = os.Getenv("QWEN2API_VIDEO_MATERIAL_DISABLE") != "1"
 
 // 上游支持的取值域（前端 bundle 实证）。
 var (
@@ -568,10 +568,10 @@ func checkVideoCaps(plan *videoPlan, images, videos, audios []videoClip) *videoR
 				"内核 %s 不支持首帧/首尾帧（只有 wan27 支持）；"+
 					"要做参考图请把 role 改成 reference_image", plan.RootModel))
 		}
-		if !videoMaterialProbe {
+		if !videoMaterialEnabled {
 			return rejectUnsupported("content",
-				"上游支持首尾帧，但网关的素材 ID 链路（materialId）尚未实测："+
-					"未实测就放行可能换来「200 但没 task_id」的静默失败（钱照扣）")
+				"参考素材能力已通过 QWEN2API_VIDEO_MATERIAL_DISABLE=1 关闭："+
+					"当前只接受纯文本 content（t2v）")
 		}
 		return nil
 	case "omni_ref":
@@ -584,10 +584,10 @@ func checkVideoCaps(plan *videoPlan, images, videos, audios []videoClip) *videoR
 				"内核 %s 最多 %d 张参考图，给了 %d 张",
 				plan.RootModel, caps.MultiReference, len(images)))
 		}
-		if !videoMaterialProbe {
+		if !videoMaterialEnabled {
 			return rejectUnsupported("content",
-				"上游支持参考图，但网关的素材 ID 链路（materialId）尚未实测："+
-					"未实测就放行可能换来「200 但没 task_id」的静默失败（钱照扣）")
+				"参考素材能力已通过 QWEN2API_VIDEO_MATERIAL_DISABLE=1 关闭："+
+					"当前只接受纯文本 content（t2v）")
 		}
 		return nil
 	}
