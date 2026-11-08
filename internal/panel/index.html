@@ -1146,8 +1146,37 @@ function cfgGroupOf(key) {
 }
 const CFG_GROUPS = [['base', '基础'], ['pool', '账号池与限额'], ['video', '视频'], ['upstream', '上游']];
 
+// kvLines 把键值对象渲染成「每行 key=value」。键排序保证每次打开面板顺序一致。
+function kvLines(obj) {
+  const o = obj || {};
+  return Object.keys(o).sort().map(k => k + '=' + o[k]).join('\n');
+}
+
+// parseKV 解析 textarea。不合法就**报错而不是跳过** ——
+// 静默丢一行等于悄悄改了一条路由，而界面上看不出少了什么。
+function parseKV(text) {
+  const obj = {};
+  const lines = String(text || '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const s = lines[i].trim();
+    if (!s) continue;
+    const p = s.indexOf('=');
+    if (p <= 0) return { err: '第 ' + (i + 1) + ' 行不是「名字=内核」：' + s };
+    const k = s.slice(0, p).trim();
+    const v = s.slice(p + 1).trim();
+    if (!k) return { err: '第 ' + (i + 1) + ' 行缺少名字' };
+    if (!v) return { err: '第 ' + (i + 1) + ' 行缺少内核（' + k + '=?）' };
+    obj[k] = v;
+  }
+  return { obj: obj };
+}
+
 function cfgInput(f, v) {
   const attrs = 'data-key="' + f.key + '"';
+  if (f.type === 'kv') {
+    return '<textarea ' + attrs + ' rows="3" spellcheck="false" '
+      + 'placeholder="客户端模型名=内核名，每行一条">' + esc(kvLines(v)) + '</textarea>';
+  }
   if (f.type === 'bool') {
     return '<select ' + attrs + '><option value="true"' + (v ? ' selected' : '') + '>开</option>'
       + '<option value="false"' + (!v ? ' selected' : '') + '>关</option></select>';
@@ -1175,7 +1204,7 @@ function renderConfigForm() {
     return '<div style="margin-bottom:14px">'
       + '<div class="hint" style="margin:0 0 8px;font-weight:600">' + g[1] + '</div>'
       + '<div style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">'
-      + fs.map(f => '<div class="field"><label>' + esc(f.label)
+      + fs.map(f => '<div class="field"' + (f.type === 'kv' ? ' style="grid-column:1/-1"' : '') + '><label>' + esc(f.label)
         + (f.hot ? '' : ' <span class="tag warn">需重启</span>')
         + '</label>'
         // 把 disabled 插到标签名的第一个 '>' 前：对 input/select 都成立
@@ -1209,6 +1238,7 @@ async function loadConfigForm(force) {
 // saveConfigForm 只提交**改动过**的字段：没碰的项不动，避免把别处的旧值写回文件。
 async function saveConfigForm() {
   const patch = {};
+  let kvErr = null;
   $$('#cfgForm [data-key]').forEach(el => {
     const k = el.dataset.key;
     const f = CFG.fields.find(x => x.key === k);
@@ -1216,13 +1246,19 @@ async function saveConfigForm() {
     let v;
     if (f.type === 'int') v = Number(el.value);
     else if (f.type === 'bool') v = el.value === 'true';
-    else v = el.value;
+    else if (f.type === 'kv') {
+      const r = parseKV(el.value);
+      if (r.err) { kvErr = kvErr || r.err; return; }
+      v = r.obj;
+    } else v = el.value;
     const old = CFG.values[k];
     const same = f.type === 'int' ? Number(old) === v
       : f.type === 'bool' ? Boolean(old) === v
+      : f.type === 'kv' ? kvLines(old) === kvLines(v)
       : String(old == null ? '' : old) === String(v);
     if (!same) patch[k] = v;
   });
+  if (kvErr) { toast('模型别名格式不对：' + kvErr, 'err'); return; }
   if (!Object.keys(patch).length) { toast('没有改动', 'ok'); return; }
 
   const btn = $('#btnCfgSave');

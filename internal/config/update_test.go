@@ -118,3 +118,76 @@ func TestApplyImageTimeoutIsHot(t *testing.T) {
 		t.Fatal("低于 30s 应拒绝（会把正常出图全掐死）")
 	}
 }
+
+// TestKVFieldNormalize kv 类型（video.aliases）的校验。
+//
+// 四条不能松：值必须是内核（配错了静默回落默认内核，等于改了路由却没人知道）、
+// 键不能空、值不能空、非对象要拒。
+func TestKVFieldNormalize(t *testing.T) {
+	f, ok := fieldByKey("video.aliases")
+	if !ok {
+		t.Fatal("video.aliases 未在 Fields 注册（面板改不了）")
+	}
+	if f.Type != "kv" {
+		t.Fatalf("video.aliases 的 Type 应为 kv，实际 %q", f.Type)
+	}
+
+	got, err := f.Normalize(map[string]any{
+		"doubao-seedance-2-0-pro-260628": "happyhorse11",
+		" wan 2.7 ":                       " wan27 ",
+	})
+	if err != nil {
+		t.Fatalf("合法别名被判非法: %v", err)
+	}
+	m, _ := got.(map[string]string)
+	if m["doubao-seedance-2-0-pro-260628"] != "happyhorse11" || m["wan 2.7"] != "wan27" {
+		t.Fatalf("归一化不对: %#v", got)
+	}
+
+	bad := []struct {
+		name string
+		v    any
+	}{
+		{"值不是内核", map[string]any{"x": "gpt-4"}},
+		{"空值", map[string]any{"x": "  "}},
+		{"空键", map[string]any{"  ": "wan27"}},
+		{"值不是字符串", map[string]any{"x": 1}},
+		{"不是对象", "x=wan27"},
+	}
+	for _, c := range bad {
+		if _, err := f.Normalize(c.v); err == nil {
+			t.Fatalf("%s 应被拒绝: %#v", c.name, c.v)
+		}
+	}
+}
+
+// TestApplyVideoAliases 别名能写进配置，且等值重复提交不落盘。
+func TestApplyVideoAliases(t *testing.T) {
+	raw := map[string]any{"video": map[string]any{}}
+	patch := map[string]any{"video.aliases": map[string]any{"doubao-x": "wan27"}}
+
+	applied, restart, err := Apply(raw, patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != 1 || applied[0] != "video.aliases" {
+		t.Fatalf("applied 不对: %v", applied)
+	}
+	if len(restart) != 0 {
+		t.Fatalf("别名应热更，不该要求重启: %v", restart)
+	}
+	video, _ := raw["video"].(map[string]any)
+	aliases, ok := video["aliases"].(map[string]string)
+	if !ok || aliases["doubao-x"] != "wan27" {
+		t.Fatalf("没写进配置: %#v", video["aliases"])
+	}
+
+	// 同样的值再提交一次：不该再算「改动」（否则每次保存都触发一次热更）。
+	applied, _, err = Apply(raw, patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != 0 {
+		t.Fatalf("等值重复提交不该算改动: %v", applied)
+	}
+}

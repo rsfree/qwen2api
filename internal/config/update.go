@@ -16,7 +16,11 @@ type Field struct {
 	// Key 点分路径，如 `pool.max_rotate`。
 	Key   string `json:"key"`
 	Label string `json:"label"`
-	// Type int | bool | string | enum
+	// Type int | bool | string | enum | kv
+	//
+	// kv 是 map[string]string（如 video.aliases）：面板渲染成「每行 key=value」，
+	// 提交时仍是 JSON 对象。为什么不用 string 存 JSON 文本：那会让「写错一个引号」
+	// 变成一次启动失败，而 kv 的解析错误能在保存时就指到具体哪一行。
 	Type string `json:"type"`
 	// Min / Max 仅 int 有效（闭区间）。
 	Min int `json:"min,omitempty"`
@@ -88,10 +92,16 @@ var Fields = []Field{
 	{Key: "video.root_model", Label: "视频内核模型", Type: "string", Hot: true,
 		Hint: "实测 happyhorse11；改错会 Bad_Request"},
 	{Key: "video.resolution", Label: "视频默认分辨率", Type: "enum",
-		Enum: []string{"720P", "1080P"}, Hot: true},
-	{Key: "video.duration", Label: "视频默认时长（秒）", Type: "int", Min: 5, Max: 15, Hot: true},
+		Enum: []string{"720P", "1080P"}, Hot: true,
+		Hint: "请求没带 resolution 时用它；1080P 走付费积分"},
+	{Key: "video.duration", Label: "视频默认时长（秒）", Type: "int", Min: 5, Max: 15, Hot: true,
+		Hint: "请求没带 duration 时用它；上游只支持 5 / 10 / 15"},
 	{Key: "video.size", Label: "视频默认画幅", Type: "string", Hot: true,
 		Hint: "如 16:9 / 1:1 / 9:16；空 = 上游默认"},
+	{Key: "video.aliases", Label: "模型别名", Type: "kv", Hot: true,
+		Enum: []string{"happyhorse11", "happyhorse", "wan27"},
+		Hint: "客户端传的模型名 → 生成内核，每行一条 `名字=内核`。" +
+			"只是路由标签：产物由本网关上游生成，与 doubao 无关。留空 = 不启用"},
 }
 
 // fieldByKey 查字段定义。
@@ -147,6 +157,45 @@ func (f Field) Normalize(v any) (any, error) {
 			}
 		}
 		return nil, fmt.Errorf("%s 只接受 %s（收到 %q）", f.Label, strings.Join(f.Enum, " / "), s)
+	case "kv":
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("%s 必须是对象（每行 key=value）", f.Label)
+		}
+		// 防呆：别名是「几个」的量级，200 条必然是脚本灌错了。
+		if len(m) > 200 {
+			return nil, fmt.Errorf("%s 最多 200 条（收到 %d 条）", f.Label, len(m))
+		}
+		out := make(map[string]string, len(m))
+		for k, val := range m {
+			key := strings.TrimSpace(k)
+			if key == "" {
+				return nil, fmt.Errorf("%s 有空键", f.Label)
+			}
+			str, isStr := val.(string)
+			if !isStr {
+				return nil, fmt.Errorf("%s 的 %q 值必须是字符串", f.Label, key)
+			}
+			str = strings.TrimSpace(str)
+			if str == "" {
+				return nil, fmt.Errorf("%s 的 %q 没有值", f.Label, key)
+			}
+			if len(f.Enum) > 0 {
+				okEnum := false
+				for _, e := range f.Enum {
+					if e == str {
+						okEnum = true
+						break
+					}
+				}
+				if !okEnum {
+					return nil, fmt.Errorf("%s 的 %q 只接受 %s（收到 %q）",
+						f.Label, key, strings.Join(f.Enum, " / "), str)
+				}
+			}
+			out[key] = str
+		}
+		return out, nil
 	default: // string
 		s, ok := v.(string)
 		if !ok {
@@ -280,6 +329,9 @@ func FieldValues(c Config) map[string]any {
 				out[f.Key] = 0
 			case "bool":
 				out[f.Key] = false
+			case "kv":
+				// 空表给空对象而不是空串：前端按「键值对」渲染，类型不一致会画错。
+				out[f.Key] = map[string]any{}
 			default:
 				out[f.Key] = ""
 			}
