@@ -1,6 +1,10 @@
 package reqlog
 
-import "testing"
+import (
+	"bytes"
+	"strings"
+	"testing"
+)
 
 // 首字分位只统计"真的出了字"的请求：失败/无首字的样本混进来会把分位拉低。
 func TestStatsTTFTIgnoresEmptySamples(t *testing.T) {
@@ -40,5 +44,39 @@ func TestStatsTTFTAfterWrap(t *testing.T) {
 	}
 	if st.TTFT.Max != 20 {
 		t.Fatalf("被覆盖的 999 不该计入，Max 得到 %d", st.TTFT.Max)
+	}
+}
+
+// Agent 的工具轨迹必须出现在流水行里 —— 否则"这 11 秒干了什么"只剩耗时。
+func TestEchoIncludesToolTrace(t *testing.T) {
+	var buf bytes.Buffer
+	l := New(4)
+	l.Out = &buf
+	l.Add(Entry{Status: 200, Tools: "bash(echo 42) → completed exit=0 stdout=42"})
+	line := buf.String()
+	if !strings.Contains(line, "tools=bash(echo 42)") {
+		t.Fatalf("流水行没带工具轨迹: %s", line)
+	}
+	if !strings.Contains(line, "exit=0") {
+		t.Fatalf("工具结果被丢了: %s", line)
+	}
+}
+
+// 多轮工具会把轨迹撑爆：超长必须截断，且按 rune 截（不能切出半个汉字）。
+func TestEchoClipsLongToolTrace(t *testing.T) {
+	var buf bytes.Buffer
+	l := New(4)
+	l.Out = &buf
+	long := strings.Repeat("工具调用", 100)
+	l.Add(Entry{Status: 200, Tools: long})
+	line := buf.String()
+	if !strings.Contains(line, "…") {
+		t.Fatalf("超长轨迹未被截断: %s", line)
+	}
+	if strings.Count(line, "工") > 210 {
+		t.Fatalf("截断阈值失效: %d 个字符", strings.Count(line, "工"))
+	}
+	if !strings.Contains(line, "工具") {
+		t.Fatalf("截断切坏了中文: %s", line)
 	}
 }

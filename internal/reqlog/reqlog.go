@@ -180,6 +180,11 @@ func (l *Log) Add(e Entry) {
 		if e.ChatID != "" {
 			line += " chat_id=" + e.ChatID
 		}
+		// 工具轨迹：Agent 的"11 秒里干了什么"全在这一行。
+		// 截断到 200 字（完整值在面板的 JSON 里），否则多轮任务会把日志冲垮。
+		if e.Tools != "" {
+			line += " tools=" + clip(e.Tools, 200)
+		}
 		if e.Error != "" {
 			line += " err=" + e.Error
 		}
@@ -275,4 +280,13 @@ func statOf(v []int64) TTFTStat {
 func (s Stats) JSON() string {
 	raw, _ := json.Marshal(s)
 	return string(raw)
+}
+
+// clip 截断到 n 个字符（按 rune，不切坏中文）。
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
