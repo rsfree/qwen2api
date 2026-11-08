@@ -293,6 +293,33 @@ curl -s "$B/cgt-…/content" -H 'Authorization: Bearer <key>' -o out.mp4
 | `filter.service_tier` | 忽略（不过滤） | 上游无服务等级概念 |
 | 参考视频 / 参考音频 | 400 | 上游 `attachments` 只接受 `{type:"image"}` |
 
+#### 模型名与别名
+
+`model` 是**路由名**，不是上游模型 ID。解析顺序：
+
+1. **内置内核名**：`happyhorse11` / `happyhorse` / `wan27`
+   （也认 `HappyHorse 1.1`、`wan-2.7` 这类写法，忽略大小写与分隔符）
+2. **配置别名**：`config.video.aliases` 里的 `客户名 → 内核`
+3. 都不是 ⇒ 当 chat 模型名，内核用 `config.video.root_model`
+
+无论走哪条，响应里的 `model` **回显客户端原名** —— 客户端按回显名做路由时不会找不到模型。
+
+```json
+"video": {
+  "aliases": {
+    "doubao-seedance-2-0-pro-260628": "happyhorse11",
+    "doubao-seedance-1-0-lite-t2v-250428": "wan27"
+  }
+}
+```
+
+> ⚠️ 别名只是**路由标签**：产物由本网关的上游生成，**与 doubao 模型无关**。
+> 配 `doubao-seedance-*` 只是给方舟客户端一个熟悉的名字，
+> 不要拿它对照字节的报价单 —— `/v1/models` 里每个别名条目的 notes 也写明了这句。
+
+`/v1/models` 同时列出内核条目与别名条目；`params.modes` 给出该内核支持的场景
+（`t2v` / `first_frame` / `first_last` / `omni_ref`），`params.sizes` 是实测 6 档比例。
+
 #### 能力矩阵按内核分档（🔴 换内核就换能力）
 
 取证：上游前端 bundle `qwen-chat-fe/0.3.38/js/main.js`（2026-11-08 只读，零消耗）。
