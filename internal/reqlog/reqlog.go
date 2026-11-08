@@ -55,6 +55,9 @@ type Entry struct {
 	// ChatID 上游会话 id。**失败也记** —— acct 只说明"哪个号"，
 	// chat_id 才说明"哪个会话"，是事后去上游会话历史里补捞产物的唯一线索。
 	ChatID string `json:"chat_id,omitempty"`
+	// Dialog 对话粘性命中情况：hit = 复用了上一轮的会话（吃到 prompt cache），
+	// new = 新建（无粘性/首轮/并发降级）。这是"省没省到钱"的唯一直接指标。
+	Dialog string `json:"dialog,omitempty"`
 	// Tools Agent 模式的工具执行轨迹（`bash(python3 -c ...) → completed exit=0`）。
 	// 没有它，流水里只有"耗时 11 秒"，回答不了"这 11 秒到底干了什么"。
 	Tools string `json:"tools,omitempty"`
@@ -176,6 +179,9 @@ func (l *Log) Add(e Entry) {
 			line += " chat=cached"
 		} else if e.ChatMS > 0 {
 			line += fmt.Sprintf(" chat=%dms", e.ChatMS)
+		}
+		if e.Dialog != "" {
+			line += " dlg=" + e.Dialog
 		}
 		if e.ChatID != "" {
 			line += " chat_id=" + e.ChatID

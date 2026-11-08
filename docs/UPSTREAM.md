@@ -1270,6 +1270,23 @@ bundle 的模式表 `hn` 里 Agent 项固定 `{chatType:"agent_mode", subChatTyp
 3. **会话不复用**：本仓是无状态网关，每请求新建 agent 会话。
    代价是每轮都重付约 14k 的 agent 系统提示（cache 只在同一 chat_id 内命中）。
 
+### 10.10 对话粘性（本仓实现，2026-11-08）
+
+上游会话是**账号维度**资源（跨号 = `CHAT_NOT_FOUND`），而本仓选号是"最闲 + 最久未用"，
+所以同一个对话的第二轮几乎必然换号 —— 历史全丢。`internal/server/dialog.go` 解决这个：
+
+| 维度 | 做法 | 理由 |
+|---|---|---|
+| 对话键 | `X-Dialog-Id` → `user` → `hash(model + 首条 user 消息)` | 前两级是显式契约；第三级零改造。**不能用整串 messages 的 hash**（每轮都在变） |
+| 选号 | `pool.Acquire(绑定号)`，判定与 `pick` 完全一致（authDead/冷却/在途满） | 粘到冷却号上会直接 401/429，比换个号重开更糟 |
+| 并发 | `TryLock` 拿不到 ⇒ **换新号开新会话**，不排队、不 409 | 同一 parentId 并发会让上游对话链分叉；agent 一轮 10s~3min，排队等于让调用方挂死 |
+| 降级 | 号不可用 ⇒ 新号 + 新会话，`parentID` 归零 | 宁可丢历史继续跑，也不让请求卡住 |
+| TTL | 15 分钟不活跃回收，上限 200 条 LRU | 重启丢表 = 一次 cache miss，可接受 |
+| 落盘 | **不落盘** | 恢复出的 chat_id 可能已被上游回收；引入 Redis 会毁掉"零依赖单二进制" |
+
+`parentId` 的来源：本轮 SSE 的 `response.created.response_id`（§10.4 实测，多轮的
+`parentId` 就是上一轮的 `response_id`，**不是消息 id**）。
+
 **线上验证（0.0.60，2026-11-08）**：
 
 | 场景 | 结果 |

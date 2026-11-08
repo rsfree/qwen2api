@@ -92,6 +92,8 @@ type Server struct {
 	egress   map[string]*egressState
 	// chats 预建的空会话池（按账号 + 会话类型分组，见 chatpool.go）。
 	chats *ChatPool
+	// dialogs Agent 模型的对话粘性表（见 dialog.go）。纯内存，重启即丢。
+	dialogs *dialogStore
 	// cfgPath 配置文件路径（面板保存配置时要写回它；空 = 不可写，只读展示）。
 	cfgPath string
 }
@@ -111,6 +113,7 @@ func New(cfg config.Config, p *pool.Pool, up *upstream.Client, log *reqlog.Log, 
 		blobs:   NewBlobStore(),
 		egress:  map[string]*egressState{},
 		chats:   NewChatPool(cfg.Pool.WarmChatsPerAccount, time.Duration(cfg.Pool.ChatPoolTTLS)*time.Second),
+		dialogs: newDialogStore(),
 	}
 	s.cfg.Store(cfg)
 	// 配置了公网基址就固定下来（服务端到服务端取图时 Host 不是公网域名）。
@@ -430,6 +433,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			// （按并发算，通常远小于 warm.target —— 这两个数差太多是正常的）。
 			"inflight":    s.inflightNow.Load(),
 			"chat_target": s.chatTargetNow.Load(),
+			// dialogs Agent 对话粘性表：entries = 活跃对话数。
+			// 长期贴着 max 说明 TTL 偏长或客户端在刷 key；长期 0 说明没人在用 agent。
+			"dialogs": s.dialogs.snapshot(),
 		},
 	})
 }

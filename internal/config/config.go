@@ -303,6 +303,14 @@ type Config struct {
 	DefaultThinking string `json:"default_thinking"`
 	// ExposeReasoning 是否把上游 thinking_summary 透出为 reasoning_content，默认 true。
 	ExposeReasoning *bool `json:"expose_reasoning"`
+	// DialogSticky 是否让 Agent 模型复用上游会话（默认 true）。
+	//
+	// 复用命中的是上游 prompt cache：同一 chat_id 内那 ~14k 的 agent 系统提示
+	// 只付一次全价（实测第 2 轮起 13.3k 命中）。代价是对话钉在一个号上。
+	// 🔴 它只影响"省多少钱"，不影响"答得对不对" —— 号不可用或并发冲突时
+	// 一律换新号开新会话（见 internal/server/dialog.go）。
+	// false = 每请求新建会话（旧行为）。
+	DialogSticky *bool `json:"dialog_sticky,omitempty"`
 	// NewChatPerRequest 每请求新建会话（无状态，默认 true）。
 	// false 时按会话键复用 chat_id（省一次上游调用，但多轮语义依赖客户端回传）。
 	NewChatPerRequest *bool `json:"new_chat_per_request"`
@@ -680,6 +688,11 @@ func (u Upstream) ConnectTimeout() time.Duration {
 // ReasoningEnabled 是否透出思考内容（默认 true）。
 func (c Config) ReasoningEnabled() bool {
 	return c.ExposeReasoning == nil || *c.ExposeReasoning
+}
+
+// DialogStickyEnabled 是否让 Agent 复用上游会话（默认 true）。
+func (c Config) DialogStickyEnabled() bool {
+	return c.DialogSticky == nil || *c.DialogSticky
 }
 
 // NewChatEach 是否每请求新建会话（默认 true）。

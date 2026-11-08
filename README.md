@@ -424,9 +424,15 @@ Agent 模式的上游**模型面是独立清单**（`GET /api/v2/models/agent_mo
 - 思考走 `reasoning_content`，但 Agent 给的是**思考原文增量**（普通模式给的是摘要累加数组）；
 - `usage` 上游放在 `extra.model_service_info`（顶层恒空），网关已兜底读取，
   且取 `task_usage`（整个任务累计，含每一轮工具）；
-- 🔴 **两次请求之间没有记忆**：本仓库是**无状态**网关（每请求新建 agent 会话），
-  多轮历史靠把 `messages` 拍平成一条 prompt。想做「连续对话的 bot」得自己带上下文，
-  见 `docs/UPSTREAM.md §10.8`。
+- 🤝 **对话粘性（默认开）**：同一个对话的多轮会**复用上游会话**，吃满 prompt cache ——
+  实测同一 `chat_id` 内那 ~14k 的 agent 系统提示只有首轮全价，之后 13k+ 命中缓存。
+  对话键三级优先：`X-Dialog-Id` 头 → `user` 字段 → 首条用户消息的 hash（零改造兜底）。
+  配置项 `dialog_sticky`（默认 true），关掉即回到"每请求新建会话"。
+- 🔴 **粘性只是省钱，不承担上下文**：历史仍由客户端每轮发全量 `messages`、
+    我们拍平进 prompt 保证。所以拿不到会话（并发/换号/重启）时一律**换新号开新会话**，
+    绝不阻塞、绝不回 409 —— 代价只是一次 cache miss。
+- ⚠️ 并发同一个对话：**自动降级为新号新会话**（同一 `parentId` 并发会让上游对话链分叉）。
+    流水里 `dlg=hit` / `dlg=new` 就是这套机制的观测口径。
 
 🔴 **上游没有独立的图片/视频模型 id** —— 2026-10-30 实测 `GET /api/v2/models/` 只有
 7 个 chat 模型；图片靠 `extra.meta.model`（`qwen-image-3.0`）选内核，视频靠

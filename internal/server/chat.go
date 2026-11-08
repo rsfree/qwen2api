@@ -51,6 +51,14 @@ type opened struct {
 	// submitAt 提交的时刻：首字要从这里算，而不是从"收到请求"算，
 	// 否则建会话/选号的耗时会把上游首字这一项污染掉。
 	submitAt time.Time
+	// dialog / dialogKey 对话粘性（见 dialog.go）。dialog 非 nil 表示本次
+	// 复用了或新建并绑定了一段对话 —— 流里拿到 response_id 时要写回去，
+	// 那张表才是下一轮的 parentId 来源。
+	dialog    *dialogEntry
+	dialogKey string
+	// dialogHit 本轮是否**复用**了已有对话（false = 新建）。
+	// 与 chatHit 不同：chatHit 是"命中预建空会话池"，这里是"接上了历史"。
+	dialogHit bool
 }
 
 // handleChat `POST /v1/chat/completions`。
@@ -156,14 +164,28 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 🔴 上游模型名与对外模型名要分开：客户端传 qwen3.8-max-agent，
 	// 上游只认 qwen3.8-max（§10.2）。model 变量保持原名，响应体里的 model
 	// 字段才不会变脸；upModel 只用于提交。
-	upModel, spec, _ := agentSpecFor(model)
+	upModel, spec, isAgent := agentSpecFor(model)
 	spec.Files = files
 	spec.ImageRefs = imgRefs
-	sd, err := s.openUpstreamSpec(r.Context(), s.blobBase(r), upModel, gear, prompt, spec)
+	// 对话粘性只对 Agent 生效：普通 t2t 每轮把历史拍平进 prompt，
+	// 复用上游会话换不到 cache 收益（cache 作用在 agent 那段系统提示上），
+	// 却要把对话钉死在一个号上 —— 不划算。
+	dlgKey := ""
+	if isAgent && s.conf().DialogStickyEnabled() {
+		dlgKey, _ = dialogKeyOf(r, req.User, upModel, req.Messages)
+	}
+	sd, err := s.openUpstreamSpec(r.Context(), s.blobBase(r), upModel, gear, prompt, spec, dlgKey)
 	if sd != nil {
 		entry.ChatHit = sd.chatHit
 		entry.ChatMS = sd.chatMS
 		entry.SubmitMS = sd.submitMS
+		if sd.dialogKey != "" {
+			if sd.dialogHit {
+				entry.Dialog = "hit"
+			} else {
+				entry.Dialog = "new"
+			}
+		}
 	}
 	if err != nil {
 		entry.Account = accountOfErr(err)
@@ -176,6 +198,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer sd.stream.Close()
 	defer s.pool.Release(sd.acct)
+	// 对话使用权必须解锁：拿不到的地方（并发/失败）会让下一轮降级换新号。
+	defer sd.dialog.done()
 	entry.Account = sd.acct.Name
 
 	if req.Stream {
@@ -194,20 +218,45 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 // 正经 HTTP 状态，只能落成流内错误。
 func (s *Server) openUpstream(ctx context.Context, blobBase, model, gear, prompt string,
 	spec upstream.ChatSpec) (*opened, error) {
-	return s.openUpstreamSpec(ctx, blobBase, model, gear, prompt, spec)
+	// 固定传空 key：Anthropic / Responses 前门暂不做对话粘性
+	// （它们的会话键来自 metadata，语义各不相同，先只把 chat 前门跑稳）。
+	return s.openUpstreamSpec(ctx, blobBase, model, gear, prompt, spec, "")
 }
 
 // openUpstreamSpec 同上，带类型规格（t2i 的图片模型 / t2v 的 biz_data 在 spec 里）。
+//
+// dlgKey 非空 ⇒ 启用**对话粘性**（仅 Agent 模型，见 dialog.go）：
+// 第一轮先试"钉住的号 + 已有 chat_id"换 cache 命中；拿不到就换新号开新会话。
+// 绝不因为"对话正被别人用着"而阻塞或拒绝 —— 那会把一个 11 秒的任务变成 3 分钟。
 func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear, prompt string,
-	spec upstream.ChatSpec) (*opened, error) {
+	spec upstream.ChatSpec, dlgKey string) (*opened, error) {
 	var lastErr error
 	lastAcct := ""
 	for attempt := 0; attempt < s.conf().Pool.MaxRotate; attempt++ {
-		acct, ok := s.pool.Pick()
-		if !ok {
-			// 🔴 这里也要带上"最后尝试的号"：只有 1 个号时，第二轮 Pick 就失败，
-			// 走这条分支返回的裸 lastErr 会让流水 acct= 空（2026-10-30 抓到）。
-			return nil, openFail(lastAcct, lastErr)
+		var (
+			acct *pool.Account
+			dlg  *dialogEntry
+		)
+		// 只在第一轮尝试复用：chat_id 是**账号维度**资源，换号之后就属于别人了
+		// （跨号提交 CHAT_NOT_FOUND），所以降级必须连会话一起换。
+		if attempt == 0 && dlgKey != "" {
+			if e := s.dialogs.borrow(dlgKey, model); e != nil {
+				if a, ok := s.pool.Acquire(e.account); ok {
+					acct, dlg = a, e
+				} else {
+					// 钉住的号不可用（冷却 / 额度 / 在途满）⇒ 放弃复用，不当错误。
+					e.done()
+				}
+			}
+		}
+		if acct == nil {
+			var ok bool
+			acct, ok = s.pool.Pick()
+			if !ok {
+				// 🔴 这里也要带上"最后尝试的号"：只有 1 个号时，第二轮 Pick 就失败，
+				// 走这条分支返回的裸 lastErr 会让流水 acct= 空（2026-10-30 抓到）。
+				return nil, openFail(lastAcct, lastErr)
+			}
 		}
 		lastAcct = acct.Name
 		attemptStart := time.Now()
@@ -226,7 +275,7 @@ func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear, pr
 		var err error
 		for retried := false; ; retried = true {
 			var o *opened
-			o, err = s.openOnce(actx, acct, cred, model, gear, prompt, blobBase, spec)
+			o, err = s.openOnce(actx, acct, cred, model, gear, prompt, blobBase, spec, dlg, dlgKey)
 			if err == nil {
 				o.acct = acct
 				return o, nil
@@ -243,6 +292,12 @@ func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear, pr
 		}
 
 		s.pool.Release(acct)
+		if dlg != nil {
+			// 这一轮失败且马上可能换号：粘住的 chat_id 随号一起作废，
+			// 不 write parentId（写进去等于把失败的这一轮记成历史）。
+			dlg.done()
+			dlg = nil
+		}
 		s.noteFailure(acct, err)
 		lastErr = err
 		took := time.Since(attemptStart)
@@ -345,13 +400,16 @@ func (s *Server) prewarmChat(ctx context.Context, acctName, cred, model, chatTyp
 	s.chats.Put(acctName, chatType, id)
 }
 
-// openOnce 用指定账号跑一轮：上传图片（若有）→ 建会话 → 提交 → 开流。
+// openOnce 用指定账号跑一轮：上传图片（若有）→ 复用或建会话 → 提交 → 开流。
 //
 // 🔴 图片上传必须在这里做，不能提到选号之前：file 条目是账号维度资源，
 // 用 A 号传的图让 B 号提交，上游会判"无权访问该文件"（且是静默的坏结果）。
 // 放在这里还有个附带好处：换号重试时会自动用新账号重传一遍。
+//
+// dlg 非 nil = 复用已有对话（跳过 chats/new，且命中 prompt cache）。
+// 复用不带 parentID 为空的可能：首轮对话的 parentID 本来就是 ""（§10.4）。
 func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model, gear, prompt, blobBase string,
-	spec upstream.ChatSpec) (*opened, error) {
+	spec upstream.ChatSpec, dlg *dialogEntry, dlgKey string) (*opened, error) {
 
 	attempt := spec
 	if len(spec.ImageRefs) > 0 {
@@ -364,20 +422,42 @@ func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model,
 		attempt.Files = mergeAttachments(spec.Files, files)
 	}
 
-	chatID, hit, chatMS, err := s.takeChat(actx, acct.Name, cred, model, attempt.ChatType)
-	if err != nil {
-		return nil, err
+	var (
+		chatID   string
+		parentID string
+		hit      bool
+		chatMS   int64
+		reused   bool
+	)
+	if dlg != nil {
+		// 粘性命中：会话与号都已定，省掉一次 chats/new（0.6~3.8s）。
+		chatID, parentID, hit, reused = dlg.chatID, dlg.parentID, true, true
+	} else {
+		var err error
+		chatID, hit, chatMS, err = s.takeChat(actx, acct.Name, cred, model, attempt.ChatType)
+		if err != nil {
+			return nil, err
+		}
 	}
-	body := upstream.BuildSubmitSpec(chatID, "", model, prompt, gear, attempt, time.Now())
+	body := upstream.BuildSubmitSpec(chatID, parentID, model, prompt, gear, attempt, time.Now())
 	tSubmit := time.Now()
 	st, err := s.up.OpenChat(actx, cred, body)
 	submitMS := time.Since(tSubmit).Milliseconds()
 	if err != nil {
 		return nil, err
 	}
+
+	// 新建成功的会话入表并锁住；serve 结束时写入本轮 response_id 当下一轮的 parentId。
+	//
+	// 🔴 只在"没有旧对话"时绑定：并发下 bind 会失败（别人先绑了同一 key），
+	// 本次请求照常完成、只是不参与后续复用 —— 这正是"并发用新号"的语义。
+	if dlg == nil && dlgKey != "" {
+		dlg = s.dialogs.bind(dlgKey, acct.Name, chatID, model)
+	}
 	return &opened{
 		stream: st, chatID: chatID, chatHit: hit, chatMS: chatMS,
 		submitMS: submitMS, submitAt: tSubmit,
+		dialog: dlg, dialogKey: dlgKey, dialogHit: reused,
 	}, nil
 }
 
@@ -559,6 +639,9 @@ func (s *Server) relogin(ctx context.Context, acct *pool.Account) bool {
 
 // noteFailure 按错误分类处置账号。
 func (s *Server) noteFailure(acct *pool.Account, err error) {
+	// cooled 表示这次失败已经让号进了冷却。一旦冷却，钉在它上面的对话
+	// 就再也拿不到使用权 —— 现在就清掉，免得下一轮先白试一次 Acquire 才降级。
+	cooled := true
 	switch upstream.KindOf(err) {
 	case upstream.KindAuth:
 		s.pool.MarkAuth(acct, err.Error())
@@ -580,6 +663,10 @@ func (s *Server) noteFailure(acct *pool.Account, err error) {
 		s.pool.MarkRateLimit(acct, err.Error(), retry)
 	default:
 		// 其它错误不改账号状态（可能是模型名写错/请求体问题），只记日志。
+		cooled = false
+	}
+	if cooled {
+		s.dialogs.dropAccount(acct.Name)
 	}
 }
 
@@ -631,6 +718,11 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 		}
 		if !more {
 			break
+		}
+		// 对话粘性：把本轮 response_id 记成下一轮的 parentId（§10.4 实测：多轮的
+		// parentId 就是上一轮的 response_id，不是消息 id）。
+		if ev.Created != nil && sd.dialog != nil {
+			sd.dialog.parentID = ev.Created.ResponseID
 		}
 		if ev.Usage != nil {
 			usage = ev.Usage
@@ -739,6 +831,11 @@ func (s *Server) serveChatOnce(w http.ResponseWriter, r *http.Request, sd *opene
 		}
 		if !more {
 			break
+		}
+		// 对话粘性：把本轮 response_id 记成下一轮的 parentId（§10.4 实测：多轮的
+		// parentId 就是上一轮的 response_id，不是消息 id）。
+		if ev.Created != nil && sd.dialog != nil {
+			sd.dialog.parentID = ev.Created.ResponseID
 		}
 		if ev.Usage != nil {
 			usage = ev.Usage

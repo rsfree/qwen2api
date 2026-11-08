@@ -46,6 +46,10 @@ type fakeUpstream struct {
 	gotNewChat map[string]any
 	// frames 自定义 SSE 帧序列（为空则用 realFrames）。
 	frames []string
+	// dynamicChats true 时 chats/new 每次返回新 id（chat-<n>）。
+	// 对话复用测试靠它区分"复用了同一个会话"和"新建了一个"。
+	dynamicChats bool
+	chatSeq      int
 }
 
 // newFakeUpstream500 前 n 次调用回 500（"几秒内就挂"的那类上游故障）。
@@ -95,8 +99,13 @@ func newFakeUpstream(t *testing.T, failFirst int) *fakeUpstream {
 			var nb map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&nb)
 			f.gotNewChat = nb
+			id := "chat-1"
+			if f.dynamicChats {
+				f.chatSeq++
+				id = fmt.Sprintf("chat-%d", f.chatSeq)
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success":true,"request_id":"r","data":{"id":"chat-1"}}`))
+			fmt.Fprintf(w, `{"success":true,"request_id":"r","data":{"id":%q}}`, id)
 		case strings.Contains(r.URL.Path, "/api/v2/chat/completions"):
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)

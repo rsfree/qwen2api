@@ -188,6 +188,33 @@ func (p *Pool) Pick() (*Account, bool) {
 //
 // 与 Pick 的唯一区别是多一道本地配额过滤：某号今日已出够 `max_image_per_day` 张，
 // 就先跳过它，别等打到上游硬限（那时上游只会挂起，没有明确报错）。
+// Acquire 取**指定**账号（对话粘性用）。可用性判定与 pick 完全一致：
+// authDead / 冷却中 / 在途已满 都算不可用。
+//
+// 🔴 为什么不能"存在就返回"：粘在冷却中的号上，上游直接 401/429，
+// 换回来的失败比"换个号重开会话"糟糕得多 —— 而且调用方已经在等这一轮了。
+func (p *Pool) Acquire(name string) (*Account, bool) {
+	if name == "" {
+		return nil, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.lookupLocked(name)
+	if a == nil || a.authDead {
+		return nil, false
+	}
+	now := time.Now()
+	if now.Before(a.cooldownUntil) {
+		return nil, false
+	}
+	if int(atomic.LoadInt32(&a.inflight)) >= p.conf().MaxInflightPerAccount {
+		return nil, false
+	}
+	atomic.AddInt32(&a.inflight, 1)
+	a.lastUsed = now
+	return a, true
+}
+
 func (p *Pool) PickForImage() (*Account, bool) {
 	return p.pick(kindImage)
 }
