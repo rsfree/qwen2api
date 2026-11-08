@@ -55,6 +55,9 @@ type Entry struct {
 	// ChatID 上游会话 id。**失败也记** —— acct 只说明"哪个号"，
 	// chat_id 才说明"哪个会话"，是事后去上游会话历史里补捞产物的唯一线索。
 	ChatID string `json:"chat_id,omitempty"`
+	// Tools Agent 模式的工具执行轨迹（`bash(python3 -c ...) → completed exit=0`）。
+	// 没有它，流水里只有"耗时 11 秒"，回答不了"这 11 秒到底干了什么"。
+	Tools string `json:"tools,omitempty"`
 }
 
 // Stats 汇总。

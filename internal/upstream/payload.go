@@ -9,6 +9,15 @@ import (
 // 实测 2026-10-28 抓包恒为 "2.1"；header version 才是前端版本号 0.3.26。
 const SubmitVersion = "2.1"
 
+// Agent 模式的两个类型位点（2026-11-08 实测，见 docs/UPSTREAM.md §10.1）。
+//
+// 🔴 AgentSubChatType 恒为 "lite"，**与模型无关** —— 它是前端枚举
+// SubChatType.AgentModeLite 的字面值，Max / Flash 都发这个。
+const (
+	AgentChatType    = "agent_mode"
+	AgentSubChatType = "lite"
+)
+
 // FeatureConfig 思考档位配置 —— 三档与前端 UI「自动 / 思考 / 快速」逐字对齐。
 //
 // 实测（2026-10-28）auto 档完整形态：
@@ -25,7 +34,9 @@ type FeatureConfig struct {
 	AutoThinking    bool   `json:"auto_thinking"`
 	ThinkingMode    string `json:"thinking_mode"`
 	ThinkingFormat  string `json:"thinking_format,omitempty"`
-	AutoSearch      bool   `json:"auto_search"`
+	// AutoSearch 联网搜索。⚠️ 带 omitempty：Agent 模式实测**不发这个键**（§10.4），
+	// 而 false 若照常序列化就成了"显式关闭搜索"，与"不表态"不是一回事。
+	AutoSearch bool `json:"auto_search,omitempty"`
 }
 
 // Gears 三档思考配置（返回副本，调用方改不动包级状态）。
@@ -54,7 +65,11 @@ func GearConfig(gear string) FeatureConfig {
 
 // NewChatBody `POST /api/v2/chats/new` 请求体。
 type NewChatBody struct {
-	Title     string   `json:"title"`
+	// Title 只有 t2t/t2i/t2v 带；Agent 模式的建会话体里**没有 title**（§10.3）。
+	Title string `json:"title,omitempty"`
+	// ChatID Agent 模式实测带一个**空串**（`"chatId":""`），t2t 不带该键。
+	// 用指针是为了区分"发空串"和"不发这个键"。
+	ChatID    *string  `json:"chatId,omitempty"`
 	Models    []string `json:"models"`
 	ChatMode  string   `json:"chat_mode"`
 	ChatType  string   `json:"chat_type"`
@@ -71,6 +86,19 @@ func BuildNewChat(model string, now time.Time) NewChatBody {
 func BuildNewChatTyped(model, chatType string, now time.Time) NewChatBody {
 	if chatType == "" {
 		chatType = "t2t"
+	}
+	if chatType == AgentChatType {
+		// Agent 模式的建会话形态与 t2t 不同（§10.3 实测逐字）：
+		// 无 title、带 chatId:""
+		empty := ""
+		return NewChatBody{
+			ChatID:    &empty,
+			Models:    []string{model},
+			ChatMode:  "normal",
+			ChatType:  chatType,
+			Timestamp: now.UnixMilli(),
+			ProjectID: "",
+		}
 	}
 	return NewChatBody{
 		Title:     "New Chat",
@@ -150,6 +178,10 @@ type ChatSpec struct {
 	VideoMode   string // t2v：standard
 	// Files 附件（image_edit / 文件解析）。每张一项，必须来自 UploadAttachment。
 	Files []FileRef
+	// Feature 覆盖档位配置；nil ⇒ 用 GearConfig(gear)。
+	// Agent 模式必须用它：上游形态与三档都不同（没有 auto_search / thinking_format，
+	// 且档位固定 Fast），见 §10.4。
+	Feature *FeatureConfig
 	// ImageRefs 待上传的图片引用（URL / data URI / 裸 base64）。
 	//
 	// 🔴 为什么不直接给 Files：file 条目是**账号维度**资源，上传与提交必须同一个号。
@@ -160,6 +192,23 @@ type ChatSpec struct {
 
 // TextSpec 文本对话。
 func TextSpec() ChatSpec { return ChatSpec{ChatType: "t2t", SubChatType: "t2t"} }
+
+// agentFeature Agent 模式的 feature_config（§10.4 实测逐字，只有 5 个键）。
+//
+// 🔴 与三档思考配置的差别：不带 auto_search、不带 thinking_format，
+// thinking_enabled:false / thinking_mode:"Fast" —— Agent 在网页端没有档位选择器。
+var agentFeature = FeatureConfig{
+	ThinkingEnabled: false, OutputSchema: "phase", ResearchMode: "normal",
+	AutoThinking: false, ThinkingMode: "Fast",
+}
+
+// AgentSpec Agent 模式：chat_type=agent_mode + sub_chat_type=lite。
+//
+// 返回的是**副本的指针**，调用方改不动包级状态。
+func AgentSpec() ChatSpec {
+	f := agentFeature
+	return ChatSpec{ChatType: AgentChatType, SubChatType: AgentSubChatType, Feature: &f}
+}
 
 // ImageSpec 文生图。imageModel 空则用上游默认（不传该键）。
 func ImageSpec(imageModel, size string) ChatSpec {
@@ -277,6 +326,10 @@ func BuildSubmitSpec(chatID, parentID, model, prompt, gear string, spec ChatSpec
 	if spec.VideoMode != "" {
 		meta["videoGenerationMode"] = spec.VideoMode
 	}
+	feature := GearConfig(gear)
+	if spec.Feature != nil {
+		feature = *spec.Feature
+	}
 	msg := Message{
 		ID:            nil,
 		Fid:           UUID(),
@@ -290,7 +343,7 @@ func BuildSubmitSpec(chatID, parentID, model, prompt, gear string, spec ChatSpec
 		Models:        []string{model},
 		Model:         "",
 		ChatType:      spec.ChatType,
-		FeatureConfig: GearConfig(gear),
+		FeatureConfig: feature,
 		Extra:         map[string]any{"meta": meta},
 		SubChatType:   spec.SubChatType,
 		ParentIDSnake: parentPtr,

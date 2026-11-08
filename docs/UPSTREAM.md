@@ -1102,3 +1102,170 @@ POST /api/v2/files/getstsToken
 
 **结论**：请求体骨架（`chatId` 双写、`files: []`、`id: null`、`timestamp` 秒）**仍然有效**，
 变的集中在**鉴权方式、版本号、模型端点、parent 链**四处。
+
+---
+
+## 10. Agent 模式（✅ 2026-11-08 全链路实测，前端 0.3.38）
+
+> 取证方式：登录态 Chrome 真实交互 —— 模式菜单选「Agent 模式」→ 发 `1` → 再发一句
+> 「用 python 计算 2+2 并只输出结果数字」。两次都是 `qwen3.8-flash`（0.2x），
+> 请求体与 SSE 全文逐帧核对，样本见本节引用。
+
+### 10.1 它不是新端点，是新的 `chat_type`
+
+Agent 模式**复用完全相同的两个端点**，只是三个 `chat_type` 位点换成 `agent_mode`：
+
+| 位点 | 普通对话 | Agent 模式 |
+|---|---|---|
+| `POST /chats/new` → `chat_type` | `t2t` | **`agent_mode`** |
+| `messages[0].chat_type` | `t2t` | **`agent_mode`** |
+| `messages[0].sub_chat_type` | `t2t` | **`lite`** |
+| `messages[0].extra.meta.subChatType` | `t2t` | **`lite`** |
+| 提交端点 | `POST /api/v2/chat/completions?chat_id=` | **完全相同** |
+
+`lite` 是前端枚举 `SubChatType.AgentModeLite = "lite"`，**与模型无关**：
+bundle 的模式表 `hn` 里 Agent 项固定 `{chatType:"agent_mode", subChatType:"lite"}`，
+路由兜底同样是 `i === AgentMode ? AgentModeLite : i`。⇒ Max / Flash 都发 `lite`。
+
+### 10.2 模型清单：独立端点，只有两个模型
+
+`GET /api/v2/models/agent_mode`（✅ 新端点，结构同 `/models/`）：
+
+| id | 倍率 | chat_type | 能力 |
+|---|---|---|---|
+| `qwen3.8-max` | `credit_multiplier: 1.0` | t2t/t2v/t2i/image_edit/search/**artifacts/web_dev/deep_research/travel/learn/slides**/vqa/translate | vision/document/video/audio/thinking/mcp，`mcp:[image-generation,code-interpreter,amap,fire-crawl]` |
+| `qwen3.8-flash` | `credit_multiplier: 0.2` | **仅 t2t** | document/thinking |
+
+⚠️ 普通模式那 7 个模型（`qwen3.7-plus` 等）**不在**这个清单里。
+
+### 10.3 建会话 body 与 t2t 不同（✅ 逐字）
+
+```json
+{"chatId":"","models":["qwen3.8-flash"],"project_id":"","timestamp":1794143152538,
+ "chat_type":"agent_mode","chat_mode":"normal"}
+```
+
+对比 §3.1：**没有 `title`**，多一个 `chatId:""`。`timestamp` 仍是毫秒。
+
+### 10.4 提交 body（✅ 逐字，首轮）
+
+```json
+{"stream":true,"version":"2.1","incremental_output":true,
+ "chatId":"e6fc931a-…","parentId":"","chat_id":"e6fc931a-…","chat_mode":"normal",
+ "model":"qwen3.8-flash","parent_id":null,
+ "messages":[{"id":null,"fid":"7ef9a68e-…","parentId":null,"childrenIds":["9a4d8eac-…"],
+   "role":"user","content":"1","user_action":"chat","files":[],
+   "timestamp":1794143152,"models":["qwen3.8-flash"],"model":"",
+   "chat_type":"agent_mode",
+   "feature_config":{"thinking_enabled":false,"output_schema":"phase",
+     "research_mode":"normal","auto_thinking":false,"thinking_mode":"Fast"},
+   "extra":{"meta":{"subChatType":"lite"}},
+   "sub_chat_type":"lite","parent_id":null}],
+ "timestamp":1794143177}
+```
+
+🔴 **`feature_config` 只有 5 个键**：不带 `auto_search`、不带 `thinking_format`，
+且 `thinking_enabled:false` / `thinking_mode:"Fast"` —— Agent 模式在 UI 上**没有**
+「自动/思考/快速」档位，实测固定这一组。
+
+多轮（第 2 轮）：顶层 `parentId` 与 `parent_id` **都等于上一轮的 `response_id`**
+（首轮为 `""` / `null`），`messages[0].parentId` / `parent_id` 同值。
+
+### 10.5 SSE：三个新 phase（`think` / `tool_call` / 结算）
+
+帧骨架不变（`response.created` → 增量帧 → `phase=answer,status=finished` 收尾），
+但思考通道换了形状：
+
+| phase | 形态 | 与普通模式的区别 |
+|---|---|---|
+| `think` | `delta.content` 是**思考原文增量** | 普通模式是 `thinking_summary` + `extra.summary_title/summary_thought`**累加数组**，要 diff；这边不需要 |
+| `answer` | 同普通模式，`extra.display_position:"answer"` | 一致 |
+| `tool_call` | `function_call{name,arguments}` + `function_id`，**`arguments` 是增量拼接** | t2t 的 `image_gen_tool` 是全量快照 —— 两者不可复用同一套解析 |
+
+`tool_call` 结束帧 `role` 变 `"tool"`，并给出**服务端已执行**的结果：
+
+```json
+{"choices":[{"delta":{"role":"tool","phase":"tool_call","status":"finished",
+  "function_id":"round_0_call_74aaed9cc9a14c76",
+  "function_call":{"name":"bash","arguments":"{\"command\":\"python3 -c \\\"print(2+2)\\\"\"}"},
+  "extra":{"tool_result":{"status":"completed","stdout":"4\n","stderr":"",
+    "exit_code":0,"duration_ms":29},"display_position":"shell"}}}]}
+```
+
+🔴 **工具在服务端执行，一次 HTTP 请求内跑完整个循环**：`think → tool_call → think → answer`
+（实测 48 帧一次收完）。网关**不需要**实现工具层，也不存在"前端回传工具结果"这一步。
+
+`ask_user` 是例外：模型需要澄清时抛一个交互式工具（带 `questions[].options`），
+流在此结束、**没有 answer 之外的产物**，前端渲染成选项卡片等用户点。API 场景下
+这一帧若不处理，调用方只会看到 answer 里那句反问。
+
+### 10.6 usage 换了位置（🔴 顶层恒空）
+
+`usage` 全程为 `{}`。真值在**最后一帧**的 `delta.extra.model_service_info`：
+
+```json
+{"usage":{"prompt_tokens":14605,"completion_tokens":142,"total_tokens":14747,
+  "prompt_tokens_details":{"cached_tokens":13312,"text_tokens":14605},
+  "completion_tokens_details":{"reasoning_tokens":101,"text_tokens":142}},
+ "usage_scope":"task",
+ "task_usage":{"scope":"task","task_id":"segment:…","coverage":"complete","run_count":1,"usage":{…同形…}},
+ "run_id":"df825fa2-…"}
+```
+
+同时带 `extra.arena_settlement{task_id,status:"settled",retryable:false}`。
+
+⚠️ **prompt 基数很大**：一句 `2+2` 的输入是 **14,605 tokens**（其中 13,312 命中 cache），
+因为每轮都带完整 agent 系统提示与工具定义。按倍率计费时这是真实成本。
+
+### 10.7 独立配额（🔴 不走 credits）
+
+`GET https://sg-entitlement.qwen.com/api/entitlement/agent/usage?biz_id=ai_qwen&chat_client=h5&device=pc&fr=pc&pr=qwen-i18n&la=zh-CN&tz=Asia%2FShanghai&wv=0.3.38`
+
+```json
+{"data":{"status":"ACTIVE","remainingPercent":99,
+ "lowCredits":{"agent":false,"coder":false,"deepresearch_normal":false,"deepresearch_advanced":true,
+   "zeroCredits":false,"warnCredits":false},
+ "resetAt":1794747548000,"memberType":"free"}}
+```
+
+⇒ Agent 有独立额度池（按周期 reset），**与 `/credits/pricing` 那套不是一回事**。
+额度耗尽的流内形态**未取证**（不得假设）。
+
+### 10.8 对网关的含义
+
+1. **兼容成本低**：只需把 `ChatSpec` 扩一个 `agent_mode` 分支 + Parser 增两个 phase，
+   端点、鉴权、请求头、错误通道全部复用。
+2. **`think` 必须单独解析**，否则思考原文会被当正文吐出去（现有 `switch` 里没有该 case，
+   会落到"无关帧"被丢弃 —— 表现为"答案里插入了英文思考" 或 "思考全丢"）。
+3. **`tool_call` 的 arguments 语义与 `image_gen_tool` 相反**（增量 vs 全量快照），
+   不能共用 `extractToolPrompt`。
+4. **usage 要两级兜底**：顶层为空时读 `extra.model_service_info.usage`，
+   否则 `usage` 全 0（README 承诺"真实 usage"，会破功）。
+5. **`ask_user` 无解**：单轮 API 无交互通道。可选策略：透传为 OpenAI `tool_calls`
+   让调用方自己答，或直接忽略（调用方只看到反问文本）。**不假装成功**。
+6. **模型面收窄**：Agent 只有 2 个模型，且须走 `chat_type=agent_mode` 的会话；
+   用 `qwen3.7-plus` 之类的 id 进 agent 通道属未取证行为。
+
+### 10.9 本仓实现状态（2026-11-08）
+
+按 §10.8 的六条落地，改动面与对应关系：
+
+| 关注点 | 落点 | 说明 |
+|---|---|---|
+| 类型位点 | `upstream.AgentSpec()` / `AgentChatType` / `AgentSubChatType` | `chat_type=agent_mode`、`sub_chat_type=lite`、`extra.meta.subChatType=lite` |
+| 档位覆盖 | `ChatSpec.Feature` + `agentFeature` | Agent 固定 5 键 Fast；`FeatureConfig.AutoSearch` 加 `omitempty`（否则会发成"显式关闭搜索"） |
+| 建会话形态 | `BuildNewChatTyped(..., "agent_mode")` | 无 `title`、带 `chatId:""`（`NewChatBody.ChatID` 用 `*string` 区分"发空串"与"不发"） |
+| 思考通道 | `sse.go` `case "think"` | 原文增量，直接进 `Reasoning`，**不走** `diffReasoning` |
+| 工具通道 | `sse.go` `case "tool_call"` + `summarizeToolResult` | 结束帧取完整 arguments；`extra.tool_result` 由 `[]struct{Image}` 改为 `json.RawMessage`（否则 Agent 的 object 会让整帧 Unmarshal 失败并被当心跳丢掉） |
+| usage | `sse.go` 的 `norm()` + `model_service_info` 兜底 | 兜底必须在 `switch` **之前**：`answer/finished` 分支会提前 return，而 Agent 的 usage 只在最后一帧 |
+| 模型别名 | `server/agentmodels.go` | `qwen3.8-max-agent` → `qwen3.8-max`、`qwen3.8-flash-agent` → `qwen3.8-flash`；对外 id 与上游 id 分离 |
+| 工具轨迹 | `reqlog.Entry.Tools` | 形如 `bash(cat hello.py) → completed exit=0 stdout=hello`，只进流水不进响应 |
+
+三条**未做**（有意为之，别当漏项）：
+
+1. **`ask_user` 不转 `tool_calls`**：上游的 `questions[].options` 不是 JSON Schema，
+   强行映射等于自造协议；当前策略是"忽略该帧、调用方只看到 answer 里的反问"。
+2. **产物文件不下发**：`workspace-files` 只给文件名列表，没有下载端点；
+   `write_file` 的内容可以从 tool_call 参数里读，但 `bash` 产出的文件拿不到字节。
+3. **会话不复用**：本仓是无状态网关，每请求新建 agent 会话。
+   代价是每轮都重付约 14k 的 agent 系统提示（cache 只在同一 chat_id 内命中）。

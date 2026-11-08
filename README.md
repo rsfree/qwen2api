@@ -35,6 +35,7 @@
 | 🛡️ **分级冷却** | 401 ⇒ 长冷却（默认 1800s）；额度耗尽 / 429 / 风控 ⇒ 软冷却指数退避（封顶 1h）；状态落盘、重启不丢 |
 | 🧠 **思考档位** | 请求级 `thinking: auto / thinking / fast`，逐字对齐网页端「自动 / 强制 / 快速」三档；兼容 `reasoning_effort`（low/medium/high） |
 | 💭 **真思考透出** | 上游「深度思考」的分步摘要经 diff 后走 `reasoning_content`，不是编的；`usage.output_tokens_details.reasoning_tokens` 一并透传 |
+| 🤖 **Agent 模式** | `qwen3.8-max-agent` / `qwen3.8-flash-agent` 走 `chat_type=agent_mode`：**服务端自主规划并执行工具**（bash / write_file / ask_user），一次请求内跑完 `think → tool_call → think → answer` 整个循环。实测一句「写 hello.py 并运行」= 4 轮工具、**自主纠错**（`cd /home/user` 失败后自己 `pwd`+`find` 找到真实沙箱路径）、11 秒出结果。工具轨迹记进请求流水（`tools` 字段）。⚠️ 需要澄清时上游抛 `ask_user` 交互工具，单轮 API 无法回答；产物文件不随响应下发（上游只给文件名列表） |
 | ⚡ **流式 + 非流式** | 出站恒 `stream:true`，非流式由本地聚合（只有一条上游分支，行为可预测）；`stream_options.include_usage` 支持 |
 | 🤝 **三协议前门** | `POST /v1/chat/completions`（OpenAI）· `POST /v1/messages`（Anthropic Messages，Claude Code 可接）· `POST /v1/responses`（Responses 形态） |
 | 🖼️ **图片输入（多模态）** | chat 的 content 段支持图片：URL / data URI / 裸 base64，`image_url` / `input_image` / Anthropic `image` 三种写法全收；走 `getstsToken` → OSS 上传 → `files[]`（`file_class=vision`），上传与提交**同账号** |
@@ -391,12 +392,13 @@ curl -s localhost:8400/v1/chat/completions -H 'Authorization: Bearer <key>' \
 
 ### `GET /v1/models`
 
-返回 **9 个条目 = 7 个文本模型 + 1 个图片模型 + 1 个视频模型**。文本模型来自上游
-（10 分钟 TTL；拉不到就用内置清单，**绝不 5xx**），生成模型由网关补上。
+返回 **11 个条目 = 7 个文本模型 + 2 个 Agent 模型 + 1 个图片模型 + 1 个视频模型**。
+文本模型来自上游（10 分钟 TTL；拉不到就用内置清单，**绝不 5xx**），Agent 与生成模型由网关补上。
 
 ```json
 [
   {"id": "qwen3.7-plus",   "media": "text",  "thinking": true, "vision": true},
+  {"id": "qwen3.8-max-agent", "media": "text", "thinking": false, "vision": true},
   {"id": "qwen-image-3.0", "media": "image", "endpoint": "/v1/images/generations",
    "params": {"sizes": ["1:1","4:3","3:4","16:9","9:16"], "max_n": 4}},
   {"id": "happyhorse11",   "media": "video", "endpoint": "/api/v3/contents/generations/tasks",
@@ -404,6 +406,27 @@ curl -s localhost:8400/v1/chat/completions -H 'Authorization: Bearer <key>' \
               "credits": {"720P": {"5": 30, "10": 60, "15": 90}}}}
 ]
 ```
+
+### Agent 模型（`qwen3.8-max-agent` / `qwen3.8-flash-agent`）
+
+Agent 模式的上游**模型面是独立清单**（`GET /api/v2/models/agent_mode`，实测只有
+`qwen3.8-max` 与 `qwen3.8-flash`），与普通 chat 的 7 个模型不重叠。所以本网关用**别名**
+暴露，避免同一个 id 的 `chat_type` 变得不可预测：
+
+| 你在 `model` 里写 | 上游 `model` | `chat_type` / `sub_chat_type` |
+|---|---|---|
+| `qwen3.8-max-agent` | `qwen3.8-max` | `agent_mode` / `lite` |
+| `qwen3.8-flash-agent` | `qwen3.8-flash` | `agent_mode` / `lite` |
+| 其他任何 chat 模型 | 原样 | `t2t` / `t2t` |
+
+- `thinking` 参数**对 Agent 无效**：上游 Agent 没有「自动/思考/快速」档位，固定 Fast
+  （`feature_config` 只有 5 个键，且不带 `auto_search`）；
+- 思考走 `reasoning_content`，但 Agent 给的是**思考原文增量**（普通模式给的是摘要累加数组）；
+- `usage` 上游放在 `extra.model_service_info`（顶层恒空），网关已兜底读取，
+  且取 `task_usage`（整个任务累计，含每一轮工具）；
+- 🔴 **两次请求之间没有记忆**：本仓库是**无状态**网关（每请求新建 agent 会话），
+  多轮历史靠把 `messages` 拍平成一条 prompt。想做「连续对话的 bot」得自己带上下文，
+  见 `docs/UPSTREAM.md §10.8`。
 
 🔴 **上游没有独立的图片/视频模型 id** —— 2026-10-30 实测 `GET /api/v2/models/` 只有
 7 个 chat 模型；图片靠 `extra.meta.model`（`qwen-image-3.0`）选内核，视频靠
@@ -782,6 +805,8 @@ internal/reqlog/     请求流水（环形缓冲 + stdout 一行）
 | **`/v1/images/edits`**（multipart） | ✅ 51.7s，`-F image=@ref.png` 直接出图 |
 | **文件解析** `/v1/files` + chat | ✅ 上传 95B txt → 提问 14.8s，原样答出文件内关键词 |
 | **联网搜索** | ✅ `thinking:auto` + 明确要求，82s 返回当日科技新闻（带来源与 `[[40]]` 引用） |
+| **Agent 模式（上游契约）** | ✅ 浏览器实测：一句「写 hello.py 并运行」→ 4 轮工具（`write_file` + 3×`bash`）、自主纠错（`cd /home/user` 失败后 `pwd`/`find` 找到真实路径）、11 秒给出完整路径；usage 39,138/697（cache 34,816） |
+| **Agent 模式（网关转换）** | ⚠️ 已实现并有单测覆盖（请求体逐字对齐、`think`/`tool_call`/usage 兜底），**尚未线上实跑** |
 | **文生图 b64** `response_format:"b64_json"` | ✅ 71.4s，7.5MB base64（含 CDN 就绪重试，见下） |
 | **文生视频** `POST /api/v3/contents/generations/tasks` | ✅ 2.7s 拿到 `tsk_…`（回包只有 `id`） |
 | **视频轮询 + 产物** | ✅ 约 15 分钟 `queued → in_progress → completed`，产物 `cdn.qwenlm.ai/.../t2v/….mp4`，1.7MB 可下 |

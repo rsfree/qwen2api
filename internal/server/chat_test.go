@@ -42,6 +42,10 @@ type fakeUpstream struct {
 	fail500 int
 	// newChats 统计 chats/new 被调用的次数（验证"预建会话命中"用）。
 	newChats int
+	// gotNewChat 最近一次 chats/new 的请求体（断言 Agent 模式的建会话形态）。
+	gotNewChat map[string]any
+	// frames 自定义 SSE 帧序列（为空则用 realFrames）。
+	frames []string
 }
 
 // newFakeUpstream500 前 n 次调用回 500（"几秒内就挂"的那类上游故障）。
@@ -88,6 +92,9 @@ func newFakeUpstream(t *testing.T, failFirst int) *fakeUpstream {
 			_, _ = w.Write([]byte(`{"success":false,"data":{"code":"InternalError","details":"test"}}`))
 		case strings.HasSuffix(r.URL.Path, "/api/v2/chats/new"):
 			f.newChats++
+			var nb map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&nb)
+			f.gotNewChat = nb
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"success":true,"request_id":"r","data":{"id":"chat-1"}}`))
 		case strings.Contains(r.URL.Path, "/api/v2/chat/completions"):
@@ -97,7 +104,11 @@ func newFakeUpstream(t *testing.T, failFirst int) *fakeUpstream {
 			f.submits = append(f.submits, body)
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
-			for _, fr := range realFrames {
+			frames := f.frames
+			if len(frames) == 0 {
+				frames = realFrames
+			}
+			for _, fr := range frames {
 				fmt.Fprintf(w, "data: %s\n\n", fr)
 			}
 			if fl, ok := w.(http.Flusher); ok {

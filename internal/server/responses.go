@@ -59,9 +59,10 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("图片最多 %d 张（本次 %d 张）", maxInputImages, len(imgRefs)), "image")
 		return
 	}
-	spec := upstream.TextSpec()
+	// Agent 模型（qwen3.8-*-agent）走 agent_mode，其余走 t2t（§10.1）。
+	upModel, spec, _ := agentSpecFor(model)
 	spec.ImageRefs = imgRefs
-	sd, err := s.openUpstream(r.Context(), s.blobBase(r), model, s.conf().DefaultThinking, flat.Prompt, spec)
+	sd, err := s.openUpstream(r.Context(), s.blobBase(r), upModel, s.conf().DefaultThinking, flat.Prompt, spec)
 	if err != nil {
 		writeError(w, httpStatusFor(err), errTypeFor(err), err.Error())
 		return

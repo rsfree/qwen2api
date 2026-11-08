@@ -17,6 +17,11 @@ type Usage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
 	TotalTokens  int `json:"total_tokens"`
+	// PromptTokens / CompletionTokens 是同一数值的 **OpenAI 命名**。
+	// Agent 的 extra.model_service_info.usage 两套命名都给（§10.6），
+	// 这里只做兜底：某个命名缺失时用它补齐，免得 usage 被读成 0。
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
 	// Characters 上游恒 0（保留原样，不做解释）。
 	Characters         int `json:"characters"`
 	InputTokensDetails struct {
@@ -50,8 +55,15 @@ type Event struct {
 	// Images 图片产物直链（phase=image_gen_tool 且 status=finished 时出现）。
 	// 形如 https://cdn.qwenlm.ai/output/<uid>/t2i/<chat>/1req_x.png?key=<JWT>，可直接下载。
 	Images []string
-	// ToolName 工具名（目前只见过 image_gen）。
+	// ToolName 工具名。普通 t2t 里是 image_gen；
+	// Agent 模式下实测见过 bash / write_file / ask_user（§10.5）。
 	ToolName string
+	// ToolArgs Agent 模式 tool_call 的完整参数（结束帧给的是**全量 JSON**，
+	// 所以这里不拼接 —— 中间帧的 arguments 才是增量，见 §10.5）。
+	ToolArgs string
+	// ToolResult agent 模式 tool_call 的执行结果摘要：
+	// bash 取 stdout，其他工具取 status。**只用于排障，不进正文**。
+	ToolResult string
 	// QuotaExhausted 上游明确表示额度/权益不足。
 	//
 	// 🔴 这是**第三条错误通道**（前两条是 HTTP 4xx 与流内 error 帧）：
@@ -95,9 +107,19 @@ type wireEvent struct {
 				} `json:"summary_thought"`
 				// 图片工具结果（phase=image_gen_tool + status=finished）。
 				FunctionID string `json:"function_id"`
-				ToolResult []struct {
-					Image string `json:"image"`
-				} `json:"tool_result"`
+				// ToolResult 工具返回。两种形态**必须都兜住**：
+				//   image_gen_tool → 数组 [{"image":"..."}]
+				//   tool_call(agent) → 对象 {"status":"completed","stdout":"4\n",...}
+				// 用 RawMessage：声明成数组时，Agent 的 object 会让整个 Unmarshal 失败，
+				// 而那帧会被当成"非 JSON 心跳"**静默丢掉**（最难的故障形态）。
+				ToolResult json.RawMessage `json:"tool_result"`
+				// ModelServiceInfo Agent 模式的真 usage（§10.6）：顶层 usage 恒为空 {}。
+				ModelServiceInfo *struct {
+					Usage     *Usage `json:"usage"`
+					TaskUsage *struct {
+						Usage *Usage `json:"usage"`
+					} `json:"task_usage"`
+				} `json:"model_service_info"`
 				ImageList []struct {
 					Image string `json:"image"`
 				} `json:"image_list"`
@@ -143,7 +165,11 @@ func (p *Parser) Parse(payload []byte) (Event, bool, error) {
 		ev.Created = w.Created
 		return ev, true, nil
 	}
-	if w.Usage != nil {
+	// 顶层 usage 只在真有数时采纳：Agent 模式每帧都带 `"usage": {}`（§10.6），
+	// 照收会把上层"最后一份即终值"的逻辑覆盖成 0。
+	if w.Usage != nil && (w.Usage.TotalTokens > 0 || w.Usage.InputTokens > 0 || w.Usage.OutputTokens > 0 ||
+		w.Usage.PromptTokens > 0 || w.Usage.CompletionTokens > 0) {
+		w.Usage.norm()
 		ev.Usage = w.Usage
 	}
 
@@ -153,7 +179,46 @@ func (p *Parser) Parse(payload []byte) (Event, bool, error) {
 	}
 	d := w.Choices[0].Delta
 
+	// usage 兜底：Agent 模式顶层恒为 {}，真值在 extra.model_service_info（§10.6）。
+	//
+	// 🔴 必须在 switch **之前**做：answer / tool_call 的 finished 分支都是
+	// `return ev, true, nil` 提前退出，而 Agent 的 usage 恰好只出现在
+	// 最后一帧（answer, finished）—— 放在 switch 后面等于永远读不到。
+	if ev.Usage == nil && d.Extra.ModelServiceInfo != nil {
+		msi := d.Extra.ModelServiceInfo
+		ev.Usage = msi.Usage
+		if msi.TaskUsage != nil && msi.TaskUsage.Usage != nil {
+			// task_usage 是整个任务累计（含多轮工具），比单帧 usage 更接近计费口径。
+			if ev.Usage == nil || msi.TaskUsage.Usage.TotalTokens > ev.Usage.TotalTokens {
+				ev.Usage = msi.TaskUsage.Usage
+			}
+		}
+		ev.Usage.norm()
+	}
+
 	switch d.Phase {
+	case "think":
+		// Agent 模式的思考通道（§10.5）：`delta.content` 是**原文增量**，
+		// 不是 thinking_summary 那种累加数组 —— 直接透传，不做 diff。
+		if d.Status == "finished" {
+			return ev, true, nil
+		}
+		ev.Reasoning = d.Content
+	case "tool_call":
+		// Agent 模式的工具调用（§10.5）。三个反直觉点：
+		//  1. 中间帧的 arguments 是**增量拼接**（image_gen_tool 是全量快照，两者相反）；
+		//  2. 结束帧给的是**完整参数**，所以直接取，不自己拼接；
+		//  3. 结束帧 role 变 "tool"，且 extra.tool_result 是**服务端已执行**的结果。
+		if d.FunctionCall != nil {
+			ev.ToolName = d.FunctionCall.Name
+		}
+		if d.Status == "finished" {
+			if d.FunctionCall != nil {
+				ev.ToolArgs = d.FunctionCall.Arguments
+			}
+			ev.ToolResult = summarizeToolResult(d.Extra.ToolResult)
+			return ev, true, nil
+		}
 	case "thinking_summary":
 		if d.Status == "finished" {
 			return ev, true, nil
@@ -209,15 +274,96 @@ func (p *Parser) Parse(payload []byte) (Event, bool, error) {
 					ev.Images = append(ev.Images, item.Image)
 				}
 			}
-			for _, item := range d.Extra.ToolResult {
-				if item.Image != "" && !seen[item.Image] {
-					seen[item.Image] = true
-					ev.Images = append(ev.Images, item.Image)
+			for _, url := range imageToolResultURLs(d.Extra.ToolResult) {
+				if !seen[url] {
+					seen[url] = true
+					ev.Images = append(ev.Images, url)
 				}
 			}
 		}
 	}
 	return ev, true, nil
+}
+
+// norm 补齐缺失的字段：上游同时用 input_tokens/output_tokens 与
+// prompt_tokens/completion_tokens 两套命名，缺哪套补哪套。
+func (u *Usage) norm() {
+	if u == nil {
+		return
+	}
+	if u.InputTokens == 0 {
+		u.InputTokens = u.PromptTokens
+	}
+	if u.OutputTokens == 0 {
+		u.OutputTokens = u.CompletionTokens
+	}
+	if u.TotalTokens == 0 {
+		u.TotalTokens = u.InputTokens + u.OutputTokens
+	}
+}
+
+// imageToolResultURLs 从 image_gen_tool 的 tool_result 数组里取图片直链。
+func imageToolResultURLs(raw json.RawMessage) []string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var items []struct {
+		Image string `json:"image"`
+	}
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		if it.Image != "" {
+			out = append(out, it.Image)
+		}
+	}
+	return out
+}
+
+// summarizeToolResult 把 agent 的 tool_result 压成一行可读摘要（排障用）。
+//
+// 形态（实测）：{"status":"completed","stdout":"4\n","stderr":"","exit_code":0,"duration_ms":29}
+// write_file 之类只回 {"status":"success"}。ask_user 没有 tool_result，
+// 它的载荷在 extra.questions 里（交互式，API 场景无解，见 §10.8）。
+func summarizeToolResult(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var obj struct {
+		Status   string `json:"status"`
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+		ExitCode *int   `json:"exit_code"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if obj.Status != "" {
+		parts = append(parts, obj.Status)
+	}
+	if obj.ExitCode != nil {
+		parts = append(parts, fmt.Sprintf("exit=%d", *obj.ExitCode))
+	}
+	if out := strings.TrimSpace(obj.Stdout); out != "" {
+		parts = append(parts, "stdout="+firstLine(out))
+	}
+	if errOut := strings.TrimSpace(obj.Stderr); errOut != "" {
+		parts = append(parts, "stderr="+firstLine(errOut))
+	}
+	return strings.Join(parts, " ")
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 120 {
+		s = s[:120] + "…"
+	}
+	return s
 }
 
 // diffReasoning 把累加数组转成本帧新增文本：标题包【】，要点按行。

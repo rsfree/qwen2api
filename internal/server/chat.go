@@ -152,10 +152,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	entry.Degraded = flat.Degraded
 
 	// 文件解析仍走 t2t（2026-10-28 实测：t2t + files[] 就能读文件内容）。
-	spec := upstream.TextSpec()
+	//
+	// 🔴 上游模型名与对外模型名要分开：客户端传 qwen3.8-max-agent，
+	// 上游只认 qwen3.8-max（§10.2）。model 变量保持原名，响应体里的 model
+	// 字段才不会变脸；upModel 只用于提交。
+	upModel, spec, _ := agentSpecFor(model)
 	spec.Files = files
 	spec.ImageRefs = imgRefs
-	sd, err := s.openUpstreamSpec(r.Context(), s.blobBase(r), model, gear, prompt, spec)
+	sd, err := s.openUpstreamSpec(r.Context(), s.blobBase(r), upModel, gear, prompt, spec)
 	if sd != nil {
 		entry.ChatHit = sd.chatHit
 		entry.ChatMS = sd.chatMS
@@ -617,6 +621,7 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 		firstByte    bool
 		sawUnknown   bool
 		streamErr    error
+		tools        strings.Builder
 	)
 	for {
 		ev, more, err := sd.stream.Next()
@@ -633,6 +638,9 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 		if ev.UnknownPhase != "" && !sawUnknown {
 			sawUnknown = true
 			log.Printf("[qwen2api] 上游出现未处理的 phase=%q（产物可能被丢弃，见 docs/UPSTREAM.md §4）", ev.UnknownPhase)
+		}
+		if ev.ToolArgs != "" {
+			appendToolTrace(&tools, ev)
 		}
 		if ev.Reasoning != "" && s.conf().ReasoningEnabled() {
 			if !firstByte {
@@ -697,6 +705,7 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 	flusher.Flush()
 
 	entry.Chars = chars
+	entry.Tools = tools.String()
 	if usage != nil {
 		entry.PromptTokens = usage.InputTokens
 		entry.OutputTokens = usage.OutputTokens
@@ -715,6 +724,7 @@ func (s *Server) serveChatOnce(w http.ResponseWriter, r *http.Request, sd *opene
 		reasoning  strings.Builder
 		usage      *upstream.Usage
 		sawUnknown bool
+		tools      strings.Builder
 	)
 	for {
 		ev, more, err := sd.stream.Next()
@@ -736,6 +746,9 @@ func (s *Server) serveChatOnce(w http.ResponseWriter, r *http.Request, sd *opene
 		if ev.UnknownPhase != "" && !sawUnknown {
 			sawUnknown = true
 			log.Printf("[qwen2api] 上游出现未处理的 phase=%q（产物可能被丢弃，见 docs/UPSTREAM.md §4）", ev.UnknownPhase)
+		}
+		if ev.ToolArgs != "" {
+			appendToolTrace(&tools, ev)
 		}
 		if ev.Reasoning != "" && s.conf().ReasoningEnabled() {
 			reasoning.WriteString(ev.Reasoning)
@@ -775,6 +788,7 @@ func (s *Server) serveChatOnce(w http.ResponseWriter, r *http.Request, sd *opene
 	writeJSON(w, http.StatusOK, resp)
 
 	entry.Status = http.StatusOK
+	entry.Tools = tools.String()
 	entry.Chars = len([]rune(content))
 	entry.FirstByteMS = time.Since(start).Milliseconds()
 	if usage != nil {
@@ -940,3 +954,30 @@ func truncateUA(ua string) string {
 }
 
 var _ = fmt.Sprintf
+
+// appendToolTrace 把一次工具调用压成一行轨迹，供请求流水排障。
+//
+// 形态：`bash(cat hello.py) → completed exit=0 stdout=hello`
+// 只进流水、不进响应 —— OpenAI 协议里没有"工具进度"的位置，
+// 硬塞进正文会污染模型输出，塞进 reasoning 又会让客户端以为模型在思考。
+func appendToolTrace(b *strings.Builder, ev upstream.Event) {
+	if b.Len() > 0 {
+		b.WriteString("; ")
+	}
+	b.WriteString(ev.ToolName)
+	b.WriteString("(")
+	b.WriteString(clipTrace(ev.ToolArgs, 80))
+	b.WriteString(")")
+	if ev.ToolResult != "" {
+		b.WriteString(" → ")
+		b.WriteString(ev.ToolResult)
+	}
+}
+
+func clipTrace(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}

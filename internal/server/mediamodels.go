@@ -234,9 +234,10 @@ func resolutionRank(res string) int {
 	return 2
 }
 
-// modelList 对外模型清单 = 上游 chat 模型 + 本网关的生成模型。
+// modelList 对外模型清单 = 上游 chat 模型 + 本网关的 Agent 模型 + 生成模型。
 func (s *Server) modelList(ctx context.Context) []ModelInfo {
 	list := s.models.List(ctx)
+	list = append(list, s.agentModelList()...)
 	return append(list, s.mediaModels()...)
 }
 
