@@ -806,7 +806,7 @@ internal/reqlog/     请求流水（环形缓冲 + stdout 一行）
 | **文件解析** `/v1/files` + chat | ✅ 上传 95B txt → 提问 14.8s，原样答出文件内关键词 |
 | **联网搜索** | ✅ `thinking:auto` + 明确要求，82s 返回当日科技新闻（带来源与 `[[40]]` 引用） |
 | **Agent 模式（上游契约）** | ✅ 浏览器实测：一句「写 hello.py 并运行」→ 4 轮工具（`write_file` + 3×`bash`）、自主纠错（`cd /home/user` 失败后 `pwd`/`find` 找到真实路径）、11 秒给出完整路径；usage 39,138/697（cache 34,816） |
-| **Agent 模式（网关转换）** | ⚠️ 已实现并有单测覆盖（请求体逐字对齐、`think`/`tool_call`/usage 兜底），**尚未线上实跑** |
+| **Agent 模式（网关转换）** | ✅ 线上实测（0.0.60）：`content="42"`，流水 `tools=bash({"command":"echo 42"}) → completed exit=0 stdout=42`，usage 13,889/72（reasoning 36），14.0s；流式同验（`reasoning_content` 184 字 + `[DONE]` 正常） |
 | **文生图 b64** `response_format:"b64_json"` | ✅ 71.4s，7.5MB base64（含 CDN 就绪重试，见下） |
 | **文生视频** `POST /api/v3/contents/generations/tasks` | ✅ 2.7s 拿到 `tsk_…`（回包只有 `id`） |
 | **视频轮询 + 产物** | ✅ 约 15 分钟 `queued → in_progress → completed`，产物 `cdn.qwenlm.ai/.../t2v/….mp4`，1.7MB 可下 |

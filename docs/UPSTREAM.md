@@ -1269,3 +1269,12 @@ bundle 的模式表 `hn` 里 Agent 项固定 `{chatType:"agent_mode", subChatTyp
    `write_file` 的内容可以从 tool_call 参数里读，但 `bash` 产出的文件拿不到字节。
 3. **会话不复用**：本仓是无状态网关，每请求新建 agent 会话。
    代价是每轮都重付约 14k 的 agent 系统提示（cache 只在同一 chat_id 内命中）。
+
+**线上验证（0.0.60，2026-11-08）**：
+
+| 场景 | 结果 |
+|---|---|
+| 非流式 `qwen3.8-flash-agent` | ✅ `content="收到"`，`reasoning_content` 为英文思维链，usage 6,888/27（reasoning 23），9.4s |
+| 流式 + 工具 | ✅ `content="42"`（agent 真调了 bash）、`reasoning_content` 184 字、usage 13,892/80（reasoning 44）、`[DONE]` 正常 |
+| 流水轨迹 | ✅ `tools=bash({"command":"echo 42"}) → completed exit=0 stdout=42`（截断 200 字，完整值在面板 JSON） |
+| 换号 | ✅ 两次请求落到不同账号（`s0bamx37n` / `clwntt3qb`），无状态设计下互不影响 |
