@@ -86,3 +86,34 @@ func TestInflightPeakTracksMaxAndResets(t *testing.T) {
 		t.Fatalf("读后应清零，得到 %d", got)
 	}
 }
+
+// 预热必须真的轮到每一个号，否则尾部账号的连接永远是冷的。
+//
+// 这条守的是 2026-11-12 修的那个 bug：HotNames 的排序键（alive/served/tokenExp）
+// 不会被预热自己改写，所以"每轮取前 limit 个"等于永远只热同一批。
+func TestRotateHotCoversAllAccounts(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	s := newTestServerWithServer(t, up, 1)
+
+	names := []string{"a", "b", "c", "d", "e"}
+	const limit = 2
+	seen := map[string]int{}
+	// 5 个号、每轮 2 个 ⇒ 3 轮（6 个名额）必然覆盖全部。
+	for round := 0; round < 3; round++ {
+		batch := s.rotateHot(names, limit)
+		if len(batch) != limit {
+			t.Fatalf("第 %d 轮应取 %d 个，得到 %d", round, limit, len(batch))
+		}
+		for _, n := range batch {
+			seen[n]++
+		}
+	}
+	if len(seen) != len(names) {
+		t.Fatalf("3 轮应覆盖全部 %d 个号，实际只覆盖了 %v", len(names), seen)
+	}
+
+	// limit 不小于总数时原样返回（整池都热，不需要轮转）。
+	if got := s.rotateHot(names, 5); len(got) != 5 {
+		t.Fatalf("limit=len 应原样返回，得到 %d 个", len(got))
+	}
+}

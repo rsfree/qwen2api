@@ -87,6 +87,12 @@ type Server struct {
 	// chatTargetNow 上一轮会话/连接预热覆盖了多少个号（按并发算出来的）。
 	// 与 warm.target 并列展示，一眼能看出"两个口径差多少"。
 	chatTargetNow atomic.Int32
+	// chatCursor 预热轮转游标（见 prewarmChats）。
+	//
+	// 🔴 必须有它：HotNames 的排序在"预热不改变 served"时是稳定的，
+	// 每轮只取前 limit 个就等于永远只热同一小批 —— 后面那 100 多个号
+	// 每次被选中都是冷连接（实测 submit 3~6 秒 vs 945ms）。
+	chatCursor atomic.Uint32
 	// egressMu / egress 账号级"出口 IP"缓存（懒探测，见 egress.go）。
 	egressMu sync.Mutex
 	egress   map[string]*egressState

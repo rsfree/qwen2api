@@ -307,9 +307,10 @@ func (s *Server) warmOnce(ctx context.Context, peak int) bool {
 
 // prewarmChats 给"马上要被用到的那批号"预建空会话，并把它们的出口连接保活。
 //
-// 覆盖范围按**并发**算（chatTarget），不是按 token 的 warmTarget ——
-// 空会话和连接只需要撑住同时在跑的请求。并发 5 时保活 512 条连接，
-// 每 20 秒就是 500 次白打的代理往返。
+// 覆盖范围按**选号面**算（warmTarget），不是按并发（chatTarget）——
+// 这条是 2026-11-12 用线上数据纠正的：低流量下号轮转周期远大于连接寿命，
+// 按并发保活等于让每个请求都重新握一次 SOCKS5+TLS。
+// 详见 prewarmChats 里的注释。
 //
 // 池子已经满的号不会重复建会话（那是白花一次上游调用），但会发一个 HEAD 保住
 // TCP+TLS —— 实测走住宅代理重新握手要 1.7 秒，比建会话便宜得多，收益却一样直接。
@@ -332,27 +333,35 @@ func (s *Server) prewarmChats(ctx context.Context, peak int) {
 	// 本轮后续补货写入时会单点置真（见 prewarmChat），不必等下一轮。
 	s.pool.SetChatReady(s.chats.ReadyAccounts())
 	ka := s.conf().Pool.Keepalive.Effective()
-	need := s.chatTarget(peak, s.warmTarget(peak))
-	// 记下来给 /stats 看：这个数通常远小于 warm.target，差值就是"省下来的保活"。
+	// 🔴 need 用 warmTarget，不是 chatTarget（2026-11-12 线上实测修正）。
+	//
+	// chatTarget 的原始论证是"会话和连接只服务同时在跑的请求"，它隐含假设
+	// **选号面 = 并发**。但这个假设不成立：选号面是"token 还活着的号"
+	// （实测 139 个，而峰值并发只有 1~2）。低流量下同一个号要几十分钟才轮到
+	// 一次，连接早被回收 —— 于是每次请求都在付一次 SOCKS5+TLS。日志里能直接
+	// 看到：同一个号第一次 submit 6024ms、第二次 984ms。
+	//
+	// 保活面必须覆盖选号面，否则"省下来的保活"会以"每次多 2~5 秒首字"
+	// 的形式十倍还回去。
+	need := s.warmTarget(peak)
 	s.chatTargetNow.Store(int32(need))
 	names := s.pool.HotNames(need)
 	if len(names) == 0 {
 		return
 	}
 	limit := warmBatch(need, ka.BatchMax, ka.TickS)
+	// 按游标取一段，而不是"每轮都从头取 limit 个"：
+	// HotNames 的排序键（alive / served / tokenExp）不会被预热自己改写，
+	// 不轮转的话第一轮的前 8 个就是永远的前 8 个，其余号的连接永远冷着。
+	names = s.rotateHot(names, limit)
 	sem := make(chan struct{}, ka.Parallel)
 	var wg sync.WaitGroup
-	built := 0
 	for _, n := range names {
-		if built >= limit {
-			break
-		}
 		// 建会话要凭据：过期的号建了也会被上游拒（且白占一次代理往返）。
 		// 但**连接保活不需要凭据**，所以过期号照样往下走 —— 下次请求用到它时
 		// 请求路径会先续期，那条已经握好的连接正好复用。
 		needChat := s.chats.Short(n, "t2t") > 0 && s.tokenFresh(n, time.Minute)
 		wg.Add(1)
-		built++
 		go func(name string, needChat bool) {
 			defer wg.Done()
 			sem <- struct{}{}
@@ -370,6 +379,26 @@ func (s *Server) prewarmChats(ctx context.Context, peak int) {
 		}(n, needChat)
 	}
 	wg.Wait()
+}
+
+// rotateHot 从 names 里按游标环形取 limit 个。
+//
+// 存在的理由：HotNames 的排序是 (alive, served, tokenExp)，而预热本身不改这三个值。
+// 如果每轮都取前 limit 个，头部那批会被反复热身，尾部的号永远轮不到 ——
+// 偏偏选号（lessPick）也用同一套排序，于是 served 一旦摊开，请求打到的就是
+// 一批从没保活过的冷号。游标让"多轮下来每个号都被轮到"，与 need 一起保证
+// 一个 TTL 内覆盖完整个选号面。
+func (s *Server) rotateHot(names []string, limit int) []string {
+	if limit <= 0 || limit >= len(names) {
+		return names
+	}
+	off := int(s.chatCursor.Load()) % len(names)
+	out := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		out = append(out, names[(off+i)%len(names)])
+	}
+	s.chatCursor.Store(uint32((off + limit) % len(names)))
+	return out
 }
 
 // noteInflight 记录一次 chat 请求进出，并维护"上一轮预热以来的并发峰值"。
