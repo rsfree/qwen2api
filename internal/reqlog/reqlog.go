@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"sync"
@@ -95,6 +96,37 @@ type Stats struct {
 	// UpstreamTTFT 上游首字分位（提交 → 第一个正文）。
 	// 与 TTFT 的差 = 选号 + 建会话 + 建连 + 提交前的那段时间。
 	UpstreamTTFT TTFTStat `json:"upstream_ttft"`
+	// Cache prompt cache 命中汇总（进程内累计，不是环形窗口）。
+	Cache CacheStat `json:"cache"`
+}
+
+// CacheStat prompt cache 命中汇总。
+//
+// 口径说明：
+//   - HitPct = CachedTokens / PromptTokens，是**token 维度**的命中率，
+//     不是"有多少请求命中了"（后者对成本没有意义：一个大 prompt 的 1 次
+//     命中，可能抵得上 100 次小 prompt）；
+//   - EstimatedTokens 是"上游没报、我们按保守公式估出来"的那部分。
+//     它和实测混在一起会让命中率看起来比真实更好，所以单列出来 ——
+//     排障时先看这个数大不大，再决定要不要信 HitPct。
+type CacheStat struct {
+	PromptTokens    int64   `json:"prompt_tokens"`
+	CachedTokens    int64   `json:"cached_tokens"`
+	EstimatedTokens int64   `json:"estimated_tokens"`
+	HitPct          float64 `json:"hit_pct"`
+	// Reqs / HitReqs 请求维度的计数，只做参考（见 HitPct 的说明）。
+	Reqs    int `json:"reqs"`
+	HitReqs int `json:"hit_reqs"`
+	// ByModel 按模型拆开，才能看出"哪个模型的 cache 是真吃到了"。
+	ByModel map[string]ModelCacheStat `json:"by_model"`
+}
+
+// ModelCacheStat 单个模型的缓存命中。
+type ModelCacheStat struct {
+	PromptTokens int64   `json:"prompt_tokens"`
+	CachedTokens int64   `json:"cached_tokens"`
+	HitPct       float64 `json:"hit_pct"`
+	Reqs         int     `json:"reqs"`
 }
 
 // TTFTStat 一组首字样本的分位（样本来自环形流水，不是全量）。
@@ -118,9 +150,17 @@ type Log struct {
 	failed    int
 	streaming int
 	tokens    int
-	latency   int64
-	byModel   map[string]int
-	byAccount map[string]int
+	// 缓存累计（进程内全量）。按模型那份单独存，避免每次 Stats 重扫环形缓冲
+	// —— 环形缓冲只有最近 N 条，hit_pct 会随窗口漂移，不适合当"看板数字"。
+	cachePrompt  int64
+	cacheHit     int64
+	cacheEst     int64
+	cacheReqs    int
+	cacheHitReq  int
+	byModelCache map[string]*modelCacheAgg
+	latency      int64
+	byModel      map[string]int
+	byAccount    map[string]int
 	// Echo 同时打到 stdout（容器日志里能直接看流水）。
 	Echo bool
 	// Out Echo 的落点，nil = os.Stdout。
@@ -136,13 +176,21 @@ func New(capacity int) *Log {
 		capacity = 500
 	}
 	return &Log{
-		entries:   make([]Entry, capacity),
-		capacity:  capacity,
-		started:   time.Now(),
-		byModel:   map[string]int{},
-		byAccount: map[string]int{},
-		Echo:      true,
+		entries:      make([]Entry, capacity),
+		capacity:     capacity,
+		started:      time.Now(),
+		byModel:      map[string]int{},
+		byAccount:    map[string]int{},
+		byModelCache: map[string]*modelCacheAgg{},
+		Echo:         true,
 	}
+}
+
+// modelCacheAgg 单模型的缓存累计（按模型列表）。
+type modelCacheAgg struct {
+	Reqs   int
+	Prompt int64
+	Cached int64
 }
 
 // Add 记一条。
@@ -172,6 +220,29 @@ func (l *Log) Add(e Entry) {
 	}
 	if e.Account != "" {
 		l.byAccount[e.Account]++
+	}
+	// 缓存累计：只统计"真的报/估了输入 token"的请求。失败请求 PromptTokens=0，
+	// 混进来会把分母做小、命中率虚高。
+	if e.PromptTokens > 0 {
+		l.cachePrompt += int64(e.PromptTokens)
+		l.cacheReqs++
+		if e.CachedTokens > 0 {
+			l.cacheHit += e.CachedTokens
+			l.cacheHitReq++
+		}
+		if e.CacheEst {
+			l.cacheEst += e.CachedTokens
+		}
+		if e.Model != "" {
+			m := l.byModelCache[e.Model]
+			if m == nil {
+				m = &modelCacheAgg{}
+				l.byModelCache[e.Model] = m
+			}
+			m.Reqs++
+			m.Prompt += int64(e.PromptTokens)
+			m.Cached += e.CachedTokens
+		}
 	}
 	l.mu.Unlock()
 
@@ -294,7 +365,36 @@ func (l *Log) Stats() Stats {
 	}
 	s.TTFT = statOf(e2e)
 	s.UpstreamTTFT = statOf(up)
+	s.Cache = l.cacheStatsLocked()
 	return s
+}
+
+// cacheStatsLocked 组装缓存看板数据（调用方已持读锁）。
+func (l *Log) cacheStatsLocked() CacheStat {
+	c := CacheStat{
+		PromptTokens:    l.cachePrompt,
+		CachedTokens:    l.cacheHit,
+		EstimatedTokens: l.cacheEst,
+		Reqs:            l.cacheReqs,
+		HitReqs:         l.cacheHitReq,
+		ByModel:         make(map[string]ModelCacheStat, len(l.byModelCache)),
+	}
+	if l.cachePrompt > 0 {
+		c.HitPct = round2(float64(l.cacheHit) * 100 / float64(l.cachePrompt))
+	}
+	for name, m := range l.byModelCache {
+		ms := ModelCacheStat{Reqs: m.Reqs, PromptTokens: m.Prompt, CachedTokens: m.Cached}
+		if m.Prompt > 0 {
+			ms.HitPct = round2(float64(m.Cached) * 100 / float64(m.Prompt))
+		}
+		c.ByModel[name] = ms
+	}
+	return c
+}
+
+// round2 保留两位小数（看板只用于阅读，不需要更高精度）。
+func round2(v float64) float64 {
+	return math.Round(v*100) / 100
 }
 
 // statOf 算 P50 / P95 / Max。样本少时就是原值，不做插值。

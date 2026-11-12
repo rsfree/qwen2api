@@ -370,6 +370,21 @@ button.xs { white-space:nowrap; }
         <div class="stat"><div class="v" id="uStream">-</div><div class="k">流式请求</div></div>
       </div>
       <div class="box">
+        <header><h3>Prompt Cache</h3><span class="hint">token 维度命中率 = cached_tokens / prompt_tokens · 进程内累计 · 标 (est) 的是上游没报、按保守公式估的</span></header>
+        <div class="stats" style="border:0;border-bottom:1px solid var(--line-soft)">
+          <div class="stat good"><div class="v" id="uCacheHit">-</div><div class="k">命中率</div></div>
+          <div class="stat"><div class="v" id="uCacheTokens">-</div><div class="k">命中 Token</div></div>
+          <div class="stat"><div class="v" id="uCachePrompt">-</div><div class="k">输入 Token</div></div>
+          <div class="stat"><div class="v" id="uCacheEst">-</div><div class="k">其中估算</div></div>
+        </div>
+        <div class="pad">
+          <table>
+            <thead><tr><th>模型</th><th class="num">请求</th><th class="num">输入</th><th class="num">命中</th><th class="num">命中率</th></tr></thead>
+            <tbody id="cacheModelBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="box">
         <header><h3>分布</h3><span class="hint">按模型 / 按账号（进程内累计）· 请求明细与运行日志见「日志」</span></header>
         <div class="pad" style="display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">
           <div><div class="hint" style="margin-bottom:6px">按模型</div><table><tbody id="byModelBody"></tbody></table></div>
@@ -1029,6 +1044,27 @@ function renderUsage() {
   const mmax = mk.length ? mk[0][1] : 1, amax = ak.length ? ak[0][1] : 1;
   $('#byModelBody').innerHTML = mk.length ? mk.map(([k, v]) => row(k, v, mmax)).join('') : '<tr><td class="hint">暂无</td></tr>';
   $('#byAccountBody').innerHTML = ak.length ? ak.map(([k, v]) => row(k, v, amax)).join('') : '<tr><td class="hint">暂无</td></tr>';
+
+  // ── Prompt Cache 看板 ──
+  // 口径是 token 维度，不是请求维度：一个 20k prompt 命中一次，
+  // 抵得上几百次 1k 的小请求，按请求数算会严重低估收益。
+  const c = st.cache || {};
+  const hit = c.cached_tokens || 0, pt = c.prompt_tokens || 0, est = c.estimated_tokens || 0;
+  $('#uCacheHit').textContent = pt > 0 ? (c.hit_pct || 0).toFixed(1) + '%' : '-';
+  $('#uCacheTokens').textContent = num(hit);
+  $('#uCachePrompt').textContent = num(pt);
+  $('#uCacheEst').textContent = est > 0
+    ? num(est) + ' (' + (hit > 0 ? (est * 100 / hit).toFixed(0) : 0) + '%)'
+    : '0';
+
+  const cm = Object.entries(c.by_model || {}).sort((a, b) => (b[1].cached_tokens || 0) - (a[1].cached_tokens || 0));
+  $('#cacheModelBody').innerHTML = cm.length ? cm.map(([k, v]) => {
+    const p = v.prompt_tokens || 0, h = v.cached_tokens || 0;
+    const pctHit = p > 0 ? (h * 100 / p) : 0;
+    return `<tr><td class="mono">${esc(k)}</td><td class="num">${num(v.reqs || 0)}</td>` +
+      `<td class="num">${num(p)}</td><td class="num">${num(h)}</td>` +
+      `<td class="num">${pctHit > 0 ? pctHit.toFixed(1) + '%' : '—'}</td></tr>`;
+  }).join('') : '<tr><td class="hint" colspan="5">暂无（还没有带 usage 的请求）</td></tr>';
 }
 
 /* ═══════════════ 容量 ═══════════════ */

@@ -18,8 +18,8 @@ v2（2026-11-12）基于 960x960 t2v 实测修订，修掉三个会静默出错�
      且 x/y/w/h 全偶数对齐（yuv420p 下不取偶，delogo 采样会偏半像素）。
 
 画质档（--quality）：
-  lossless  x264 qp=0   水印区外像素与解码帧**逐位一致**，体积约 20x（默认）
-  near      qp=8        视觉无损，体积约 6x
+  near      qp=8        视觉无损，体积约 6x（默认，交付推荐）
+  lossless  x264 qp=0   水印区外像素与解码帧**逐位一致**，体积约 20x
   high      crf=18      常规高质量，体积约 1.7x
   balanced  crf=22      体积中性（+8%）
   （实测 5.16s/720p/922KB：qp0=21.2MB x23、qp8=5.7MB x6.1、crf22=1.0MB x1.08）
@@ -30,8 +30,8 @@ v2（2026-11-12）基于 960x960 t2v 实测修订，修掉三个会静默出错�
    已用解码帧比对验证：水印区外 Y 平面总差 = 0。
 
 用法：
-  python3 strip_qwen_watermark.py in.mp4 -o out.mp4            # 默认：按短边推算 + lossless
-  python3 strip_qwen_watermark.py in.mp4 -o out.mp4 -q near    # 体积友好
+  python3 strip_qwen_watermark.py in.mp4 -o out.mp4               # 默认：near + 短边推算
+  python3 strip_qwen_watermark.py in.mp4 -o out.mp4 -q lossless   # 逐位无损（体积 20x）
   python3 strip_qwen_watermark.py in.mp4 -o out.mp4 --preset t2v-960
   python3 strip_qwen_watermark.py in.mp4 -o out.mp4 --box 736,864,218,90
   python3 strip_qwen_watermark.py in.mp4 --detect-only         # 研究用
@@ -54,20 +54,21 @@ PAD = 4
 EDGE = 2          # delogo 距画面边缘的最小距离
 TOUCH_TOL = 3     # 掩膜离搜索窗边缘小于这个像素数，视为"触边"→ 不可信
 
-# --- 720p 精确标定（2026-11-12）------------------------------------------
-# 1280x720：三条视频各自「时间中位数 - 局部背景」后归一化叠加去噪，
-#           th=0.45 与 th=0.60 给出完全相同的框 → x 1125..1258 / y 663..696
-#           = 133x33，距右 22、距底 24。
-# 720x1280：单条测得距右 22（与横屏**完全一致**）、距底 27、宽 123（阈值偏高截边）。
-# ⇒ 水印是**固定像素图层 133x33**，锚定右下角，与画幅长边无关。
-#   早期按"宽度百分比 88%~98%"写死，在 1280x720 上偏 50px、在 960x960 上偏更多，
-#   就是因为把它当成了等比缩放。
-WM_W = 133
-WM_H = 33
-WM_RIGHT = 22
-WM_BOTTOM = 27        # 横屏测 24、竖屏测 27，取大者（保守）
-WM_PAD = 4            # 每边外扩，吸收 ±2px 抖动
-BASE_SHORT = 720      # 标定基准短边
+# --- 水印几何规律（2026-11-12，加入 t2i 样本后修正）---------------------
+#  来源              短边   水印宽   宽/短边
+#  1280x720  t2v      720    133     18.5%
+#  720x1280  竖屏     720    133     18.5%
+#  960x960   t2v      960    180     18.75%
+#  2752x1536 t2i     1536    285     18.55%   ← 图片样本，决定性证据
+#
+# 🔴 **按短边等比缩放 ~18.5%，不是固定像素。**
+#   中途被"前三个样本短边恰好都=720"误导，一度错改成固定 133x33；
+#   2752x1536 的图直接证伪（固定像素说不通，等比说严丝合缝）。
+RATIO_W = 0.185
+RATIO_H = 0.054
+RATIO_RIGHT = 0.030
+RATIO_BOTTOM = 0.030
+RATIO_PAD = 0.012     # 四边外扩，吸收测量误差与半透明边缘
 
 # 画质档：lossless 用 qp（不是 crf）—— crf 0 在 x264 里等价于 qp 0，
 # 但显式写 qp 更不容易被误改成"接近 0 的 crf"。
@@ -81,26 +82,20 @@ QUALITY = {
 # 实测预设（--preset 手工用）
 PRESETS = {
     "t2v-960": (736, 864, 218, 90),
-    "720p-16x9": (1121, 656, 141, 41),
-    "720p-9x16": (561, 1216, 141, 41),
+    "720p-16x9": (1116, 650, 151, 57),
+    "720p-9x16": (556, 1210, 151, 57),
 }
 
 
 def auto_box(W, H):
-    """按 720p 标定值推算水印框（含外扩）。
-
-    短边 = 720 时直接用实测像素（精度 ±2px）；其它短边按比例缩放兜底，
-    但那部分没有实测依据，会打印警告。
-    """
-    s = min(W, H)
-    k = s / float(BASE_SHORT)
-    w0 = int(round(WM_W * k))
-    h0 = int(round(WM_H * k))
-    r0 = int(round(WM_RIGHT * k))
-    b0 = int(round(WM_BOTTOM * k))
-    x = W - r0 - w0 - WM_PAD
-    y = H - b0 - h0 - WM_PAD
-    return (x, y, w0 + 2 * WM_PAD, h0 + 2 * WM_PAD)
+    """按短边比例推算水印框（含外扩）。跨 720 / 960 / 1536 三种短边验证。"""
+    sm = min(W, H)
+    pad = int(round(sm * RATIO_PAD))
+    w0 = int(round(sm * RATIO_W))
+    h0 = int(round(sm * RATIO_H))
+    x = W - int(round(sm * RATIO_RIGHT)) - w0 - pad
+    y = H - int(round(sm * RATIO_BOTTOM)) - h0 - pad
+    return (x, y, w0 + 2 * pad, h0 + 2 * pad)
 
 
 def sh(cmd):
@@ -193,7 +188,7 @@ def normalize_box(box, W, H):
     return x, y, w, h
 
 
-def remove(path, out, box, quality="lossless", pix_fmt="yuv420p"):
+def remove(path, out, box, quality="near", pix_fmt="yuv420p"):
     x, y, w, h = box
     vf = "delogo=x=%d:y=%d:w=%d:h=%d" % (x, y, w, h)
     cmd = (["ffmpeg", "-y", "-v", "error", "-i", path, "-vf", vf,
@@ -209,7 +204,7 @@ def remove(path, out, box, quality="lossless", pix_fmt="yuv420p"):
     return out
 
 
-def crop_out(path, out, box, W, H, quality="lossless", pix_fmt="yuv420p"):
+def crop_out(path, out, box, W, H, quality="near", pix_fmt="yuv420p"):
     """裁掉底部一条（含整块水印），零瑕疵但分辨率变小。
 
     delogo 靠四周像素插值，遇到高频纹理（岩石、草地、硬边缘）会沿插值方向
@@ -463,9 +458,9 @@ def main():
     ap.add_argument("--fill", choices=["inpaint", "delogo"], default="inpaint",
                     help="inpaint=自研垂直优先填充+噪声匹配（默认，宽条形不留竖条）; "
                          "delogo=ffmpeg 原生滤镜（快，但 133x33 宽条形会拉出竖条纹）")
-    ap.add_argument("-q", "--quality", default="lossless",
+    ap.add_argument("-q", "--quality", default="near",
                     choices=list(QUALITY),
-                    help="lossless=qp0 逐位无损（默认，体积约 20x）; "
+                    help="near=qp8 视觉无损（默认，约 6x）; lossless=qp0 逐位无损(20x); "
                          "near=qp8 视觉无损(6x); high=crf18(1.7x); balanced=crf22(1.08x)")
     ap.add_argument("--crf", type=int,
                     help="兼容旧参数：给定则覆盖 --quality 的码率控制（有损）")
@@ -512,7 +507,7 @@ def main():
     else:
         box = auto_box(W, H)
         src = "720p 标定"
-        if min(W, H) != BASE_SHORT:
+        if min(W, H) not in (720, 960, 1536):
             print("[注意] 短边 %d != 720，按比例外推（无实测依据），"
                   "建议先用 --detect-only 或手工 --box 核对" % min(W, H),
                   file=sys.stderr)

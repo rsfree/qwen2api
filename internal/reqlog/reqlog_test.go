@@ -80,3 +80,41 @@ func TestEchoClipsLongToolTrace(t *testing.T) {
 		t.Fatalf("截断切坏了中文: %s", line)
 	}
 }
+
+// 缓存看板的口径：token 维度 + 估算单列 + 失败请求不进分母。
+func TestStatsCache(t *testing.T) {
+	l := New(10)
+	l.Echo = false
+
+	// 上游报的真值
+	l.Add(Entry{Model: "m1", Status: 200, PromptTokens: 1000, CachedTokens: 800})
+	// 上游没报、我们估的
+	l.Add(Entry{Model: "m1", Status: 200, PromptTokens: 500, CachedTokens: 300, CacheEst: true})
+	// 完全没命中
+	l.Add(Entry{Model: "m2", Status: 200, PromptTokens: 200})
+	// 失败请求：PromptTokens=0，不能进分母（否则命中率虚高）
+	l.Add(Entry{Model: "m2", Status: 502})
+
+	s := l.Stats().Cache
+	if s.PromptTokens != 1700 || s.CachedTokens != 1100 {
+		t.Fatalf("累计应为 1700/1100，得到 %d/%d", s.PromptTokens, s.CachedTokens)
+	}
+	if s.Reqs != 3 {
+		t.Fatalf("只应统计 3 个带 prompt_tokens 的请求，得到 %d", s.Reqs)
+	}
+	if s.EstimatedTokens != 300 {
+		t.Fatalf("估算部分应为 300，得到 %d", s.EstimatedTokens)
+	}
+	if got := s.HitPct; got < 64.7 || got > 64.8 {
+		t.Fatalf("命中率应为 64.71%%，得到 %.2f", got)
+	}
+
+	m1 := s.ByModel["m1"]
+	if m1.Reqs != 2 || m1.PromptTokens != 1500 || m1.CachedTokens != 1100 {
+		t.Fatalf("m1 聚合不对: %+v", m1)
+	}
+	m2 := s.ByModel["m2"]
+	if m2.Reqs != 1 || m2.CachedTokens != 0 || m2.HitPct != 0 {
+		t.Fatalf("m2 聚合不对: %+v", m2)
+	}
+}
