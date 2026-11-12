@@ -19,7 +19,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -o /out/qwen2api ./cmd/server
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata \
+# ffmpeg 是视频后处理（去水印）的硬依赖：上游产物右下角烧着 133x33 的 Qwen 图层，
+# 只能在像素层重绘。镜像因此从 ~20MB 涨到 ~100MB —— 这是"交付干净成片"的代价。
+RUN apk add --no-cache ca-certificates tzdata ffmpeg \
     && adduser -D -u 10001 -h /app app
 
 # 🔴 时区必须显式设。容器默认 UTC，而"每日生图配额"按**本地日期**清零 ——

@@ -34,6 +34,15 @@ const (
 	VideoStatusQueued    = "queued"
 	VideoStatusRunning   = "running"
 	VideoStatusSucceeded = "succeeded"
+	// VideoStatusPolishing 内部状态：上游已出片，正在去水印 + 上传自建存储。
+	//
+	// 🔴 对外**序列化为 running**（见 videoTaskPayload）。理由：客户端在拿到
+	// 可下载的干净地址之前，不该看到任何"成功"信号 —— 一旦提前给 succeeded，
+	// 某些客户端会立刻去播 content.video_url（那时还是 null）或退回上游直链，
+	// 而带水印的那版 24h 就没了，事后无从补救。
+	//
+	// 它不是终态（IsTerminalVideoStatus 不含），所以巡检会继续推进它。
+	VideoStatusPolishing = "polishing"
 	VideoStatusFailed    = "failed"
 	VideoStatusExpired   = "expired"
 	VideoStatusCancelled = "cancelled"

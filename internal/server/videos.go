@@ -433,10 +433,17 @@ func (s *Server) refreshVideo(rec *videoRecord, force bool) *videoRecord {
 	if rec.Status == VideoStatusSucceeded && rec.VideoURL != "" {
 		return rec
 	}
+	// 后处理中：上游那一侧已经到顶了，再查没有新信息（重试由 polisher 负责）。
+	if rec.Status == VideoStatusPolishing && rec.UpstreamURL != "" {
+		return rec
+	}
 	if !force && now.Unix()-rec.PolledAt < videoPollMinInterval {
 		return rec
 	}
-	if !IsTerminalVideoStatus(rec.Status) && now.Unix() >= rec.ExpiresAt {
+	// polishing 手里已有产物，不再受 execution_expires_after 约束 ——
+	// 那个超时管的是"上游还出不出片"，不是"我们的后处理要多久"。
+	if !IsTerminalVideoStatus(rec.Status) && rec.Status != VideoStatusPolishing &&
+		now.Unix() >= rec.ExpiresAt {
 		rec.Status = VideoStatusExpired
 		rec.ErrCode = "expired"
 		rec.ErrMsg = "任务超过 execution_expires_after（" +
@@ -484,9 +491,23 @@ func (s *Server) refreshVideo(rec *videoRecord, force bool) *videoRecord {
 	rec.StatusRaw = rawStatus
 	rec.StatusUnknown = !known
 	rec.PolledAt = now.Unix()
-	if video != "" && rec.VideoURL == "" {
-		rec.VideoURL = video
+	if video != "" && rec.UpstreamURL == "" {
+		// 上游直链只进内部字段。它是后处理失败重试的唯一素材来源，
+		// 而这个链接 24h 后就 404 —— 必须第一时间存下来。
+		rec.UpstreamURL = video
 		rec.ProductAt = now.Unix()
+	}
+	// 产物到手：启用托管时转 polishing，对外绝不暴露带水印的直链。
+	if status == VideoStatusSucceeded {
+		if st := s.conf().Storage; st.Enabled && rec.UpstreamURL != "" {
+			rec.Status = VideoStatusPolishing
+			rec.PolishState = "queued"
+			if s.polish != nil {
+				s.polish.enqueue(rec.ID)
+			}
+		} else if rec.VideoURL == "" {
+			rec.VideoURL = rec.UpstreamURL
+		}
 	}
 	if lastFrame != "" {
 		rec.LastFrame = lastFrame
@@ -521,10 +542,17 @@ func (s *Server) refreshVideo(rec *videoRecord, force bool) *videoRecord {
 // 🔴 查询、回调推送、列表共用这一个函数。
 // 出现第二个序列化器，「回调体和查询体字段对不上」只是时间问题。
 func videoTaskPayload(rec *videoRecord) map[string]any {
+	// polishing 对外一律呈现为 running。
+	// 🔴 内部进度不泄漏到协议层：方舟只有六态，自造一个 "polishing" 会让
+	// 按状态机写死的客户端永远等不到终态。
+	status := rec.Status
+	if status == VideoStatusPolishing {
+		status = VideoStatusRunning
+	}
 	out := map[string]any{
 		"id":         rec.ID,
 		"model":      rec.Model,
-		"status":     rec.Status,
+		"status":     status,
 		"created_at": rec.CreatedAt,
 		"updated_at": rec.UpdatedAt,
 	}

@@ -116,5 +116,26 @@
       "note": "可选备注"
     }
   ],
-  "// video.duration": "合法档位 5 / 10 / 15 秒；720P 5s=40 积分，1080P 5s=70 积分"
+  "// video.duration": "合法档位 5 / 10 / 15 秒；720P 5s=40 积分，1080P 5s=70 积分",
+  "storage": {
+    "// enabled": "启用后：上游出片 → 去水印 → 上传自建存储 → 才对外发 URL。关掉则退回透传上游直链（带水印）。",
+    "enabled": false,
+    "// endpoint": "S3 兼容入口，path-style（不带 bucket）。",
+    "endpoint": "https://oss.s3ai.cn",
+    "bucket": "cdn",
+    "// 凭据": "别写进仓库：用 QWEN2API_STORAGE_ACCESS_KEY / QWEN2API_STORAGE_SECRET_KEY 注入。",
+    "access_key": "",
+    "secret_key": "",
+    "// public_base": "客户端可见前缀；留空则由 endpoint+bucket 拼。",
+    "public_base": "https://oss.s3ai.cn/cdn",
+    "region": "us-east-1",
+    "prefix": "qwen2api/videos",
+    "// strip_watermark": "上传前去水印（固定 133x33 图层，按短边推算位置）。",
+    "strip_watermark": true,
+    "// quality": "near=q p8 约6x（默认）；lossless=qp0 约20x；high/b aliased;",
+    "quality": "near",
+    "workers": 2,
+    "timeout_s": 300,
+    "ffmpeg_path": "ffmpeg"
+  }
 }

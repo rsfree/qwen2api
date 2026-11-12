@@ -45,8 +45,18 @@ type videoRecord struct {
 	Audio      bool   `json:"audio,omitempty"`
 
 	// ---- 运行态 ----
-	Status    string `json:"status"`
-	VideoURL  string `json:"video_url,omitempty"`
+	Status string `json:"status"`
+	// VideoURL 对外交付地址。启用 storage 时是自建存储的 URL（已去水印），
+	// 否则是上游直链。
+	VideoURL string `json:"video_url,omitempty"`
+	// UpstreamURL 上游 CDN 直链（**内部字段，不对外**）。
+	// 必须单独存：它是后处理失败重试的唯一素材来源，而它 24h 后就 404 了。
+	UpstreamURL string `json:"upstream_url,omitempty"`
+	// PolishState 去水印后处理进度："" | queued | running | done | failed。
+	// 与 Status 分开是因为 Status 要遵守方舟六态（不能自造对外状态）。
+	PolishState string `json:"polish_state,omitempty"`
+	PolishTries int    `json:"polish_tries,omitempty"`
+	PolishErr   string `json:"polish_err,omitempty"`
 	LastFrame string `json:"last_frame_url,omitempty"`
 	ErrCode   string `json:"error_code,omitempty"`
 	ErrMsg    string `json:"error_message,omitempty"`

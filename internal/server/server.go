@@ -43,6 +43,9 @@ type Server struct {
 	// videoStop 关闭后台巡检（回调推送依赖它）。
 	videoStop     chan struct{}
 	videoStopOnce sync.Once
+	// polish 视频后处理队列（去水印 + 上传自建存储）。
+	// nil 表示未启用 storage —— 此时退回"直接透传上游直链"的旧行为。
+	polish *videoPolisher
 	// files 上传条目的暂存（内存 2h）。
 	files *FileStore
 	// blobs 图片外链托管（内存 2h）—— 给上游一个自己能拉的 URL，绕开 STS。
@@ -122,6 +125,10 @@ func New(cfg config.Config, p *pool.Pool, up *upstream.Client, log *reqlog.Log, 
 		dialogs: newDialogStore(),
 	}
 	s.cfg.Store(cfg)
+	// 后处理队列：只在启用托管时起 goroutine。
+	if cfg.Storage.Enabled {
+		s.polish = newVideoPolisher(s, cfg.Storage.Workers)
+	}
 	// 配置了公网基址就固定下来（服务端到服务端取图时 Host 不是公网域名）。
 	if cfg.BlobBaseURL != "" {
 		s.blobs.SetBase(cfg.BlobBaseURL)
@@ -276,6 +283,11 @@ func (s *Server) Handler() http.Handler {
 	// 后台任务既存不住也没有回调对象，起了只是白白打上游。
 	if s.videos.Path() != "" {
 		s.videoStopOnce.Do(func() { go s.videoWatchLoop(s.videoStop) })
+	}
+	// 重启恢复：把停在 queued/running 的后处理任务重新排上。
+	// 没有这一步，重启那一刻在处理的视频会永远卡在 polishing。
+	if s.polish != nil {
+		go s.polish.recover()
 	}
 
 	mux := http.NewServeMux()

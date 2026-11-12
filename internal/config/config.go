@@ -131,6 +131,45 @@ type Video struct {
 	Aliases map[string]string `json:"aliases"`
 }
 
+// Storage 产物托管：去水印后重新分发。
+//
+// 为什么需要它（2026-11-12 定性）：上游产物是 24h 过期的 CDN 直链，
+// 且画面右下角烧着 Qwen logo（133x33 固定像素图层，非等比缩放）。
+// 要让客户端拿到的就是干净终版，必须自己落一份文件 ——
+// 视频播放会发 Range 请求，流式转码没法回退到任意位置重算，所以只能存。
+//
+// 🔴 纪律：**没处理完不发 URL**。上游 succeeded 只代表"素材好了"，
+// 对外的 succeeded 一律等到上传完成。否则客户端拿到的是带水印那版，
+// 而它 24h 后就 404 了 —— 事后没有任何补救窗口。
+type Storage struct {
+	// Enabled 关掉则退回旧行为（直接透传上游直链，带水印）。
+	Enabled bool `json:"enabled"`
+	// Endpoint S3 兼容入口，如 https://oss.s3ai.cn（不带 bucket）。
+	Endpoint string `json:"endpoint"`
+	Bucket   string `json:"bucket"`
+	// AccessKey / SecretKey 用环境变量注入，别写进仓库里的配置文件。
+	AccessKey string `json:"access_key"`
+	SecretKey string `json:"secret_key"`
+	// PublicBase 客户端可见的前缀（如 https://oss.s3ai.cn/cdn）。
+	// 留空则由 Endpoint + Bucket 拼出来。
+	PublicBase string `json:"public_base"`
+	Region     string `json:"region"`
+	// Prefix 对象键前缀，便于按业务分目录。
+	Prefix string `json:"prefix"`
+	// StripWatermark 上传前去水印。
+	StripWatermark bool `json:"strip_watermark"`
+	// Quality 画质档：near(qp8, 约6x) / lossless(qp0, 约20x) / high / balanced。
+	Quality string `json:"quality"`
+	// Workers 并发处理数。单条 720p/5s 约占 7~10 核，按机器核数配。
+	Workers int `json:"workers"`
+	// TimeoutS 单条处理的墙钟上限（含下载+转码+上传），默认 300。
+	TimeoutS int `json:"timeout_s"`
+	// RetentionH 产物保留小时数，默认 0 = 不主动删（交给 bucket 生命周期）。
+	RetentionH int `json:"retention_h"`
+	// FFmpegPath ffmpeg 可执行文件路径，默认 "ffmpeg"。
+	FFmpegPath string `json:"ffmpeg_path"`
+}
+
 // VideoCredits 查一次视频的积分单价。
 //
 // 查不到时返回 ok=false —— 调用方要么按"最贵档"保守处理，要么直接拒绝。
@@ -337,6 +376,8 @@ type Config struct {
 	// 调小可以，但别低于实测最慢的 137s（双参考图）。
 	ImageTimeoutS int   `json:"image_timeout_s"`
 	Video         Video `json:"video"`
+	// Storage 产物托管（去水印 + 自建分发）。零值 = 关闭，行为与旧版一致。
+	Storage Storage `json:"storage"`
 
 	// ModelAliases 文本模型别名：**客户端传的名字 → 上游模型名**。
 	//
@@ -568,6 +609,24 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("QWEN2API_BLOB_BASE_URL"); v != "" {
 		cfg.BlobBaseURL = v
+	}
+	if v := os.Getenv("QWEN2API_STORAGE_ENDPOINT"); v != "" {
+		cfg.Storage.Endpoint = v
+	}
+	if v := os.Getenv("QWEN2API_STORAGE_BUCKET"); v != "" {
+		cfg.Storage.Bucket = v
+	}
+	if v := os.Getenv("QWEN2API_STORAGE_ACCESS_KEY"); v != "" {
+		cfg.Storage.AccessKey = v
+	}
+	if v := os.Getenv("QWEN2API_STORAGE_SECRET_KEY"); v != "" {
+		cfg.Storage.SecretKey = v
+	}
+	if v := os.Getenv("QWEN2API_STORAGE_PUBLIC_BASE"); v != "" {
+		cfg.Storage.PublicBase = v
+	}
+	if v := os.Getenv("QWEN2API_STORAGE_ENABLED"); v == "1" || v == "true" {
+		cfg.Storage.Enabled = true
 	}
 	if v := os.Getenv("QWEN2API_VERSION"); v != "" {
 		cfg.Upstream.Version = v
