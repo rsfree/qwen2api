@@ -52,7 +52,7 @@ func imageObjectKey() string {
 //   - 失败：返回 (原URL, nil)，不阻断出图
 func (s *Server) polishImage(ctx context.Context, srcURL string) (string, []byte, error) {
 	st := s.conf().Storage
-	if !st.StripWatermark {
+	if !st.ImageStripWatermark {
 		return srcURL, nil, nil
 	}
 	if !st.IsEnabled() {

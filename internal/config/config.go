@@ -159,8 +159,14 @@ type Storage struct {
 	Region     string `json:"region"`
 	// Prefix 对象键前缀，便于按业务分目录。
 	Prefix string `json:"prefix"`
-	// StripWatermark 上传前去水印。
+	// StripWatermark 上传前给**视频**去水印（依赖 ffmpeg 子进程）。
 	StripWatermark bool `json:"strip_watermark"`
+	// ImageStripWatermark 上传前给**图片**去水印（纯 Go，无外部进程）。
+	//
+	// 🔴 与视频的 StripWatermark 分开：两条链路的失败面完全不同
+	// （视频要 exec ffmpeg、镜像里没装就必挂；图片是纯内存计算）。
+	// 共用一个开关等于"想开图片就顺带把未验证的视频链路一起打开"。
+	ImageStripWatermark bool `json:"image_strip_watermark"`
 	// Quality 画质档：near(qp8, 约6x) / lossless(qp0, 约20x) / high / balanced。
 	Quality string `json:"quality"`
 	// Workers 并发处理数。单条 720p/5s 约占 7~10 核，按机器核数配。

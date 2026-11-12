@@ -132,6 +132,8 @@
     "prefix": "qwen2api/videos",
     "// strip_watermark": "上传前去水印（固定 133x33 图层，按短边推算位置）。",
     "strip_watermark": true,
+    "// image_strip_watermark": "图片去水印（纯 Go，无外部依赖）。与视频的 strip_watermark 分开控制。",
+    "image_strip_watermark": true,
     "// quality": "near=q p8 约6x（默认）；lossless=qp0 约20x；high/b aliased;",
     "quality": "near",
     "workers": 2,
