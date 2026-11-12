@@ -142,8 +142,11 @@ type Video struct {
 // 对外的 succeeded 一律等到上传完成。否则客户端拿到的是带水印那版，
 // 而它 24h 后就 404 了 —— 事后没有任何补救窗口。
 type Storage struct {
-	// Enabled 关掉则退回旧行为（直接透传上游直链，带水印）。
-	Enabled bool `json:"enabled"`
+	// Enabled 显式关闭时才为 false（指针区分"没配"和"配了 false"）。
+	//
+	// 🔴 默认是**开启**：产品要求是"没处理完不发 URL"，所以托管是默认路径。
+	// 用指针而不是 bool，是因为 bool 的零值 false 会让"没配置"被误读成"主动关闭"。
+	Enabled *bool `json:"enabled,omitempty"`
 	// Endpoint S3 兼容入口，如 https://oss.s3ai.cn（不带 bucket）。
 	Endpoint string `json:"endpoint"`
 	Bucket   string `json:"bucket"`
@@ -168,6 +171,39 @@ type Storage struct {
 	RetentionH int `json:"retention_h"`
 	// FFmpegPath ffmpeg 可执行文件路径，默认 "ffmpeg"。
 	FFmpegPath string `json:"ffmpeg_path"`
+}
+
+// IsEnabled 是否真的启用托管。
+//
+// 规则：显式 false ⇒ 关；否则只要**凭据齐全**就算开。
+//
+// 为什么凭据不齐时自动降级而不是报错：默认值是开启的，如果部署时漏配
+// endpoint/bucket，硬性失败会让每一条视频任务都变成 failed —— 一次配置疏漏
+// 打挂整个视频能力。降级成"透传上游直链"至少服务是活的，且启动日志会明确报出
+// 缺什么。
+func (s Storage) IsEnabled() bool {
+	if s.Enabled != nil && !*s.Enabled {
+		return false
+	}
+	return s.Endpoint != "" && s.Bucket != "" && s.AccessKey != "" && s.SecretKey != ""
+}
+
+// MissingKeys 返回缺失的必填项（用于启动日志）。
+func (s Storage) MissingKeys() []string {
+	var out []string
+	if s.Endpoint == "" {
+		out = append(out, "endpoint")
+	}
+	if s.Bucket == "" {
+		out = append(out, "bucket")
+	}
+	if s.AccessKey == "" {
+		out = append(out, "access_key")
+	}
+	if s.SecretKey == "" {
+		out = append(out, "secret_key")
+	}
+	return out
 }
 
 // VideoCredits 查一次视频的积分单价。
@@ -625,8 +661,9 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("QWEN2API_STORAGE_PUBLIC_BASE"); v != "" {
 		cfg.Storage.PublicBase = v
 	}
-	if v := os.Getenv("QWEN2API_STORAGE_ENABLED"); v == "1" || v == "true" {
-		cfg.Storage.Enabled = true
+	if v := os.Getenv("QWEN2API_STORAGE_ENABLED"); v != "" {
+		b := v == "1" || v == "true" || v == "yes" || v == "on"
+		cfg.Storage.Enabled = &b
 	}
 	if v := os.Getenv("QWEN2API_VERSION"); v != "" {
 		cfg.Upstream.Version = v

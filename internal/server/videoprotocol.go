@@ -259,6 +259,16 @@ type videoPlan struct {
 	// （2026-11-08 实测踩到：红色首帧生效、蓝色尾帧被丢，产物 5 秒全红。）
 	VideoMode string
 
+	// Watermark 客户端是否要求成片带水印（方舟原生字段，默认 false = 不含）。
+	//
+	// 🔴 上游（Qwen）是**强制**加水印，没有开关。所以这里不是"透传参数"，
+	// 而是"交付策略"：false ⇒ 后处理去掉；true ⇒ 原样交付（保留上游那层）。
+	Watermark bool
+	// WatermarkSet 客户端是否**显式**说过这个字段（含 false）。
+	// 用来区分"没说"（默认）和"明确要求不要水印" —— 后者在托管关闭时
+	// 无法兑现，必须警告，否则调用方以为自己拿到了干净片。
+	WatermarkSet bool
+
 	// 回显用（客户端原名原值，不许被上游 ID 覆盖）。
 	EchoModel      string
 	EchoResolution string
@@ -460,6 +470,15 @@ func (s *Server) validateVideoRequest(req *VideoRequest) (*videoPlan, *videoReje
 	}
 	plan.Duration, plan.EchoDuration = dur, dur
 
+	// 水印：两种载体任一为 true 即 true。不做"双载体互斥" ——
+	// 方舟自己的文档里这两种写法是**并列示例**，不是互斥关系。
+	wm := req.Watermark
+	if sfx.Watermark != nil {
+		wm = sfx.Watermark
+	}
+	plan.Watermark = wm != nil && *wm
+	plan.WatermarkSet = (req.Watermark != nil) || (sfx.Watermark != nil)
+
 	audio := req.GenerateAudio
 	if sfx.Audio != nil {
 		audio = sfx.Audio
@@ -503,6 +522,12 @@ func (s *Server) validateVideoRequest(req *VideoRequest) (*videoPlan, *videoReje
 	// 上游没有对应参数的字段：不静默丢，也不拦死 —— 记进 warnings，如实告知。
 	plan.Warnings = append(plan.Warnings, sfxWarn...)
 	plan.Warnings = append(plan.Warnings, unsupportedExtras(req)...)
+	// watermark=false 在本网关不是"透传参数"，而是"后处理承诺"。
+	// 托管没开就兑现不了 —— 必须说清楚，别让调用方以为拿到的是干净片。
+	if plan.WatermarkSet && !plan.Watermark && !s.conf().Storage.IsEnabled() {
+		plan.Warnings = append(plan.Warnings,
+			"watermark=false 无法兑现：上游强制加水印且视频托管未启用，成片仍带水印")
+	}
 
 	plan.Clips = append(plan.Clips, images...)
 	plan.Clips = append(plan.Clips, videos...)
@@ -642,7 +667,9 @@ type videoSuffix struct {
 	Ratio      string
 	Duration   *int
 	Audio      *bool
-	Warnings   []string
+	// Watermark 方舟原生参数（`--wm true`）。默认 false = 不含水印。
+	Watermark *bool
+	Warnings  []string
 }
 
 // foldPromptSuffix 解析并**剥离** prompt 末尾的 `--rs / --rt / --dur / --wm` 后缀。
@@ -686,11 +713,11 @@ func foldPromptSuffix(prompt string, req *VideoRequest) (string, videoSuffix, []
 			}
 			sfx.Duration = &n
 		case "wm", "watermark":
-			if _, ok := parseFlagBool(p.val); !ok {
+			b, ok := parseFlagBool(p.val)
+			if !ok {
 				return "", sfx, nil, rejectInvalid("watermark", "prompt 后缀 --wm 的值不是布尔: "+p.val)
 			}
-			sfx.Warnings = append(sfx.Warnings,
-				"prompt 后缀 --wm 已剥离，但本上游没有水印参数，未下发")
+			sfx.Watermark = &b
 		case "cf", "camerafixed":
 			if _, ok := parseFlagBool(p.val); !ok {
 				return "", sfx, nil, rejectInvalid("", "prompt 后缀 --cf 的值不是布尔: "+p.val)
@@ -836,7 +863,9 @@ func unsupportedExtras(req *VideoRequest) []string {
 			out = append(out, field+" 在本上游没有对应参数，未下发")
 		}
 	}
-	add(req.Watermark != nil, "watermark")
+	// watermark 不在这里：它有真实语义（是否要带水印），由 storage 托管层
+	// 通过"去水印 / 原样交付"两条路满足。只有在 storage 关闭时才无法兑现，
+	// 那种情况由调用处补一条警告。
 	add(req.CameraFixed != nil, "camera_fixed")
 	add(req.Seed != nil, "seed")
 	add(req.ReturnLastFrame != nil, "return_last_frame")

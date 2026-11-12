@@ -118,8 +118,8 @@
   ],
   "// video.duration": "合法档位 5 / 10 / 15 秒；720P 5s=40 积分，1080P 5s=70 积分",
   "storage": {
-    "// enabled": "启用后：上游出片 → 去水印 → 上传自建存储 → 才对外发 URL。关掉则退回透传上游直链（带水印）。",
-    "enabled": false,
+    "// enabled": "默认开启：没处理完不发 URL。显式写 false 才退回透传上游直链（带水印）。凭据不全时自动降级并告警。",
+    "enabled": true,
     "// endpoint": "S3 兼容入口，path-style（不带 bucket）。",
     "endpoint": "https://oss.s3ai.cn",
     "bucket": "cdn",

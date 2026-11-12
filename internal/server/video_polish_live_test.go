@@ -27,8 +27,9 @@ func TestPolishPipelineLive(t *testing.T) {
 	if os.Getenv("POLISH_LIVE") != "1" || sample == "" {
 		t.Skip("设置 POLISH_LIVE=1 与 WM_SAMPLE=<样例 mp4> 才跑")
 	}
+	enabled := true
 	st := config.Storage{
-		Enabled:        true,
+		Enabled:        &enabled,
 		Endpoint:       os.Getenv("S3_ENDPOINT"),
 		Bucket:         os.Getenv("S3_BUCKET"),
 		AccessKey:      os.Getenv("S3_AK"),

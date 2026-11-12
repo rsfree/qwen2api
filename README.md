@@ -290,7 +290,8 @@ curl -s "$B/cgt-…/content" -H 'Authorization: Bearer <key>' -o out.mp4
 | `duration` 4~30 任意值 | 只 5 / 10 / 15 | 上游档位 |
 | `resolution` 480p / 4k | 只 720p / 1080p | 上游档位 |
 | `ratio` 21:9 | 400 | 上游 6 档不含 21:9 |
-| `watermark` / `seed` / `camera_fixed` / `return_last_frame` / `output_format` / `draft` / `service_tier` / `priority` / `tools` | 接受但不生效，记 `X-Qwen2API-Warnings` 响应头 | 上游无对应参数 |
+| `watermark` | **由托管层兑现**（见下文「去水印与自建托管」）：`false`（方舟默认）→ 后处理去掉；`true` → 原样交付，保留上游那层 | 上游强制加水印、**没有任何参数开关**，只能像素级后处理 |
+| `seed` / `camera_fixed` / `return_last_frame` / `output_format` / `draft` / `service_tier` / `priority` / `tools` | 接受但不生效，记 `X-Qwen2API-Warnings` 响应头 | 上游无对应参数 |
 | `filter.service_tier` | 忽略（不过滤） | 上游无服务等级概念 |
 | 参考视频 / 参考音频 | 400 | 上游 `attachments` 只接受 `{type:"image"}` |
 
@@ -892,6 +893,20 @@ GET /stats → pool[].credit_balance = 280, credit_known = true
 | 没处理完不发 URL | 带水印那版 24h 后 404，事后没有补救窗口 |
 | `polishing` 对外映射为 `running` | 方舟只有六态，自造状态会让按状态机写死的客户端永远等不到终态 |
 | 失败**不**降级透传上游直链 | 与其交一个会过期且带水印的瑕疵品，不如明确失败 |
+
+**与方舟 `watermark` 字段的语义对齐**（这一条容易搞错）：
+
+方舟原生 `watermark` 默认为 **false = 不含水印**，我们的上游却**强制**加。
+所以本网关把它实现为「交付策略」而不是「透传参数」：
+
+| 客户端传 | 实际发生 |
+|---|---|
+| 不传（默认 false） | 去水印 |
+| `watermark: false` | 去水印 |
+| `watermark: true` / `--wm true` | **不去水印**，原样交付上游那层 Qwen 图层 |
+
+托管未启用时，`watermark: false` 兑现不了 —— 创建响应会在
+`X-Qwen2API-Warnings` 里明确告知「成片仍带水印」，不会假装成功。
 
 去水印不是调参数能解决的：`biz_data` 里根本没有 watermark 字段，
 水印是在渲染链路上烧进像素的，只能后处理重绘。实现要点：

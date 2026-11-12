@@ -190,7 +190,10 @@ func (p *videoPolisher) run(ctx context.Context, rec *videoRecord, st config.Sto
 	}
 	dst := filepath.Join(dir, "out.mp4")
 
-	if st.StripWatermark {
+	// watermark=true 表示客户端**要**带水印：上游本来就有，原样交付即可。
+	// 只有 false（含默认）才需要抹掉 —— 这才是方舟 watermark 字段的语义。
+	needStrip := st.StripWatermark && !rec.Watermark
+	if needStrip {
 		W, H, fps, err := probeVideoDim(ctx, ffmpeg, src)
 		if err != nil {
 			return "", fmt.Errorf("探测视频规格失败: %w", err)

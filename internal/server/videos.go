@@ -233,6 +233,7 @@ func (s *Server) createVideo(w http.ResponseWriter, r *http.Request, plan *video
 		Account: acct, Model: plan.EchoModel, Fingerprint: plan.Fingerprint, Scene: plan.Scene,
 		Resolution: plan.EchoResolution, Ratio: plan.EchoRatio,
 		Duration: plan.EchoDuration, Audio: plan.EchoAudio,
+		Watermark: plan.Watermark,
 		Status:    VideoStatusQueued,
 		Credits:   needCredits,
 		CreatedAt: now.Unix(), UpdatedAt: now.Unix(),
@@ -240,6 +241,14 @@ func (s *Server) createVideo(w http.ResponseWriter, r *http.Request, plan *video
 		CallbackURL: plan.CallbackURL,
 	}
 	s.videos.Put(rec)
+
+	// warnings 走响应头（URL 编码保证 ASCII 可传）。
+	// 🔴 之前 plan.Warnings 只收集不输出 —— README 写着"记 X-Qwen2API-Warnings"
+	// 但成功路径从没设置过，客户端永远看不到降级信息。
+	if len(plan.Warnings) > 0 {
+		w.Header().Set("X-Qwen2API-Warnings",
+			url.QueryEscape(strings.Join(plan.Warnings, "\n")))
+	}
 
 	// 创建回包**只有 id**。受理 ≠ 成功，这是协议里最容易被「优化」坏的一条。
 	writeJSON(w, http.StatusOK, map[string]string{"id": rec.ID})
@@ -499,7 +508,7 @@ func (s *Server) refreshVideo(rec *videoRecord, force bool) *videoRecord {
 	}
 	// 产物到手：启用托管时转 polishing，对外绝不暴露带水印的直链。
 	if status == VideoStatusSucceeded {
-		if st := s.conf().Storage; st.Enabled && rec.UpstreamURL != "" {
+		if st := s.conf().Storage; st.IsEnabled() && rec.UpstreamURL != "" {
 			rec.Status = VideoStatusPolishing
 			rec.PolishState = "queued"
 			if s.polish != nil {

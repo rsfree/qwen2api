@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	stdlog "log"
 	"net"
 	"net/http"
 	"os"
@@ -107,6 +107,12 @@ type Server struct {
 	cfgPath string
 }
 
+// storageExplicitlyOff 配置里是否显式写了 enabled=false（用于日志分流：
+// "主动关"不该报"缺配置"）。
+func storageExplicitlyOff(st config.Storage) bool {
+	return st.Enabled != nil && !*st.Enabled
+}
+
 // New 构造前门。
 func New(cfg config.Config, p *pool.Pool, up *upstream.Client, log *reqlog.Log, version string) *Server {
 	s := &Server{
@@ -125,9 +131,17 @@ func New(cfg config.Config, p *pool.Pool, up *upstream.Client, log *reqlog.Log, 
 		dialogs: newDialogStore(),
 	}
 	s.cfg.Store(cfg)
-	// 后处理队列：只在启用托管时起 goroutine。
-	if cfg.Storage.Enabled {
+	// 后处理队列：托管开启时起 worker。
+	if cfg.Storage.IsEnabled() {
 		s.polish = newVideoPolisher(s, cfg.Storage.Workers)
+		stdlog.Printf("[qwen2api] 视频托管已启用：%s/%s 去水印=%v 画质=%s 并发=%d",
+			cfg.Storage.Endpoint, cfg.Storage.Bucket,
+			cfg.Storage.StripWatermark, cfg.Storage.Quality, cfg.Storage.Workers)
+	} else if miss := cfg.Storage.MissingKeys(); len(miss) > 0 && !storageExplicitlyOff(cfg.Storage) {
+		// 默认开启但凭据不全：降级而不是拒绝启动。
+		// 🔴 必须吵一句：否则运维以为在去水印，实际客户端拿到的是带水印直链。
+		stdlog.Printf("[qwen2api] ⚠️ 视频托管默认开启，但缺少配置 %v —— "+
+			"已降级为透传上游直链（成片**带水印**且 24h 过期）", miss)
 	}
 	// 配置了公网基址就固定下来（服务端到服务端取图时 Host 不是公网域名）。
 	if cfg.BlobBaseURL != "" {
@@ -229,7 +243,7 @@ func (s *Server) UpdateConfig(patch map[string]any) (applied, needRestart []stri
 		if e = f.Close(); e != nil {
 			return nil, nil, fmt.Errorf("写配置文件失败：%w", e)
 		}
-		log.Printf("[qwen2api] 配置文件是单文件挂载，已改用覆盖写（备份在 %s）", bak)
+		stdlog.Printf("[qwen2api] 配置文件是单文件挂载，已改用覆盖写（备份在 %s）", bak)
 	}
 
 	// 用新文件重建快照：从当前配置拷贝一份再 unmarshal —— 文件里没有的字段
@@ -240,7 +254,7 @@ func (s *Server) UpdateConfig(patch map[string]any) (applied, needRestart []stri
 	}
 	s.ApplyConfig(nc)
 	for _, k := range applied {
-		log.Printf("[qwen2api] 配置热更 %s", k)
+		stdlog.Printf("[qwen2api] 配置热更 %s", k)
 	}
 	return applied, needRestart, nil
 }
@@ -392,7 +406,7 @@ func (s *Server) withCORS(next http.Handler) http.Handler {
 		}
 		defer func() {
 			if rec := recover(); rec != nil {
-				log.Printf("[panic] %s %s: %v", r.Method, r.URL.Path, rec)
+				stdlog.Printf("[panic] %s %s: %v", r.Method, r.URL.Path, rec)
 				writeError(w, http.StatusInternalServerError, "internal_error", "网关内部错误")
 			}
 		}()

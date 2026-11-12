@@ -134,7 +134,7 @@ func TestKVFieldNormalize(t *testing.T) {
 
 	got, err := f.Normalize(map[string]any{
 		"doubao-seedance-2-0-pro-260628": "happyhorse11",
-		" wan 2.7 ":                       " wan27 ",
+		" wan 2.7 ":                      " wan27 ",
 	})
 	if err != nil {
 		t.Fatalf("合法别名被判非法: %v", err)

@@ -39,6 +39,9 @@ type videoRecord struct {
 	Scene string `json:"scene,omitempty"`
 
 	// ---- 回显参数：创建时定下，此后只读 ----
+	// Watermark 客户端是否要求成片带水印（方舟原生字段，默认 false）。
+	// 决定后处理走向：false ⇒ 去水印；true ⇒ 原样交付。
+	Watermark  bool   `json:"watermark,omitempty"`
 	Resolution string `json:"resolution,omitempty"`
 	Ratio      string `json:"ratio,omitempty"`
 	Duration   int    `json:"duration,omitempty"`
