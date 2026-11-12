@@ -19,18 +19,18 @@ func TestDialogKeyPriority(t *testing.T) {
 	// 1. 显式头最高
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	r.Header.Set(dialogHeader, "abc")
-	if k, src := dialogKeyOf(r, "u1", "m", msgs); src != "header" || k != "h:abc" {
+	if k, src := dialogKeyOf(r, "u1", "m", msgs, true); src != "header" || k != "h:abc" {
 		t.Fatalf("头优先失败: %q %q", k, src)
 	}
 
 	// 2. user 次之
 	r.Header.Del(dialogHeader)
-	if k, src := dialogKeyOf(r, "u1", "m", msgs); src != "user" || k != "u:u1" {
+	if k, src := dialogKeyOf(r, "u1", "m", msgs, true); src != "user" || k != "u:u1" {
 		t.Fatalf("user 次优失败: %q %q", k, src)
 	}
 
 	// 3. 都没有 → 首条用户消息的 hash
-	k1, src := dialogKeyOf(r, "", "m", msgs)
+	k1, src := dialogKeyOf(r, "", "m", msgs, true)
 	if src != "first_message" || !strings.HasPrefix(k1, "f:") {
 		t.Fatalf("hash 兜底失败: %q %q", k1, src)
 	}
@@ -38,16 +38,16 @@ func TestDialogKeyPriority(t *testing.T) {
 	msgs2 := append(msgs,
 		ChatMessage{Role: "assistant", Content: json.RawMessage(`"好"`)},
 		ChatMessage{Role: "user", Content: json.RawMessage(`"继续"`)})
-	if k2, _ := dialogKeyOf(r, "", "m", msgs2); k2 != k1 {
+	if k2, _ := dialogKeyOf(r, "", "m", msgs2, true); k2 != k1 {
 		t.Fatalf("首条不变但键变了: %q vs %q", k1, k2)
 	}
 	// 换模型 ⇒ 换键（上游会话的 models[] 建的时候就定死了）
-	if k3, _ := dialogKeyOf(r, "", "other-model", msgs); k3 == k1 {
+	if k3, _ := dialogKeyOf(r, "", "other-model", msgs, true); k3 == k1 {
 		t.Fatal("换模型应换键")
 	}
 	// 没有 user 消息 ⇒ 不做粘性
 	empty := []ChatMessage{{Role: "system", Content: json.RawMessage(`"sys"`)}}
-	if k, src := dialogKeyOf(r, "", "m", empty); k != "" || src != "" {
+	if k, src := dialogKeyOf(r, "", "m", empty, true); k != "" || src != "" {
 		t.Fatalf("无用户消息应返回空键: %q %q", k, src)
 	}
 }
@@ -57,12 +57,12 @@ func TestDialogKeyRejectsShortAnchor(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	for _, short := range []string{"你好", "1", "继续", "在吗", "ok"} {
 		msgs := []ChatMessage{{Role: "user", Content: json.RawMessage(`"` + short + `"`)}}
-		if k, src := dialogKeyOf(r, "", "m", msgs); k != "" || src != "" {
+		if k, src := dialogKeyOf(r, "", "m", msgs, true); k != "" || src != "" {
 			t.Fatalf("短首句 %q 不该产生对话键，得到 %q/%q", short, k, src)
 		}
 	}
 	// 但显式 key 不受长度限制
-	if k, _ := dialogKeyOf(r, "user-x", "m", []ChatMessage{{Role: "user", Content: json.RawMessage(`"1"`)}}); k != "u:user-x" {
+	if k, _ := dialogKeyOf(r, "user-x", "m", []ChatMessage{{Role: "user", Content: json.RawMessage(`"1"`)}}, true); k != "u:user-x" {
 		t.Fatalf("显式 user 不该被长度限制影响: %q", k)
 	}
 }
@@ -74,8 +74,8 @@ func TestDialogKeyIncludesSystem(t *testing.T) {
 
 	a := []ChatMessage{{Role: "system", Content: json.RawMessage(`"你是翻译助手"`)}, user}
 	b := []ChatMessage{{Role: "system", Content: json.RawMessage(`"你是客服机器人"`)}, user}
-	ka, _ := dialogKeyOf(r, "", "m", a)
-	kb, _ := dialogKeyOf(r, "", "m", b)
+	ka, _ := dialogKeyOf(r, "", "m", a, true)
+	kb, _ := dialogKeyOf(r, "", "m", b, true)
 	if ka == kb {
 		t.Fatalf("不同 system 应算出不同键: %q", ka)
 	}
@@ -83,7 +83,7 @@ func TestDialogKeyIncludesSystem(t *testing.T) {
 	c := append(a,
 		ChatMessage{Role: "assistant", Content: json.RawMessage(`"ok"`)},
 		ChatMessage{Role: "user", Content: json.RawMessage(`"再来一遍"`)})
-	if kc, _ := dialogKeyOf(r, "", "m", c); kc != ka {
+	if kc, _ := dialogKeyOf(r, "", "m", c, true); kc != ka {
 		t.Fatalf("多轮后键变了: %q vs %q", ka, kc)
 	}
 }
@@ -244,15 +244,93 @@ func TestAgentDialogDisabled(t *testing.T) {
 }
 
 // 普通模型不受影响：即使带了 user 也不进对话表。
-func TestPlainModelIgnoresDialog(t *testing.T) {
+// 普通文本也吃粘性（2026-11-12 扩围）：两轮纯追加 ⇒ 复用会话 + 只发增量。
+//
+// 线上数据推翻了旧结论"普通 t2t 复用会话换不到收益"：submit 与 prompt 大小
+// 单调相关（<2k→1039ms，10-20k→3575ms），而 prompt 大正是因为每轮重发全量历史。
+func TestPlainModelStickyWithDelta(t *testing.T) {
 	up := newFakeUpstream(t, 0)
 	up.dynamicChats = true
 	h := newTestServer(t, up, 2, nil)
 
-	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,"user":"u-1",
-		"messages":[{"role":"user","content":"你好"}]}`))
-	if got := up.gotSubmit["parentId"]; got != "" {
-		t.Fatalf("普通模型不该有 parentId: %v", got)
+	const first = "帮我解释一下 TCP 三次握手为什么必须三次而不是两次"
+
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,
+		"messages":[{"role":"user","content":"`+first+`"}]}`))
+	chat1 := up.gotSubmit["chatId"]
+	// 首轮没有可复用的会话 ⇒ 必须全量拼接（含"当前问题"包装或直出原文）。
+	if c := submitContent(t, up); c == "" {
+		t.Fatal("首轮应提交非空 prompt")
+	}
+
+	// 第二轮：纯追加（上一轮原样 + assistant + 新 user）⇒ 复用 + 增量。
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,
+		"messages":[{"role":"user","content":"`+first+`"},
+		            {"role":"assistant","content":"因为要确认双方的收发能力"},
+		            {"role":"user","content":"那四次挥手呢"}]}`))
+	if got := up.gotSubmit["chatId"]; got != chat1 {
+		t.Fatalf("普通文本第二轮应复用同一会话，%v → %v", chat1, got)
+	}
+	if c := submitContent(t, up); c != "那四次挥手呢" {
+		t.Fatalf("纯追加时应只发增量，实际 content=%q", c)
+	}
+}
+
+// 客户端改写过历史（上下文压缩/摘要）⇒ 必须回退全量。
+//
+// 这是"只发增量"的唯一安全前提：模型看不到被改写的内容，会一本正经地
+// 按残缺上下文回答——那种错比慢严重得多。
+func TestPlainModelRewrittenHistoryFallsBack(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	up.dynamicChats = true
+	h := newTestServer(t, up, 2, nil)
+
+	const first = "帮我解释一下 TCP 三次握手为什么必须三次而不是两次"
+	// 第一轮、第二轮纯追加，建立"上一轮形态"的指纹。
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,
+		"messages":[{"role":"user","content":"`+first+`"}]}`))
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,
+		"messages":[{"role":"user","content":"`+first+`"},
+		            {"role":"assistant","content":"因为要确认双方收发能力"},
+		            {"role":"user","content":"那四次挥手呢"}]}`))
+	if c := submitContent(t, up); c != "那四次挥手呢" {
+		t.Fatalf("前置条件：这一轮应是增量，实际 %q", c)
+	}
+	chatBefore := up.gotSubmit["chatId"]
+
+	// 第三轮：首条 user 不变（对话键仍命中），但中间那条 assistant 被改成了摘要。
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,
+		"messages":[{"role":"user","content":"`+first+`"},
+		            {"role":"assistant","content":"【摘要】三次握手的目的是确认收发能力"},
+		            {"role":"user","content":"那四次挥手呢"},
+		            {"role":"assistant","content":"四次挥手是断开连接的过程"},
+		            {"role":"user","content":"总结一下"}]}`))
+	got := submitContent(t, up)
+	if !strings.Contains(got, "对话历史") {
+		t.Fatalf("历史被改写后必须回退全量拼接，实际 content=%q", got)
+	}
+	// 且必须换新会话：把全量再塞进旧会话会留下两份矛盾的历史。
+	if chatNow := up.gotSubmit["chatId"]; chatNow == chatBefore {
+		t.Fatalf("改写历史后应丢弃旧会话，实际仍用 %v", chatNow)
+	}
+}
+
+// 普通文本不走 user 字段当对话键：那是终端用户 ID，一个用户开多个对话会串。
+func TestPlainModelKeyIgnoresUser(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	up.dynamicChats = true
+	h := newTestServer(t, up, 2, nil)
+
+	const a = "第一个对话的开场白，足够长以通过锚点下限"
+	const b = "第二个对话的开场白，内容完全不同但同样足够长"
+
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,"user":"same-user",
+		"messages":[{"role":"user","content":"`+a+`"}]}`))
+	chatA := up.gotSubmit["chatId"]
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,"user":"same-user",
+		"messages":[{"role":"user","content":"`+b+`"}]}`))
+	if got := up.gotSubmit["chatId"]; got == chatA {
+		t.Fatal("同一个 user 下的两段不同对话不能被并成一段（会泄漏上下文）")
 	}
 }
 

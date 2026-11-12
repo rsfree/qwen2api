@@ -22,8 +22,13 @@ import (
 const (
 	// dialogTTL 一段对话多久不活跃就回收。Agent 对话停 15 分钟基本等于结束。
 	dialogTTL = 15 * time.Minute
-	// dialogMax 最多记多少段对话。超了按 LRU 淘汰（池子有几千号，但活跃对话没那么多）。
-	dialogMax = 200
+	// dialogMax 最多记多少段对话。超了按 LRU 淘汰。
+	//
+	// 2026-11-12 从 200 提到 1000：粘性从 Agent 扩到**所有文本模型**之后，
+	// 活跃对话数从"几个长任务"变成"几十个短对话"，200 条会频繁 LRU 淘汰
+	// （淘汰 = 下一轮必 miss = 白丢一次 cache）。一条记录约 200 字节，
+	// 1000 条也就 200KB，不值得为它省。
+	dialogMax = 1000
 
 	// dialogHeader 显式对话 id 的请求头。
 	dialogHeader = "X-Dialog-Id"
@@ -44,6 +49,14 @@ type dialogEntry struct {
 	parentID string // 下一轮要用的 parentId（= 上一轮的 response_id）
 	model    string
 	lastUsed time.Time
+	// prevLen / prevFP 上一轮 messages 的条数与指纹。
+	//
+	// 用途：判断本轮是**纯追加**（客户端把上一轮原样带上、只多了一条
+	// assistant + 一条 user）还是**改写过**（上下文压缩、摘要、编辑历史）。
+	// 只有纯追加才能只发增量 —— 改写过的历史如果只发最后一句，模型就
+	// 看不到被改动的内容，会答得一本正经地错。
+	prevLen int
+	prevFP  string
 	// prevInput 上一轮的输入 token 数（上游 usage.prompt_tokens）。
 	//
 	// 用途只有一个：上游在某些链路**不报** cached_tokens 时，用它估算缓存量
@@ -213,6 +226,45 @@ func (d *dialogStore) snapshot() map[string]any {
 	return map[string]any{"entries": live, "ttl_s": int(d.ttl.Seconds()), "max": d.max}
 }
 
+// ---------- 纯追加判定 ----------
+
+// dialogFingerprint 一段 messages 的稳定指纹。
+//
+// 用 role + 原始 content 逐条喂进 sha256（不 marshal JSON：字段顺序、空白
+// 差异都会让同一段历史算出不同指纹，那是误判的来源）。
+func dialogFingerprint(msgs []ChatMessage) string {
+	if len(msgs) == 0 {
+		return ""
+	}
+	h := sha256.New()
+	for _, m := range msgs {
+		h.Write([]byte(strings.ToLower(strings.TrimSpace(m.Role))))
+		h.Write([]byte{0})
+		h.Write(m.Content)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)[:12])
+}
+
+// appendOnly 本轮 messages 是否**只是**上一轮的原样追加。
+//
+// 判据：本轮去掉尾部新增后，前 prevLen 条的指纹必须与上一轮完全一致。
+// 这是"能不能只发增量"的唯一前提 —— 客户端一旦压缩/改写历史（很常见），
+// 增量就会让模型看不到被改的内容，而它会一本正经地按残缺上下文回答。
+//
+// 返回 false 时调用方必须退回全量拼接（旧版本行为）。
+func (d *dialogStore) appendOnly(key string, msgs []ChatMessage) bool {
+	e := d.peek(key)
+	if e == nil || e.prevLen <= 0 || e.prevFP == "" {
+		return false
+	}
+	// 必须真的变长了，否则是重放同一个请求（不能当成"新的一轮"）。
+	if len(msgs) <= e.prevLen {
+		return false
+	}
+	return dialogFingerprint(msgs[:e.prevLen]) == e.prevFP
+}
+
 // ---------- 对话键 ----------
 
 // dialogKeyOf 决定"这个请求属于哪段对话"。返回空串 = 不做粘性（退回无状态）。
@@ -230,12 +282,17 @@ func (d *dialogStore) snapshot() map[string]any {
 // ⚠️ 第 3 级会撞键：两段不同对话首句相同（比如都是"你好"）时会被算成同一段。
 // 所以 hash 里带上 model 缩小碰撞面，并且这是**最末一级** —— 客户端只要传
 // X-Dialog-Id 或 user 就不会走到这里。
-func dialogKeyOf(r *http.Request, user, model string, messages []ChatMessage) (key, source string) {
+func dialogKeyOf(r *http.Request, user, model string, messages []ChatMessage, allowUser bool) (key, source string) {
 	if v := strings.TrimSpace(r.Header.Get(dialogHeader)); v != "" {
 		return "h:" + v, "header"
 	}
-	if v := strings.TrimSpace(user); v != "" {
-		return "u:" + v, "user"
+	// 🔴 allowUser 只对 Agent 开：普通文本的 `user` 是"终端用户 ID"，
+	// 一个用户同时开三个对话时，拿它当键会把三段无关对话并成一段 ——
+	// 表现是答非所问 + 泄漏别的对话的上下文，比慢严重得多。
+	if allowUser {
+		if v := strings.TrimSpace(user); v != "" {
+			return "u:" + v, "user"
+		}
 	}
 	if anchor := dialogAnchor(model, messages); anchor != "" {
 		sum := sha256.Sum256([]byte(anchor))

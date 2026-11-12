@@ -217,17 +217,34 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	upModel, spec, isAgent := agentSpecFor(routeModel)
 	spec.Files = files
 	spec.ImageRefs = imgRefs
-	// 对话粘性只对 Agent 生效：普通 t2t 每轮把历史拍平进 prompt，
-	// 复用上游会话换不到 cache 收益（cache 作用在 agent 那段系统提示上），
-	// 却要把对话钉死在一个号上 —— 不划算。
+	// 对话粘性对**所有文本模型**生效（2026-11-12 扩围）。
+	//
+	// 原来的判断是"普通 t2t 复用会话换不到 cache 收益"——线上数据推翻了它：
+	// 普通文本的 submit 与 prompt 大小单调相关（<2k → 1039ms，10-20k → 3575ms，
+	// 首字 9.9s），而 prompt 之所以大，正是因为每轮都把全量历史重新发一遍。
+	// 复用上一轮会话 ⇒ 只发增量 ⇒ prompt 回到 1k 级，这是唯一有效的降首字手段。
+	//
+	// 拿不到会话（首轮 / 并发 / 换号）仍然是"新建空会话 + 全量拼接"，那是兜底。
 	dlgKey := ""
-	if isAgent && s.conf().DialogStickyEnabled() {
-		dlgKey, _ = dialogKeyOf(r, req.User, upModel, req.Messages)
+	if s.conf().DialogStickyEnabled() {
+		// allowUser 只给 Agent：普通文本的 user 是终端用户 ID，多对话会串。
+		dlgKey, _ = dialogKeyOf(r, req.User, upModel, req.Messages, isAgent)
 	}
 	ps := submitPrompts{Full: prompt, Delta: flat.LastUser}
 	// 文本附件是内联进 prompt 的（appendTextAttachments），增量里没有它们。
 	// 一旦本轮带附件就强制走全量，否则粘性命中时附件内容会凭空消失。
 	if len(textFiles) > 0 {
+		ps.Delta = ""
+	}
+	// 🔴 增量还有一个硬前提：本轮 messages 必须是上一轮的**纯追加**。
+	// 客户端做过上下文压缩/摘要/编辑历史时，只发最后一句会让模型看不到
+	// 被改写的内容 —— 它会一本正经地按残缺上下文回答。
+	//
+	// 而且回退必须**彻底**：不能"复用旧会话 + 发全量"，那会把完整历史再往
+	// 会话里写一遍，留下两份互相矛盾的历史。正确做法是丢掉这段对话、
+	// 按全新对话处理（新会话 + 全量），也就是旧版本的行为。
+	if ps.Delta != "" && dlgKey != "" && !s.dialogs.appendOnly(dlgKey, req.Messages) {
+		s.dialogs.drop(dlgKey)
 		ps.Delta = ""
 	}
 	sd, err := s.openUpstreamSpec(r.Context(), s.blobBase(r), upModel, gear, ps, spec, dlgKey)
@@ -934,6 +951,10 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 	entry.Chars = chars
 	entry.Tools = tools.String()
 	applyUsage(entry, usage, usageOut, cacheEst)
+	// 只有成功收尾才记录本轮形态：下一轮靠它判断"是不是纯追加"。
+	// 失败路径不记 —— 那时上游会话里可能缺这一轮的完整历史，记了会让
+	// 下一轮误判成"纯追加"从而只发增量，模型就看不到这一段。
+	sd.rememberShape(req.Messages)
 	entry.DurationMS = time.Since(start).Milliseconds()
 	s.addReq(entry)
 }
@@ -1023,8 +1044,18 @@ func (s *Server) serveChatOnce(w http.ResponseWriter, r *http.Request, sd *opene
 	entry.Chars = len([]rune(content))
 	entry.FirstByteMS = time.Since(start).Milliseconds()
 	applyUsage(entry, usage, usageOut, cacheEst)
+	sd.rememberShape(req.Messages)
 	entry.DurationMS = time.Since(start).Milliseconds()
 	s.addReq(entry)
+}
+
+// rememberShape 记录本轮 messages 的形态，供下一轮判断是否纯追加。
+func (sd *opened) rememberShape(msgs []ChatMessage) {
+	if sd == nil || sd.dialog == nil || len(msgs) == 0 {
+		return
+	}
+	sd.dialog.prevLen = len(msgs)
+	sd.dialog.prevFP = dialogFingerprint(msgs)
 }
 
 // writeChunk 写一个 OpenAI SSE 块。
