@@ -46,6 +46,10 @@ var Fields = []Field{
 		Hint: "写进 extra.meta.model；空 = 上游默认"},
 	{Key: "image_timeout_s", Label: "生图单次超时（秒）", Type: "int", Min: 30, Max: 900, Hot: true,
 		Hint: "单次上游尝试的预算。实测出图 60s、最慢 137s；超时会换号再试一次（最坏 2×）"},
+	{Key: "model_aliases", Label: "文本模型别名", Type: "kv", Hot: true,
+		Hint: "客户端传的名字 → 上游模型名，每行一条 `旧名=新名`。" +
+			"用于上游下架模型后救急（如 qwen3.5-plus=qwen3.7-plus）；" +
+			"只在路由层生效，响应仍回显客户端原名。留空 = 不启用"},
 	{Key: "blob_base_url", Label: "图片托管公网基址", Type: "string", Hot: true,
 		Hint: "data URI/base64 图片会落到 {它}/v1/blobs/<id> 由上游来拉；必须是公网域名"},
 

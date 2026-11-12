@@ -338,6 +338,20 @@ type Config struct {
 	ImageTimeoutS int   `json:"image_timeout_s"`
 	Video         Video `json:"video"`
 
+	// ModelAliases 文本模型别名：**客户端传的名字 → 上游模型名**。
+	//
+	// 存在理由只有一个：上游会下架模型（2026-11-12 qwen3.5-plus 下线，
+	// 客户端仍在校验名单里缓存着它，全部 404）。别名让网关侧一行配置就能
+	// 把老名字接到还在的模型上，不必等每个客户端改配置。
+	//
+	// 🔴 两条纪律：
+	//   - 只在**路由层**生效：响应体的 model 仍回显客户端原名，客户端无需感知；
+	//   - 只替换**一次**：a→b 且 b→c 时 a 只会变成 b，不做递归（避免配置
+	//     写错时出现环，也避免"看起来能跑、实际跑到哪层不确定"）。
+	//
+	// 与 video.aliases 的区别：那个映射到**内核**，这个映射到**上游模型 id**。
+	ModelAliases map[string]string `json:"model_aliases,omitempty"`
+
 	Upstream Upstream  `json:"upstream"`
 	Pool     Pool      `json:"pool"`
 	Panel    Panel     `json:"panel"`
@@ -442,6 +456,7 @@ func Default() Config {
 		Listen:          ":8400",
 		DefaultModel:    "qwen3.7-plus",
 		DefaultThinking: "auto",
+		ModelAliases:    map[string]string{},
 		StateFile:       "./data/state.json",
 		ImageModel:      "qwen-image-3.0",
 		ImageTimeoutS:   DefaultImageTimeoutS,
@@ -683,6 +698,17 @@ func (u Upstream) Timeout() time.Duration { return time.Duration(u.TimeoutS) * t
 // ConnectTimeout 建连超时。
 func (u Upstream) ConnectTimeout() time.Duration {
 	return time.Duration(u.ConnectS) * time.Second
+}
+
+// RouteModel 按 model_aliases 把客户端模型名换成上游模型名。
+//
+// 返回空串 = 没有配这个别名（调用方沿用原名）。只查一层，不做链式替换 ——
+// 见 ModelAliases 的注释。
+func (c Config) RouteModel(model string) string {
+	if len(c.ModelAliases) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(c.ModelAliases[strings.TrimSpace(model)])
 }
 
 // ReasoningEnabled 是否透出思考内容（默认 true）。

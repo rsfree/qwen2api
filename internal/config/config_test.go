@@ -121,3 +121,28 @@ func TestNormalizeURLs(t *testing.T) {
 		t.Fatalf("尾斜杠未去掉: %q", cfg.Upstream.BaseURL)
 	}
 }
+
+// 文本模型别名只替换一层，不递归 —— 递归会在配置写错时产生环或"实际跑到
+// 哪一层不确定"，那比没有别名更难查。
+func TestRouteModel(t *testing.T) {
+	c := Default()
+	c.ModelAliases = map[string]string{"qwen3.5-plus": "qwen3.7-plus"}
+
+	if got := c.RouteModel("qwen3.5-plus"); got != "qwen3.7-plus" {
+		t.Fatalf("别名应命中，得到 %q", got)
+	}
+	// 没配的模型返回空串（调用方沿用原名）。
+	if got := c.RouteModel("qwen3.8-max"); got != "" {
+		t.Fatalf("未配置应返回空串，得到 %q", got)
+	}
+	// 单层：a→b 且 b→c 时，a 只会变成 b。
+	c.ModelAliases["qwen3.7-plus"] = "qwen4.0-max-preview"
+	if got := c.RouteModel("qwen3.5-plus"); got != "qwen3.7-plus" {
+		t.Fatalf("不得递归替换，得到 %q", got)
+	}
+	// 空配置不 panic。
+	empty := Default()
+	if got := empty.RouteModel("x"); got != "" {
+		t.Fatalf("空配置应返回空串，得到 %q", got)
+	}
+}

@@ -65,6 +65,10 @@ type Entry struct {
 	// Dialog 对话粘性命中情况：hit = 复用了上一轮的会话（吃到 prompt cache），
 	// new = 新建（无粘性/首轮/并发降级）。这是"省没省到钱"的唯一直接指标。
 	Dialog string `json:"dialog,omitempty"`
+	// Alias 本轮用到的文本模型别名（形如 `qwen3.5-plus→qwen3.7-plus`）。
+	// 响应体仍回显客户端原名，只有流水能看到它被路由到了哪个模型 ——
+	// 上游下架模型后，"看起来还在用老名字但其实跑在新模型上"必须可查。
+	Alias string `json:"alias,omitempty"`
 	// Prompt 本轮实际提交的 prompt 形态：delta = 只发本轮输入（复用会话，
 	// 历史靠上游会话链）；full = 拼接了 system + 全部历史（首轮/降级/带附件）。
 	// 与 Dialog 一起看才能证明"降级真的退回了全量拼接"，而不是想当然。
@@ -196,6 +200,9 @@ func (l *Log) Add(e Entry) {
 		}
 		if e.Prompt != "" {
 			line += " prompt=" + e.Prompt
+		}
+		if e.Alias != "" {
+			line += " alias=" + e.Alias
 		}
 		// 缓存命中：粘性只说明"同一个会话"，命中要靠这个数证明。
 		if e.CachedTokens > 0 {

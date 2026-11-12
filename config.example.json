@@ -7,6 +7,8 @@
   "default_model": "qwen3.7-plus",
   "// default_thinking": "auto = 自动（前端默认）/ thinking = 强制思考 / fast = 关闭思考（首字最快）",
   "default_thinking": "auto",
+  "// model_aliases": "文本模型别名：客户端传的名字 → 上游模型名。用于上游下架模型后救急（如 qwen3.5-plus=qwen3.7-plus）；只在路由层生效，响应仍回显客户端原名",
+  "model_aliases": {},
   "// image_model": "图片内核：写进 extra.meta.model。它也会作为 media=image 的模型出现在 /v1/models（endpoint=/v1/images/generations）。上游模型表里没有这个 id，别把它当 chat 模型发给 chats/new —— 网关会替你翻译",
   "blob_base_url": "https://qwen2api.example.com",
   "// image_timeout_s": "单次生图尝试的时间预算（秒），默认 300。真跑实测出图在 60s、历史最慢双参考图 137s；早先硬编码 150s 会把“快好了”的请求掐断。注意零产物超时会换号再试一次，最坏等 2×该值",

@@ -38,6 +38,17 @@ var errCreditsShort = errors.New("账号积分余额不足")
 // 这个是**我们**主动不去撞上游硬限（打到硬限只会静默挂起 180s，体验更差）。
 var errImageQuotaLocal = errors.New("本地每日出图配额已用尽")
 
+// routeModel 应用文本模型别名（config.ModelAliases），返回上游模型名与观测标记。
+//
+// alias 形如 "qwen3.5-plus→qwen3.7-plus"，只进流水 —— 响应体的 model 字段
+// 仍回显客户端原名，否则客户端会以为自己发的模型被改了。
+func (s *Server) routeModel(model string) (route, alias string) {
+	if to := s.conf().RouteModel(model); to != "" {
+		return to, model + "→" + to
+	}
+	return model, ""
+}
+
 // submitPrompts 一次提交可用的两份文本。
 //
 // 🔴 为什么需要两份（2026-11-12 用户要求）：粘性命中时上游会话里已经有前几轮
@@ -178,10 +189,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = s.conf().DefaultModel
 	}
+	// 别名在**路由层**生效：上游用目标名，响应/流水仍用客户端原名（旧名字）。
+	routeModel, alias := s.routeModel(model)
 	// 清单里同时列了图片/视频模型（见 mediaModels）。拿它们调 chat 时给一句
 	// 能指导处置的话 —— 不拦的话模型名会被甩给上游，换回一个 Bad_Request，
 	// 调用方只会以为"网关坏了"。
-	if ep := s.mediaEndpoint(model); ep != "" {
+	if ep := s.mediaEndpoint(routeModel); ep != "" {
 		entry.Model = model
 		entry.Status = http.StatusBadRequest
 		entry.Error = "生成模型不能用于 chat: " + model
@@ -192,6 +205,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	gear := req.ResolveThinking(s.conf().DefaultThinking)
 	entry.Model = model
+	entry.Alias = alias
 	entry.Stream = req.Stream
 	entry.Degraded = flat.Degraded
 
@@ -200,7 +214,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 🔴 上游模型名与对外模型名要分开：客户端传 qwen3.8-max-agent，
 	// 上游只认 qwen3.8-max（§10.2）。model 变量保持原名，响应体里的 model
 	// 字段才不会变脸；upModel 只用于提交。
-	upModel, spec, isAgent := agentSpecFor(model)
+	upModel, spec, isAgent := agentSpecFor(routeModel)
 	spec.Files = files
 	spec.ImageRefs = imgRefs
 	// 对话粘性只对 Agent 生效：普通 t2t 每轮把历史拍平进 prompt，
