@@ -455,7 +455,16 @@ func (s *Server) validateVideoRequest(req *VideoRequest) (*videoPlan, *videoReje
 	if sfx.Audio != nil {
 		audio = sfx.Audio
 	}
-	plan.Audio = audio != nil && *audio
+	if audio == nil {
+		// 与 resolution / ratio / duration 同口径：请求没给就回落到配置默认。
+		//
+		// 之前这里写的是 `audio != nil && *audio`，于是 config.video.audio 成了
+		// 一句注释 —— 默认值填 true，不传 generate_audio 仍然发 false 给上游。
+		// 默认值只有被消费才算数；否则面板上看起来是「开」，实际产物没声。
+		def := s.conf().Video.Audio
+		audio = &def
+	}
+	plan.Audio = *audio
 	plan.EchoAudio = plan.Audio
 
 	if req.Frames != nil {

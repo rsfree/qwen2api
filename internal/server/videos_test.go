@@ -941,3 +941,54 @@ func TestVideoModelsListAliases(t *testing.T) {
 		t.Fatalf("模型清单里没有别名 %q", alias)
 	}
 }
+
+// bizAudio 从上游提交体里取 biz_data.req.params.audio。
+func bizAudio(t *testing.T, body map[string]any) bool {
+	t.Helper()
+	req, _ := bizDataOf(t, body)["req"].(map[string]any)
+	params, _ := req["params"].(map[string]any)
+	b, _ := params["audio"].(bool)
+	return b
+}
+
+// TestVideoAudioDefaultsToConfig 不传 generate_audio 时必须落 config.video.audio。
+//
+// 这条断言盯的是「配置有没有被消费」：旧实现是 `audio != nil && *audio`，
+// 于是 config.video.audio=true 从来没生效过 —— 接口一路 200、积分照扣，
+// 产物却静音，而面板上看起来「默认开」。
+func TestVideoAudioDefaultsToConfig(t *testing.T) {
+	up := newVideoUpstream(t, 100)
+	h := newVideoServer(t, up, func(c *config.Config) { c.Video.Audio = true })
+
+	rec := postVideo(h, videoBody(""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("应成功，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	up.mu.Lock()
+	body := up.lastSubmit
+	up.mu.Unlock()
+	if got := bizAudio(t, body); !got {
+		t.Fatalf("配置默认开且请求未带 generate_audio 时，上游应收到 audio=true，实际 %v", got)
+	}
+}
+
+// TestVideoAudioExplicitFalseWins 显式 false 必须压过配置默认。
+//
+// 默认值只能填「没说的时候」，不能覆盖调用方的明确意图。
+func TestVideoAudioExplicitFalseWins(t *testing.T) {
+	up := newVideoUpstream(t, 100)
+	h := newVideoServer(t, up, func(c *config.Config) { c.Video.Audio = true })
+
+	rec := postVideo(h, videoBody(`"generate_audio":false`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("应成功，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	up.mu.Lock()
+	body := up.lastSubmit
+	up.mu.Unlock()
+	if got := bizAudio(t, body); got {
+		t.Fatal("显式 generate_audio=false 应压过配置默认，实际上游收到了 audio=true")
+	}
+}
