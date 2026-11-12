@@ -348,3 +348,43 @@ func submitContent(t *testing.T, up *fakeUpstream) string {
 	s, _ := msg["content"].(string)
 	return s
 }
+
+// 粘性失败后必须把那段对话从表里删掉，否则下一轮会 borrow 到同一个坏会话
+// 再撞一次 —— 这正是"报错了就回退负载其他号"缺的那一半。
+//
+// 之前 dialogEntry.created 注释写着"失败时要回收"，但那个字段**从没被读过**，
+// 等于失效会话永远留在表里（2026-11-12 修）。
+func TestDialogDroppedOnFailure(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	up.dynamicChats = true
+	s := newTestServerWithServer(t, up, 1)
+	h := s.Handler()
+
+	// 第一轮成功 ⇒ 绑定一段对话。
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.8-flash-agent","stream":false,"user":"u-drop",
+		"messages":[{"role":"user","content":"记住数字 9"}]}`))
+	if got := s.dialogs.snapshot()["entries"].(int); got != 1 {
+		t.Fatalf("首轮成功后应有 1 段对话，得到 %d", got)
+	}
+
+	// 第二轮：上游 500（快速失败，会换号重试但池里只有 1 个号）⇒ 整轮失败。
+	up.fail500 = 8
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.8-flash-agent","stream":false,"user":"u-drop",
+		"messages":[{"role":"user","content":"记住数字 9"},
+		            {"role":"assistant","content":"好"},
+		            {"role":"user","content":"9 的平方"}]}`))
+
+	if got := s.dialogs.snapshot()["entries"].(int); got != 0 {
+		t.Fatalf("失败后对话应被回收，仍残留 %d 条", got)
+	}
+	up.fail500 = 0
+
+	// 第三轮：必须是新会话（dlg=new），不能复用坏的那个。
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.8-flash-agent","stream":false,"user":"u-drop",
+		"messages":[{"role":"user","content":"记住数字 9"},
+		            {"role":"assistant","content":"好"},
+		            {"role":"user","content":"9 的平方"}]}`))
+	if got := up.gotSubmit["chatId"]; got == "chat-1" {
+		t.Fatalf("失败后应换新会话，实际仍用 chat-1")
+	}
+}

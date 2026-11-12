@@ -302,7 +302,16 @@ func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear str
 		}
 		if acct == nil {
 			var ok bool
-			acct, ok = s.pool.Pick()
+			// Agent 先挑**空闲号**：上游对 agent 是账号级并发槽 = 1，
+			// 而本地 max_inflight_per_account 默认 2。直接 Pick 会选到正在跑
+			// 另一个 agent 的号上，撞 user.too_many_concurrent 再白等 1.2 秒。
+			// 挑不到空闲号才退回普通 Pick —— 宁可等，也不能没号。
+			if spec.ChatType == upstream.AgentChatType {
+				acct, ok = s.pool.PickIdle()
+			}
+			if acct == nil {
+				acct, ok = s.pool.Pick()
+			}
 			if !ok {
 				// 🔴 这里也要带上"最后尝试的号"：只有 1 个号时，第二轮 Pick 就失败，
 				// 走这条分支返回的裸 lastErr 会让流水 acct= 空（2026-10-30 抓到）。
@@ -360,6 +369,13 @@ func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear str
 		if dlg != nil {
 			// 这一轮失败且马上可能换号：粘住的 chat_id 随号一起作废，
 			// 不 write parentId（写进去等于把失败的这一轮记成历史）。
+			//
+			// 🔴 必须真的从表里删掉，不能只解锁（2026-11-12 修：原来那个
+			// "created 标记失败时回收"的字段**从来没有被读过**，等于失效会话
+			// 一直留在表里，下一轮 borrow 到同一个坏 chat_id 再撞一次）。
+			// 用户口径："报错了就回退到别的号" —— 宁可丢一次 cache，
+			// 也不要在一条已经不可信的会话上反复失败。
+			s.dialogs.drop(dlgKey)
 			dlg.done()
 			dlg = nil
 		}
@@ -844,6 +860,9 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 	if streamErr != nil {
 		entry.Error = streamErr.Error()
 		if r.Context().Err() == nil {
+			// 上游明确报错（不是客户端断开）⇒ 这段对话别再复用：
+			// 下一轮 borrow 到它只会把同一个错再撞一次。
+			s.dialogs.drop(sd.dialogKey)
 			// 流内错误同样只给标准英文：详细原因留在 entry.Error。
 			typ, msg := clientError(http.StatusBadGateway, errTypeFor(streamErr), streamErr.Error())
 			s.writeSSE(w, flusher, ErrorBody{Error: ErrorDetail{Message: msg, Type: typ}})
@@ -851,6 +870,7 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 	} else if chars == 0 && reasoningLen == 0 {
 		// 一字未出（含思考）：形态不符，必须让客户端知道，而不是回一个空回复。
 		entry.Error = upstream.ErrNoText.Error()
+		s.dialogs.drop(sd.dialogKey)
 		log.Printf("[qwen2api] 上游零文本，原始帧取证（%d 条）：%v", len(sd.stream.RawFrames()), sd.stream.RawFrames())
 		s.writeSSE(w, flusher, ErrorBody{Error: ErrorDetail{
 			Message: "upstream returned no content, please retry later",
@@ -903,6 +923,7 @@ func (s *Server) serveChatOnce(w http.ResponseWriter, r *http.Request, sd *opene
 			entry.Status = httpStatusFor(err)
 			entry.Error = err.Error()
 			entry.DurationMS = time.Since(start).Milliseconds()
+			s.dialogs.drop(sd.dialogKey)
 			s.addReq(entry)
 			writeError(w, entry.Status, errTypeFor(err), err.Error())
 			return

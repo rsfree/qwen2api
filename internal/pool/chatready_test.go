@@ -8,6 +8,7 @@ package pool
 // 这一档把"命中"从"两张表碰巧对齐"变成"选号时就知道"。
 
 import (
+	"sync/atomic"
 	"testing"
 
 	"github.com/yuanjie-ai/qwen2api/internal/config"
@@ -123,5 +124,38 @@ func TestRefreshStillBeatsChatReady(t *testing.T) {
 	defer p.Release(got)
 	if got.Name != "has_refresh" {
 		t.Fatalf("能 refresh 续期的号应优先，实际 %s", got.Name)
+	}
+}
+
+// Agent 选号必须避开"正在跑另一个 agent"的号：上游并发槽 = 1，
+// 本地允许 2 等于主动撞 user.too_many_concurrent 再白等 1.2 秒。
+func TestPickIdleSkipsBusy(t *testing.T) {
+	p := newChatReadyPool(t) // cold_a / warm / cold_b，都是 fresh token
+
+	p.mu.Lock()
+	for _, a := range p.accounts {
+		if a.Name != "cold_b" {
+			atomic.AddInt32(&a.inflight, 1)
+		}
+	}
+	p.mu.Unlock()
+
+	got, ok := p.PickIdle()
+	if !ok {
+		t.Fatal("应能挑到唯一空闲的号")
+	}
+	defer p.Release(got)
+	if got.Name != "cold_b" {
+		t.Fatalf("应跳过忙号选 cold_b，实际 %s", got.Name)
+	}
+
+	// 全忙 ⇒ 返回 false（调用方退回 Pick，宁可等也不能没号）。
+	p.mu.Lock()
+	for _, a := range p.accounts {
+		atomic.AddInt32(&a.inflight, 1)
+	}
+	p.mu.Unlock()
+	if _, ok := p.PickIdle(); ok {
+		t.Fatal("全部忙时应返回 false")
 	}
 }

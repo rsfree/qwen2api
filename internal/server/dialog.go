@@ -51,8 +51,6 @@ type dialogEntry struct {
 	// "先共享 cache，并发不够用新号"）。理由：agent 一轮 10s~3min，排队会让调用方
 	// 以为服务挂了；而并发共用同一个 parentId 会让上游的对话链分叉，历史错乱。
 	mu sync.Mutex
-	// created 标记"这条记录是本次请求建的"，失败时要回收（别留个空壳占位）。
-	created bool
 }
 
 // dialogStore 对话表。纯内存、不落盘。
@@ -123,7 +121,7 @@ func (d *dialogStore) bind(key, account, chatID, model string) *dialogEntry {
 		return nil
 	}
 	d.evictLocked()
-	e := &dialogEntry{account: account, chatID: chatID, model: model, lastUsed: time.Now(), created: true}
+	e := &dialogEntry{account: account, chatID: chatID, model: model, lastUsed: time.Now()}
 	if d.max > 0 && len(d.entries) >= d.max {
 		delete(d.entries, d.oldestLocked())
 	}
@@ -141,7 +139,6 @@ func (e *dialogEntry) done() {
 		return
 	}
 	e.lastUsed = time.Now()
-	e.created = false
 	e.mu.Unlock()
 }
 

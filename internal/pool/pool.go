@@ -229,6 +229,19 @@ func (p *Pool) PickForImage() (*Account, bool) {
 	return p.pick(kindImage)
 }
 
+// PickIdle 取一个**当前没有任何在途请求**的账号；没有则返回 false。
+//
+// 给 Agent 用：上游对 agent 是**账号级并发槽 = 1**（§10.10 实测），
+// 而本地 max_inflight_per_account 默认是 2 —— 同号第二个 agent 必然撞
+// `user.too_many_concurrent`，白等 1.2 秒再换号。先在本地避开忙号，
+// 比撞上去再退避划算得多。
+//
+// 返回 false 不代表池子空了（可能只是都忙）：调用方应退回 Pick，
+// 让"宁可等一会儿也比没号"这条兜底仍然成立。
+func (p *Pool) PickIdle() (*Account, bool) {
+	return p.pick(kindIdle)
+}
+
 // PickForVideo 取一个"今日视频额度还够这一次"的账号。
 //
 // needCredits 是本次视频要扣的积分（由 server 按价格表算好传入）。
@@ -338,6 +351,8 @@ const (
 	kindAny pickKind = iota
 	kindImage
 	kindVideo
+	// kindIdle 只接受"当前零在途"的号（Agent 的上游并发槽 = 1）。
+	kindIdle
 )
 
 func (p *Pool) pick(need pickKind) (*Account, bool) {
@@ -353,7 +368,13 @@ func (p *Pool) pick(need pickKind) (*Account, bool) {
 		if now.Before(a.cooldownUntil) {
 			continue
 		}
-		if int(atomic.LoadInt32(&a.inflight)) >= p.conf().MaxInflightPerAccount {
+		inflight := int(atomic.LoadInt32(&a.inflight))
+		if inflight >= p.conf().MaxInflightPerAccount {
+			continue
+		}
+		// Agent：上游并发槽是 1，本地允许 2 等于主动去撞
+		// user.too_many_concurrent。见 PickIdle。
+		if need == kindIdle && inflight > 0 {
 			continue
 		}
 		if need == kindImage && p.conf().MaxImagePerDay > 0 {
