@@ -58,6 +58,10 @@ type Entry struct {
 	// Dialog 对话粘性命中情况：hit = 复用了上一轮的会话（吃到 prompt cache），
 	// new = 新建（无粘性/首轮/并发降级）。这是"省没省到钱"的唯一直接指标。
 	Dialog string `json:"dialog,omitempty"`
+	// Prompt 本轮实际提交的 prompt 形态：delta = 只发本轮输入（复用会话，
+	// 历史靠上游会话链）；full = 拼接了 system + 全部历史（首轮/降级/带附件）。
+	// 与 Dialog 一起看才能证明"降级真的退回了全量拼接"，而不是想当然。
+	Prompt string `json:"prompt,omitempty"`
 	// Tools Agent 模式的工具执行轨迹（`bash(python3 -c ...) → completed exit=0`）。
 	// 没有它，流水里只有"耗时 11 秒"，回答不了"这 11 秒到底干了什么"。
 	Tools string `json:"tools,omitempty"`
@@ -182,6 +186,9 @@ func (l *Log) Add(e Entry) {
 		}
 		if e.Dialog != "" {
 			line += " dlg=" + e.Dialog
+		}
+		if e.Prompt != "" {
+			line += " prompt=" + e.Prompt
 		}
 		if e.ChatID != "" {
 			line += " chat_id=" + e.ChatID

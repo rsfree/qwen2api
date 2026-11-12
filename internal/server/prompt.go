@@ -17,6 +17,13 @@ var errToolsUnsupported = errors.New(
 // FlattenResult 拍平结果。
 type FlattenResult struct {
 	Prompt string
+	// LastUser 本轮用户输入的原文（只有"最后一条是 user"时才给）。
+	//
+	// 用途是**粘性命中时只发这一条**（见 submitPrompts）：上游会话里已经有
+	// 前几轮的历史，再把全量拍平文本发一遍等于把历史写进 prompt 两遍 ——
+	// 多付 token，还可能让模型对"哪份历史为准"产生歧义。
+	// 空串 = 本轮末尾不是 user（续写场景），调用方必须退回全量。
+	LastUser string
 	// Degraded 有值表示这轮做了信息损失处理（多轮/系统提示被合并），
 	// 只进服务端日志，不下发响应（对齐 rsfree 的"降级说明不下发"口径）。
 	Degraded string
@@ -64,7 +71,7 @@ func Flatten(msgs []ChatMessage) (FlattenResult, error) {
 
 	// 直出路径：单条 user 且是最后一条。
 	if len(items) == 1 && items[0].role == "user" {
-		return FlattenResult{Prompt: items[0].text}, nil
+		return FlattenResult{Prompt: items[0].text, LastUser: items[0].text}, nil
 	}
 
 	var systems []string
@@ -120,7 +127,13 @@ func Flatten(msgs []ChatMessage) (FlattenResult, error) {
 	if len(systems) > 0 {
 		degraded = joinDegraded(degraded, fmt.Sprintf("system 已并入 prompt（%d 条）", len(systems)))
 	}
-	return FlattenResult{Prompt: sb.String(), Degraded: degraded}, nil
+	// 只有末尾是 user 才给增量变体：末尾是 assistant 时上游要的是"续写"，
+	// 单独发那一条会让模型以为那是用户在说话，语义完全变了。
+	lastUser := ""
+	if last.role == "user" {
+		lastUser = strings.TrimSpace(last.text)
+	}
+	return FlattenResult{Prompt: sb.String(), LastUser: lastUser, Degraded: degraded}, nil
 }
 
 func joinDegraded(a, b string) string {

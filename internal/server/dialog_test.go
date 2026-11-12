@@ -282,3 +282,69 @@ func TestAgentDialogHashSticky(t *testing.T) {
 		t.Fatalf("parentId 未接上: %v", up.gotSubmit["parentId"])
 	}
 }
+
+// 粘性命中只发本轮增量；未命中必须回退"拼接历史"（旧版本行为）。
+//
+// 这条守的是 2026-11-12 用户提的语义：粘性只是省 token 的优化，
+// 一旦失败就得回到全量拼接 —— 上下文由我们自己保证，不依赖上游会话。
+func TestAgentDialogDeltaPrompt(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	up.dynamicChats = true
+	h := newTestServer(t, up, 2, nil)
+
+	// 首轮（未复用）：即使客户端已经带了历史，也必须发全量拼接。
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.8-flash-agent","stream":false,"user":"u-delta",
+		"messages":[{"role":"user","content":"记住数字 7"},
+		            {"role":"assistant","content":"好"},
+		            {"role":"user","content":"7 的平方是多少"}]}`))
+	first := submitContent(t, up)
+	if !strings.Contains(first, "对话历史") || !strings.Contains(first, "记住数字 7") {
+		t.Fatalf("首轮必须发全量拼接（含历史），实际 content=%q", first)
+	}
+
+	// 第二轮（复用）：只发本轮输入，历史交给上游会话链。
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.8-flash-agent","stream":false,"user":"u-delta",
+		"messages":[{"role":"user","content":"记住数字 7"},
+		            {"role":"assistant","content":"好"},
+		            {"role":"user","content":"7 的平方是多少"},
+		            {"role":"assistant","content":"49"},
+		            {"role":"user","content":"再加 1 呢"}]}`))
+	second := submitContent(t, up)
+	if second != "再加 1 呢" {
+		t.Fatalf("粘性命中只应发本轮增量，实际 content=%q", second)
+	}
+}
+
+// 同一 user 但换了模型 ⇒ 不复用会话 ⇒ 必须回到全量拼接（不能发增量）。
+func TestAgentDialogDeltaFallsBackOnNewChat(t *testing.T) {
+	up := newFakeUpstream(t, 0)
+	up.dynamicChats = true
+	h := newTestServer(t, up, 2, nil)
+
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.8-flash-agent","stream":false,"user":"u-fb",
+		"messages":[{"role":"user","content":"记住数字 8"}]}`))
+	// 第二次换 user ⇒ 不同对话 ⇒ 新会话，仍要全量。
+	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.8-flash-agent","stream":false,"user":"u-other",
+		"messages":[{"role":"user","content":"记住数字 8"},
+		            {"role":"assistant","content":"好"},
+		            {"role":"user","content":"8 的立方"}]}`))
+	got := submitContent(t, up)
+	if !strings.Contains(got, "对话历史") {
+		t.Fatalf("未复用会话时必须回退全量拼接，实际 content=%q", got)
+	}
+}
+
+// submitContent 取最后一次提交的 messages[0].content。
+func submitContent(t *testing.T, up *fakeUpstream) string {
+	t.Helper()
+	if up.gotSubmit == nil {
+		t.Fatal("没抓到 completions 请求体")
+	}
+	msgs, _ := up.gotSubmit["messages"].([]any)
+	if len(msgs) == 0 {
+		t.Fatalf("messages 为空: %v", up.gotSubmit)
+	}
+	msg, _ := msgs[0].(map[string]any)
+	s, _ := msg["content"].(string)
+	return s
+}

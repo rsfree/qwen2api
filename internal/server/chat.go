@@ -38,6 +38,38 @@ var errCreditsShort = errors.New("账号积分余额不足")
 // 这个是**我们**主动不去撞上游硬限（打到硬限只会静默挂起 180s，体验更差）。
 var errImageQuotaLocal = errors.New("本地每日出图配额已用尽")
 
+// submitPrompts 一次提交可用的两份文本。
+//
+// 🔴 为什么需要两份（2026-11-12 用户要求）：粘性命中时上游会话里已经有前几轮
+// 的历史，再发全量拍平文本等于把历史写进 prompt 两遍 —— 多付 token，也可能
+// 让模型面对两份措辞不同的历史。所以：
+//
+//	· 复用会话（hit）  ⇒ 只发本轮增量，历史交给上游会话链；
+//	· 未复用/首轮/降级 ⇒ 发全量拼接，也就是"旧版本"的行为：
+//	  上下文由我们自己保证，完全不依赖上游会话是否还活着。
+//
+// 这条也决定了降级的语义：**粘性只要没拿到，就自动回到全量拼接**，
+// 不需要额外的分支 —— For() 里一个 bool 就是全部。
+type submitPrompts struct {
+	Full  string // system + 全部历史 + 当前问题
+	Delta string // 只含本轮用户输入；空 = 没有增量形态
+}
+
+// For 按"是否复用了已有会话"挑一份；增量缺失时一律退回全量。
+func (p submitPrompts) For(reused bool) string {
+	s, _ := p.Pick(reused)
+	return s
+}
+
+// Pick 返回提交文本与形态（delta / full）。形态只用于流水观测 ——
+// "降级了但看不出来"是这类静默回退最典型的排查困境。
+func (p submitPrompts) Pick(reused bool) (text, mode string) {
+	if reused && strings.TrimSpace(p.Delta) != "" {
+		return p.Delta, "delta"
+	}
+	return p.Full, "full"
+}
+
 // opened 一次成功建立的上游会话。
 type opened struct {
 	acct   *pool.Account
@@ -59,6 +91,8 @@ type opened struct {
 	// dialogHit 本轮是否**复用**了已有对话（false = 新建）。
 	// 与 chatHit 不同：chatHit 是"命中预建空会话池"，这里是"接上了历史"。
 	dialogHit bool
+	// promptMode 本轮提交的 prompt 形态（delta / full），见 submitPrompts.Pick。
+	promptMode string
 }
 
 // handleChat `POST /v1/chat/completions`。
@@ -174,7 +208,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if isAgent && s.conf().DialogStickyEnabled() {
 		dlgKey, _ = dialogKeyOf(r, req.User, upModel, req.Messages)
 	}
-	sd, err := s.openUpstreamSpec(r.Context(), s.blobBase(r), upModel, gear, prompt, spec, dlgKey)
+	ps := submitPrompts{Full: prompt, Delta: flat.LastUser}
+	// 文本附件是内联进 prompt 的（appendTextAttachments），增量里没有它们。
+	// 一旦本轮带附件就强制走全量，否则粘性命中时附件内容会凭空消失。
+	if len(textFiles) > 0 {
+		ps.Delta = ""
+	}
+	sd, err := s.openUpstreamSpec(r.Context(), s.blobBase(r), upModel, gear, ps, spec, dlgKey)
 	if sd != nil {
 		entry.ChatHit = sd.chatHit
 		entry.ChatMS = sd.chatMS
@@ -186,6 +226,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				entry.Dialog = "new"
 			}
 		}
+		entry.Prompt = sd.promptMode
 	}
 	if err != nil {
 		entry.Account = accountOfErr(err)
@@ -227,16 +268,19 @@ func (s *Server) openUpstream(ctx context.Context, blobBase, model, gear, prompt
 	spec upstream.ChatSpec) (*opened, error) {
 	// 固定传空 key：Anthropic / Responses 前门暂不做对话粘性
 	// （它们的会话键来自 metadata，语义各不相同，先只把 chat 前门跑稳）。
-	return s.openUpstreamSpec(ctx, blobBase, model, gear, prompt, spec, "")
+	return s.openUpstreamSpec(ctx, blobBase, model, gear, submitPrompts{Full: prompt}, spec, "")
 }
 
 // openUpstreamSpec 同上，带类型规格（t2i 的图片模型 / t2v 的 biz_data 在 spec 里）。
 //
+// ps 是"全量 / 增量"两份文本（见 submitPrompts）：复用了会话就发增量，
+// 否则发全量 —— 这就是"粘性失败自动回退到拼接历史"的落点。
+//
 // dlgKey 非空 ⇒ 启用**对话粘性**（仅 Agent 模型，见 dialog.go）：
 // 第一轮先试"钉住的号 + 已有 chat_id"换 cache 命中；拿不到就换新号开新会话。
 // 绝不因为"对话正被别人用着"而阻塞或拒绝 —— 那会把一个 11 秒的任务变成 3 分钟。
-func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear, prompt string,
-	spec upstream.ChatSpec, dlgKey string) (*opened, error) {
+func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear string,
+	ps submitPrompts, spec upstream.ChatSpec, dlgKey string) (*opened, error) {
 	var lastErr error
 	lastAcct := ""
 	for attempt := 0; attempt < s.conf().Pool.MaxRotate; attempt++ {
@@ -283,7 +327,7 @@ func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear, pr
 		renewTried, busyTried := false, false
 		for {
 			var o *opened
-			o, err = s.openOnce(actx, acct, cred, model, gear, prompt, blobBase, spec, dlg, dlgKey)
+			o, err = s.openOnce(actx, acct, cred, model, gear, ps, blobBase, spec, dlg, dlgKey)
 			if err == nil {
 				o.acct = acct
 				return o, nil
@@ -436,8 +480,8 @@ func (s *Server) prewarmChat(ctx context.Context, acctName, cred, model, chatTyp
 //
 // dlg 非 nil = 复用已有对话（跳过 chats/new，且命中 prompt cache）。
 // 复用不带 parentID 为空的可能：首轮对话的 parentID 本来就是 ""（§10.4）。
-func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model, gear, prompt, blobBase string,
-	spec upstream.ChatSpec, dlg *dialogEntry, dlgKey string) (*opened, error) {
+func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model, gear string,
+	ps submitPrompts, blobBase string, spec upstream.ChatSpec, dlg *dialogEntry, dlgKey string) (*opened, error) {
 
 	attempt := spec
 	if len(spec.ImageRefs) > 0 {
@@ -467,7 +511,11 @@ func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model,
 			return nil, err
 		}
 	}
-	body := upstream.BuildSubmitSpec(chatID, parentID, model, prompt, gear, attempt, time.Now())
+	// 增量只在"确定的链式复用"下才成立：parentID 非空说明上一轮真的写回了
+	// response_id，会话链是连续的。parentID 为空（上任一轮失败/首轮绑定）时
+	// 上游会把这条当会话首消息 —— 此时发增量就等于把历史丢了。
+	submitText, promptMode := ps.Pick(reused && parentID != "")
+	body := upstream.BuildSubmitSpec(chatID, parentID, model, submitText, gear, attempt, time.Now())
 	tSubmit := time.Now()
 	st, err := s.up.OpenChat(actx, cred, body)
 	submitMS := time.Since(tSubmit).Milliseconds()
@@ -486,6 +534,7 @@ func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model,
 		stream: st, chatID: chatID, chatHit: hit, chatMS: chatMS,
 		submitMS: submitMS, submitAt: tSubmit,
 		dialog: dlg, dialogKey: dlgKey, dialogHit: reused,
+		promptMode: promptMode,
 	}, nil
 }
 
