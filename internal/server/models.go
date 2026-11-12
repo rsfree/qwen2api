@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -82,6 +83,13 @@ type ModelCache struct {
 	lastErr string
 	fetches int
 	ttl     time.Duration
+	// agents Agent 模式的**底座清单**（`GET /api/v2/models/agent_mode`）。
+	//
+	// 与 entries 分开存：这是"哪些模型能当 agent 底座"，不是"哪些模型能做对话"。
+	// 2026-11-12 之前 agent 目录是硬编码两个，上游上 qwen4 后完全不会发现 ——
+	// 现在每次刷新顺带拉一次，清单自动跟上。
+	agents   []upstream.ModelEntry
+	agentsAt time.Time
 
 	up   *upstream.Client
 	pool *pool.Pool
@@ -149,6 +157,12 @@ func (c *ModelCache) refresh(ctx context.Context) {
 		return
 	}
 	entries, err := c.up.ListModels(ctx, acct.Token)
+	// 顺带拉 Agent 底座清单：同一个号、同一个 TTL，多一次 GET 换"自动发现"。
+	// 失败不影响主清单（agents 保持上一份，不再更新即可）。
+	var agents []upstream.ModelEntry
+	if err == nil {
+		agents, _ = c.up.ListAgentModels(ctx, acct.Token)
+	}
 	c.pool.Release(acct)
 
 	c.mu.Lock()
@@ -165,6 +179,10 @@ func (c *ModelCache) refresh(ctx context.Context) {
 	c.lastErr = ""
 	c.lastOK = time.Now()
 	c.expiresAt = time.Now().Add(c.ttl)
+	if len(agents) > 0 {
+		c.agents = agents
+		c.agentsAt = time.Now()
+	}
 }
 
 // Info 观测面（不含清单内容）。
@@ -215,6 +233,36 @@ func (c *ModelCache) Lookup(id string) (known, fresh bool) {
 		}
 	}
 	return false, true
+}
+
+// AgentBases 当前可用的 Agent 底座（按 id 排序，只取 is_active）。
+//
+// 调用方拿它生成对外模型名 `{id}-agent`。清单从没拉成功过时返回空 ——
+// 那时靠 agentmodels.go 里的内置兜底保住既有两个模型。
+func (c *ModelCache) AgentBases() []upstream.ModelEntry {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if len(c.agents) == 0 || c.agentsAt.IsZero() || time.Since(c.agentsAt) > 2*c.ttl {
+		return nil
+	}
+	out := make([]upstream.ModelEntry, 0, len(c.agents))
+	for _, e := range c.agents {
+		if e.Info.IsActive {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// IsAgentBase 这个底座 id 是否被上游列入 Agent 模式清单。
+func (c *ModelCache) IsAgentBase(id string) bool {
+	for _, e := range c.AgentBases() {
+		if e.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // Known 模型是否在清单里（含内置兜底，只用于展示/软校验）。

@@ -237,7 +237,7 @@ func (s *Server) createVideo(w http.ResponseWriter, r *http.Request, plan *video
 		Status:    VideoStatusQueued,
 		Credits:   needCredits,
 		CreatedAt: now.Unix(), UpdatedAt: now.Unix(),
-		ExpiresAt: now.Unix() + int64(plan.ExpiresAfter),
+		ExpiresAt:   now.Unix() + int64(plan.ExpiresAfter),
 		CallbackURL: plan.CallbackURL,
 	}
 	s.videos.Put(rec)

@@ -108,15 +108,15 @@ type VideoRequest struct {
 	ReturnLastFrame *bool `json:"return_last_frame,omitempty"`
 	Seed            *int  `json:"seed,omitempty"`
 
-	OutputFormat  string `json:"output_format,omitempty"`
-	Draft         *bool  `json:"draft,omitempty"`
-	ServiceTier   string `json:"service_tier,omitempty"`
-	CallbackURL   string `json:"callback_url,omitempty"`
-	Priority      *int   `json:"priority,omitempty"`
-	SafetyID      string `json:"safety_identifier,omitempty"`
-	OmniTaskType  string `json:"omni_reference_task_type,omitempty"`
-	ExpiresAfter  *int   `json:"execution_expires_after,omitempty"`
-	Tools         []map[string]any `json:"tools,omitempty"`
+	OutputFormat string           `json:"output_format,omitempty"`
+	Draft        *bool            `json:"draft,omitempty"`
+	ServiceTier  string           `json:"service_tier,omitempty"`
+	CallbackURL  string           `json:"callback_url,omitempty"`
+	Priority     *int             `json:"priority,omitempty"`
+	SafetyID     string           `json:"safety_identifier,omitempty"`
+	OmniTaskType string           `json:"omni_reference_task_type,omitempty"`
+	ExpiresAfter *int             `json:"execution_expires_after,omitempty"`
+	Tools        []map[string]any `json:"tools,omitempty"`
 
 	// Extras 未识别键原样保留（vendor extras 透传，不收窄 additionalProperties）。
 	Extras map[string]any `json:"-"`
@@ -141,9 +141,10 @@ const videoMaxBody = 64 << 20
 // 🔴 官方错误码页明确「未提供通用 HTTP 错误响应体的 JSON 形状」，
 // 所以四键信封是本协议自己的契约，code 用方舟的**码字符串**只为让方舟客户端能按类别分支 ——
 // 不是「照官方回包」。三处必须分清：
-//   type   —— 哪一类错（OpenAI 词表，客户端按它决定重试策略）
-//   code   —— 具体是什么（方舟词表，客户端按它决定要不要改参数）
-//   param  —— 指到真实字段（指错比不指更糟）
+//
+//	type   —— 哪一类错（OpenAI 词表，客户端按它决定重试策略）
+//	code   —— 具体是什么（方舟词表，客户端按它决定要不要改参数）
+//	param  —— 指到真实字段（指错比不指更糟）
 const (
 	arkMissing      = "MissingParameter"
 	arkInvalid      = "InvalidParameter"
@@ -235,9 +236,9 @@ type videoClip struct {
 
 // videoPlan 折叠后的执行计划：上游真正需要的那几个值。
 type videoPlan struct {
-	Prompt  string  // 已剥离参数后缀的正文
-	Scene   string  // t2v / first_frame / first_last / omni_ref
-	Clips   []videoClip
+	Prompt string // 已剥离参数后缀的正文
+	Scene  string // t2v / first_frame / first_last / omni_ref
+	Clips  []videoClip
 
 	Resolution string // 上游拼写：720P / 1080P
 	Ratio      string // 上游拼写：16:9 / 4:3 / 1:1 / 3:4 / 9:16 / origin
@@ -327,7 +328,7 @@ var videoKernelAliases = map[string]string{
 // ✅ 2026-11-08 实测通过（wan27 + 首帧纯红/尾帧纯蓝，720p/5s）：
 //   - 提交 200 + task id，47s 出片，产物路径 `.../i2v/...`（文生是 `t2v`）
 //   - 抽帧：首帧 R=252/B=0、末帧 R=0/B=244、第 75 帧 R=235/B=11（正在过渡）
-//   ⇒ `files[]` 上传后拿到的 `id`（`img-<uuid>`）**可以直接当 materialId**。
+//     ⇒ `files[]` 上传后拿到的 `id`（`img-<uuid>`）**可以直接当 materialId**。
 //
 // 保留开关是为了「上游哪天改了素材体系」时能一键退回纯文生，不必回滚版本：
 // `QWEN2API_VIDEO_MATERIAL_DISABLE=1`。
@@ -377,7 +378,7 @@ func (s *Server) validateVideoRequest(req *VideoRequest) (*videoPlan, *videoReje
 			}
 			if item.Role != "reference_video" {
 				return nil, rejectInvalid(fmt.Sprintf("content[%d].role", i),
-					`video_url 的 role 必须是 "reference_video"`);
+					`video_url 的 role 必须是 "reference_video"`)
 			}
 			ref := strings.TrimSpace(item.VideoURL.URL)
 			if strings.HasPrefix(strings.ToLower(ref), "data:") {
@@ -391,7 +392,7 @@ func (s *Server) validateVideoRequest(req *VideoRequest) (*videoPlan, *videoReje
 			}
 			if item.Role != "reference_audio" {
 				return nil, rejectInvalid(fmt.Sprintf("content[%d].role", i),
-					`audio_url 的 role 必须是 "reference_audio"`);
+					`audio_url 的 role 必须是 "reference_audio"`)
 			}
 			audios = append(audios, videoClip{Kind: "audio", Role: item.Role, Ref: strings.TrimSpace(item.AudioURL.URL)})
 		case "draft_task":

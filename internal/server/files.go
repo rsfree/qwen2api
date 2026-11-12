@@ -37,13 +37,13 @@ type FileStore struct {
 }
 
 type storedFile struct {
-	account  string
-	entry    upstream.FileRef
-	filename string
-	mime     string
-	bytes    int
+	account   string
+	entry     upstream.FileRef
+	filename  string
+	mime      string
+	bytes     int
 	createdAt time.Time
-	purpose  string
+	purpose   string
 	// inline 纯文本附件：不走上游 files[]，直接把内容拼进 prompt。
 	//
 	// 🔴 为什么要这条支路（2026-10-30）：document 类附件必须是真的 OSS 条目

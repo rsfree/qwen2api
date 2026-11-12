@@ -90,7 +90,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// Agent 模型（qwen3.8-*-agent）走 agent_mode，其余走 t2t（§10.1）。
 	// 别名只影响路由，响应回显客户端原名（同 chat 前门）。
 	routeModel, _ := s.routeModel(model)
-	upModel, spec, _ := agentSpecFor(routeModel)
+	upModel, spec, _ := s.agentSpecFor(routeModel)
 	spec.ImageRefs = imgRefs
 	sd, err := s.openUpstream(r.Context(), s.blobBase(r), upModel, s.conf().DefaultThinking, flat.Prompt, spec)
 	if err != nil {

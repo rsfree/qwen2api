@@ -28,7 +28,7 @@ func TestUpdateConfigWritesAndApplies(t *testing.T) {
 	s.SetConfigPath(path)
 
 	applied, restart, err := s.UpdateConfig(map[string]any{
-		"pool.max_rotate":       5,
+		"pool.max_rotate":        5,
 		"pool.max_image_per_day": 9,
 	})
 	if err != nil {

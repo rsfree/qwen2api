@@ -214,7 +214,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 🔴 上游模型名与对外模型名要分开：客户端传 qwen3.8-max-agent，
 	// 上游只认 qwen3.8-max（§10.2）。model 变量保持原名，响应体里的 model
 	// 字段才不会变脸；upModel 只用于提交。
-	upModel, spec, isAgent := agentSpecFor(routeModel)
+	upModel, spec, isAgent := s.agentSpecFor(routeModel)
 	spec.Files = files
 	spec.ImageRefs = imgRefs
 	// 对话粘性对**所有文本模型**生效（2026-11-12 扩围）。
@@ -564,11 +564,11 @@ func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model,
 	}
 
 	var (
-		chatID   string
-		parentID string
-		hit      bool
-		chatMS   int64
-		reused   bool
+		chatID    string
+		parentID  string
+		hit       bool
+		chatMS    int64
+		reused    bool
 		prevInput int
 	)
 	if dlg != nil {

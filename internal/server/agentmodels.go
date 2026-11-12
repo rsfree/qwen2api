@@ -24,19 +24,41 @@ type agentModelEntry struct {
 	Base   string // 上游 chat 模型 id（放进 model 字段）
 	Title  string
 	Vision bool
+	// Context 上下文长度（来自上游清单；兜底条目填 1000000）。
+	Context int
 }
 
-var agentCatalog = []agentModelEntry{
-	{ID: "qwen3.8-max-agent", Base: "qwen3.8-max", Title: "Qwen3.8-Max Agent", Vision: true},
-	{ID: "qwen3.8-flash-agent", Base: "qwen3.8-flash", Title: "Qwen3.8-Flash Agent", Vision: false},
+// fallbackAgentCatalog 内置兜底：**只在"从没成功拉到 agent 清单"时**才用。
+//
+// 2026-11-12 之前这是唯一来源（硬编码两个），所以上游上 qwen4 后网关完全
+// 不会发现。现在真实清单来自 `GET /api/v2/models/agent_mode`（见
+// ModelCache.AgentBases），这里只剩"首拉之前 / 全号失效"的保命作用。
+//
+// Título 用"底座名 + Agent"推导，不再逐条硬写 —— 少一处会过期的数据。
+var fallbackAgentCatalog = []agentModelEntry{
+	{ID: "qwen3.8-max-agent", Base: "qwen3.8-max", Title: "Qwen3.8-Max Agent", Vision: true, Context: 1000000},
+	{ID: "qwen3.8-flash-agent", Base: "qwen3.8-flash", Title: "Qwen3.8-Flash Agent", Vision: false, Context: 1000000},
 }
 
 // resolveAgentModel 判断模型名是不是 Agent 模型；是则返回上游底座模型 id。
-func resolveAgentModel(model string) (string, bool) {
+//
+// 规则有两层，顺序不能反：
+//  1. **内置兜底**：清单拉不到时，至少保住既有的两个（不能让存量客户端全挂）；
+//  2. **动态**：`{底座}-agent`，且底座在上游 agent 清单里 —— 上游上新自动可用。
+//
+// 🔴 为什么必须是 `-agent` 后缀而不是直接用底座 id：`qwen3.8-max` 同时在
+// 普通 t2t 和 agent 清单里，同一个名字对应两种 chat_type 会让行为不可预测
+// （"看起来能跑、结果随机"）。后缀是本网关的显式区分。
+func (s *Server) resolveAgentModel(model string) (base string, ok bool) {
 	id := strings.ToLower(strings.TrimSpace(model))
-	for _, m := range agentCatalog {
+	for _, m := range fallbackAgentCatalog {
 		if m.ID == id {
 			return m.Base, true
+		}
+	}
+	if base, found := strings.CutSuffix(id, "-agent"); found && base != "" {
+		if s.models.IsAgentBase(base) {
+			return base, true
 		}
 	}
 	return "", false
@@ -46,11 +68,48 @@ func resolveAgentModel(model string) (string, bool) {
 //
 // 三个协议前门（chat / messages / responses）都调它 —— 规格只有一处真相，
 // 免得哪天只给 chat 加了 Agent，Anthropic 前门却还是 t2t。
-func agentSpecFor(model string) (base string, spec upstream.ChatSpec, isAgent bool) {
-	if base, ok := resolveAgentModel(model); ok {
+func (s *Server) agentSpecFor(model string) (base string, spec upstream.ChatSpec, isAgent bool) {
+	if base, ok := s.resolveAgentModel(model); ok {
 		return base, upstream.AgentSpec(), true
 	}
 	return model, upstream.TextSpec(), false
+}
+
+// agentEntries 当前要对外暴露的 Agent 模型（上游清单优先，兜底其次）。
+//
+// 对外名字统一是 `{底座 id}-agent`，标题取上游 name + " Agent" ——
+// 上游改名/上新都不用动代码。清单为空（从没拉成功）时才退回内置两条。
+func (s *Server) agentEntries() []agentModelEntry {
+	bases := s.models.AgentBases()
+	if len(bases) == 0 {
+		return fallbackAgentCatalog
+	}
+	out := make([]agentModelEntry, 0, len(bases))
+	for _, e := range bases {
+		out = append(out, agentModelEntry{
+			ID:      e.ID + "-agent",
+			Base:    e.ID,
+			Title:   agentTitleOf(e),
+			Vision:  agentVisionOf(e),
+			Context: e.Info.Meta.MaxContextLength,
+		})
+	}
+	return out
+}
+
+// agentTitleOf 上游 name → 对外标题（"Qwen4-Max-Preview" ⇒ "Qwen4-Max-Preview Agent"）。
+func agentTitleOf(e upstream.ModelEntry) string {
+	name := strings.TrimSpace(e.Name)
+	if name == "" {
+		name = e.ID
+	}
+	return name + " Agent"
+}
+
+// agentVisionOf 上游 capabilities.vision → 是否支持图片输入。
+func agentVisionOf(e upstream.ModelEntry) bool {
+	v, _ := e.Info.Meta.Capabilities["vision"].(bool)
+	return v
 }
 
 // agentModelList 把 Agent 模型列进 `/v1/models`。
@@ -58,8 +117,9 @@ func agentSpecFor(model string) (base string, spec upstream.ChatSpec, isAgent bo
 // 清单必须与能力一一对应 —— 列一个用不了的名字比不列更糟。这里 capacity 如实标注：
 // 只有 max 有视觉，两者都没有思考档位（Agent 在网页端没有档位选择器）。
 func (s *Server) agentModelList() []ModelInfo {
-	out := make([]ModelInfo, 0, len(agentCatalog))
-	for _, m := range agentCatalog {
+	entries := s.agentEntries()
+	out := make([]ModelInfo, 0, len(entries))
+	for _, m := range entries {
 		out = append(out, ModelInfo{
 			ID:       m.ID,
 			Object:   "model",
@@ -70,7 +130,7 @@ func (s *Server) agentModelList() []ModelInfo {
 			Thinking: false,
 			Vision:   m.Vision,
 			Verified: true,
-			Context:  1000000,
+			Context:  m.Context,
 			Notes: "Agent 模式：服务端自主规划并执行工具（bash / write_file 等），" +
 				"一次请求内跑完 think→tool_call→answer 整个循环；超时按更长预算放宽。" +
 				"思考原文走 reasoning_content。注意：需要澄清时上游会抛 ask_user 交互工具，" +

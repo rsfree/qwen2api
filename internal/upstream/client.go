@@ -531,6 +531,50 @@ func (c *Client) ListModels(ctx context.Context, cred string) ([]ModelEntry, err
 	return out.Data.Data, nil
 }
 
+// ListAgentModels `GET /api/v2/models/agent_mode` —— **Agent 模式的底座清单**。
+//
+// 🔴 2026-11-12 实测：返回的 id 就是底座模型 id（`qwen4.0-max-preview` /
+// `qwen3.8-max` / `qwen3.8-flash`），**不是** `xxx-agent` 这种加后缀的名字。
+// 那套 `-agent` 命名是本网关为了区分"同一底座的普通对话 / Agent 两种模式"
+// 自己加的包装（同名两种模式会让 chat_type 不可预测，见 agentmodels.go）。
+//
+// 所以在网关侧的映射是：**清单里每个 id 都能加 `-agent` 后缀当 Agent 模型**，
+// 底座就是这个 id。这样上游上新（如换成 qwen5）时清单自动跟上，不用改代码。
+//
+// 返回结构与 /api/v2/models/ 一致（{data:{data:[...]}}），解析逻辑复用。
+func (c *Client) ListAgentModels(ctx context.Context, cred string) ([]ModelEntry, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/v2/models/agent_mode", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header = c.buildHeaders(cred, c.base+"/")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, transportErr("models/agent_mode", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, transportErr("models/agent_mode 读响应", err)
+	}
+	payload, err := decodeEnvelope(resp, raw, "models/agent_mode")
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Data struct {
+			Data []ModelEntry `json:"data"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(payload, &out); err != nil {
+		return nil, NewErr(KindUnknown, "models/agent_mode", resp.StatusCode, "", "响应不是预期结构", false)
+	}
+	return out.Data.Data, nil
+}
+
 // AccountInfo 账号资料（面板"验活"用，不含任何凭据原文）。
 type AccountInfo struct {
 	ID    string `json:"id"`

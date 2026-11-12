@@ -12,9 +12,9 @@ import (
 // （qwen2strip/stripper.py，2026-11-12 跨 720/960/1536 短边实测标定）。
 func TestWMBox(t *testing.T) {
 	cases := []struct {
-		name           string
-		W, H           int
-		x, y, w, h     int
+		name       string
+		W, H       int
+		x, y, w, h int
 	}{
 		{"1280x720", 1280, 720, 1116, 650, 151, 57},
 		{"720x1280", 720, 1280, 556, 1210, 151, 57},

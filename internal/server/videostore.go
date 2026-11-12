@@ -60,9 +60,9 @@ type videoRecord struct {
 	PolishState string `json:"polish_state,omitempty"`
 	PolishTries int    `json:"polish_tries,omitempty"`
 	PolishErr   string `json:"polish_err,omitempty"`
-	LastFrame string `json:"last_frame_url,omitempty"`
-	ErrCode   string `json:"error_code,omitempty"`
-	ErrMsg    string `json:"error_message,omitempty"`
+	LastFrame   string `json:"last_frame_url,omitempty"`
+	ErrCode     string `json:"error_code,omitempty"`
+	ErrMsg      string `json:"error_message,omitempty"`
 	// StatusRaw 上游状态原文：判错时至少能看见原始值。
 	StatusRaw string `json:"status_raw,omitempty"`
 	// StatusUnknown 上游给了个词表外的值，已按非终态收敛（skill §3.6）。
@@ -103,8 +103,8 @@ type videoStore struct {
 	items map[string]*videoRecord
 	byFP  map[string]string // fingerprint -> id
 
-	dirty   bool
-	saving  bool
+	dirty    bool
+	saving   bool
 	lastSave time.Time
 }
 

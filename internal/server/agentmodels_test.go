@@ -5,10 +5,19 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/yuanjie-ai/qwen2api/internal/upstream"
+	"time"
 )
 
-// Agent 模型是**网关侧的别名**：上游只认 qwen3.8-max / qwen3.8-flash（§10.2）。
-func TestResolveAgentModel(t *testing.T) {
+// Agent 模型是**网关侧的别名**：`{上游底座 id}-agent`。
+//
+// 底座清单现在来自 `GET /api/v2/models/agent_mode`（2026-11-12 起），
+// 但"清单从没拉到"时必须靠内置兜底保住既有两个 —— 这条路径不能挂在
+// 网络可用性上，所以单独测（此时 models 缓存为空）。
+func TestResolveAgentModelFallback(t *testing.T) {
+	s := &Server{models: NewModelCache(nil, nil)}
+
 	cases := []struct {
 		in   string
 		base string
@@ -20,13 +29,35 @@ func TestResolveAgentModel(t *testing.T) {
 		{"  qwen3.8-max-agent  ", "qwen3.8-max", true},
 		{"qwen3.8-max", "", false},
 		{"qwen3.8-omni-flash", "", false},
+		// 清单为空时，未知底座不能瞎认（否则会把普通模型当 agent 发）。
+		{"qwen4.0-max-preview-agent", "", false},
 		{"", "", false},
 	}
 	for _, c := range cases {
-		base, ok := resolveAgentModel(c.in)
+		base, ok := s.resolveAgentModel(c.in)
 		if base != c.base || ok != c.ok {
 			t.Fatalf("resolveAgentModel(%q) = (%q,%v)，期望 (%q,%v)", c.in, base, ok, c.base, c.ok)
 		}
+	}
+}
+
+// 上游清单到达后，任何清单里的底座都能加 `-agent` 用 —— 这就是"自动发现"。
+func TestResolveAgentModelFromUpstreamList(t *testing.T) {
+	s := &Server{models: NewModelCache(nil, nil)}
+	s.models.mu.Lock()
+	s.models.agents = []upstream.ModelEntry{
+		model("qwen4.0-max-preview", "Qwen4-Max-Preview", true, true, 1000000),
+		model("qwen3.8-max", "Qwen3.8-Max", true, true, 1000000),
+	}
+	s.models.agentsAt = time.Now()
+	s.models.mu.Unlock()
+
+	if base, ok := s.resolveAgentModel("qwen4.0-max-preview-agent"); !ok || base != "qwen4.0-max-preview" {
+		t.Fatalf("上游清单里的底座应自动可用，得到 (%q,%v)", base, ok)
+	}
+	// 不在清单里的底座仍然拒绝（避免把随机名字当 agent 底座甩给上游）。
+	if _, ok := s.resolveAgentModel("qwen9-imaginary-agent"); ok {
+		t.Fatal("不在清单里的底座不应被认成 agent")
 	}
 }
 

@@ -30,12 +30,12 @@ import (
 )
 
 const (
-	wmRatioW      = 0.185  // 水印宽 ≈ 短边 * 0.185
-	wmRatioH      = 0.054  // 水印高 ≈ 短边 * 0.054
-	wmRatioRight  = 0.030  // 距右 ≈ 短边 * 0.030
-	wmRatioBottom = 0.030  // 距底 ≈ 短边 * 0.030
-	wmRatioPad    = 0.012  // 四边外扩，吸收测量误差与半透明边缘
-	wmFeather     = 14     // 羽化宽度（px），与 Python 版一致
+	wmRatioW      = 0.185 // 水印宽 ≈ 短边 * 0.185
+	wmRatioH      = 0.054 // 水印高 ≈ 短边 * 0.054
+	wmRatioRight  = 0.030 // 距右 ≈ 短边 * 0.030
+	wmRatioBottom = 0.030 // 距底 ≈ 短边 * 0.030
+	wmRatioPad    = 0.012 // 四边外扩，吸收测量误差与半透明边缘
+	wmFeather     = 14    // 羽化宽度（px），与 Python 版一致
 )
 
 // wmBox 按短边比例推算水印框 [x,y,w,h]。

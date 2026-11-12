@@ -116,19 +116,19 @@ func storageExplicitlyOff(st config.Storage) bool {
 // New 构造前门。
 func New(cfg config.Config, p *pool.Pool, up *upstream.Client, log *reqlog.Log, version string) *Server {
 	s := &Server{
-		pool:    p,
-		up:      up,
-		models:  NewModelCache(up, p),
-		log:     log,
-		started: time.Now(),
-		version: version,
-		videos:  newVideoStore(config.VideosFile(cfg.StateFile)),
+		pool:      p,
+		up:        up,
+		models:    NewModelCache(up, p),
+		log:       log,
+		started:   time.Now(),
+		version:   version,
+		videos:    newVideoStore(config.VideosFile(cfg.StateFile)),
 		videoStop: make(chan struct{}),
-		files:   NewFileStore(),
-		blobs:   NewBlobStore(),
-		egress:  map[string]*egressState{},
-		chats:   NewChatPool(cfg.Pool.WarmChatsPerAccount, time.Duration(cfg.Pool.ChatPoolTTLS)*time.Second),
-		dialogs: newDialogStore(),
+		files:     NewFileStore(),
+		blobs:     NewBlobStore(),
+		egress:    map[string]*egressState{},
+		chats:     NewChatPool(cfg.Pool.WarmChatsPerAccount, time.Duration(cfg.Pool.ChatPoolTTLS)*time.Second),
+		dialogs:   newDialogStore(),
 	}
 	s.cfg.Store(cfg)
 	// 后处理队列：托管开启时起 worker。
