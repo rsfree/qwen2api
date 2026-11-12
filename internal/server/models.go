@@ -44,10 +44,14 @@ var builtinModels = []upstream.ModelEntry{
 	model("qwen3.8-max", "Qwen3.8-Max", true, true, 1000000),
 	model("qwen3.8-omni-flash", "Qwen3.8-Omni-Flash", true, true, 1000000),
 	model("qwen3.7-max", "Qwen3.7-Max", true, false, 1000000),
-	model("qwen3.6-plus", "Qwen3.6-Plus", true, true, 1000000),
-	model("qwen3.5-plus", "Qwen3.5-Plus", true, true, 1000000),
 	model("qwen3.5-omni-plus", "Qwen3.5-Omni-Plus", false, true, 262144),
+	model("qwen4.0-max-preview", "Qwen4.0-Max-Preview", true, true, 1000000),
 }
+
+// ⚠️ 这份清单是"首拉成功之前"的兜底，**不能拿它判断模型是否可用**
+// （见 ModelCache.Lookup 的 fresh 语义）。上游 2026-11-12 下架 qwen3.5-plus、
+// qwen3.6-plus 时，它们还留在这里 —— 冷启动那几秒就会把死名字展示给客户端。
+// 真正的可用性以"最近一次成功拉取"为准；这份只需跟上大盘，不必逐日追。
 
 func model(id, name string, thinking, vision bool, ctx int) upstream.ModelEntry {
 	var e upstream.ModelEntry
@@ -69,9 +73,15 @@ type ModelCache struct {
 	mu        sync.RWMutex
 	entries   []upstream.ModelEntry
 	expiresAt time.Time
-	lastErr   string
-	fetches   int
-	ttl       time.Duration
+	// lastOK 最近一次**成功**从上游拉到清单的时刻（零值 = 从没成功过）。
+	//
+	// 🔴 它决定"能不能拿这份清单去拒绝请求"（见 Lookup）：拉取失败时 entries
+	// 会保留上一份好数据，但那份可能已经过时（上游下架了某个模型）。
+	// 只有 lastOK 新鲜时才敢据此判"模型不存在"。
+	lastOK  time.Time
+	lastErr string
+	fetches int
+	ttl     time.Duration
 
 	up   *upstream.Client
 	pool *pool.Pool
@@ -153,6 +163,7 @@ func (c *ModelCache) refresh(ctx context.Context) {
 	}
 	c.entries = entries
 	c.lastErr = ""
+	c.lastOK = time.Now()
 	c.expiresAt = time.Now().Add(c.ttl)
 }
 
@@ -179,7 +190,34 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": list})
 }
 
-// Known 模型是否在清单里（用于提前拒绝乱写的模型名，避免白跑一次上游）。
+// Lookup 模型是否在**可信清单**里。
+//
+// fresh=false 表示"这份清单不足以拒绝请求"：从没成功拉过、最近一次拉取失败、
+// 或者清单已旧得离谱。此时调用方必须放行 —— 宁可让它上去撞一次 404，
+// 也不能把上游刚上线的模型误杀在网关里（那种错误客户端完全无从排查）。
+//
+// 🔴 不用 builtinModels 判断：那是首拉前的展示兜底，天生落后于上游
+// （2026-11-12 它里面还留着已下架的 qwen3.5-plus / qwen3.6-plus）。
+func (c *ModelCache) Lookup(id string) (known, fresh bool) {
+	// 🔴 这里**不**触发 refresh：请求路径不该为了"校验一个模型名"去打上游
+	// （会多占一次选号 + 一次上游调用，还会在测试里吃掉别的调用配额）。
+	// 清单由 KeepAlive 每轮顺带维护（见 keepalive.runOne）。
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	// 2×ttl 是"可信窗口"：上游下架模型是低频事件，而清单晚 10~20 分钟
+	// 才更新完全可以接受，比误杀一个刚上线的模型安全得多。
+	if c.lastOK.IsZero() || time.Since(c.lastOK) > 2*c.ttl || len(c.entries) == 0 {
+		return false, false
+	}
+	for _, e := range c.entries {
+		if e.ID == id {
+			return e.Info.IsActive, true
+		}
+	}
+	return false, true
+}
+
+// Known 模型是否在清单里（含内置兜底，只用于展示/软校验）。
 func (c *ModelCache) Known(ctx context.Context, id string) bool {
 	for _, m := range c.List(ctx) {
 		if m.ID == id {

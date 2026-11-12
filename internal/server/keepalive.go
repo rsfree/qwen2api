@@ -69,6 +69,10 @@ func (s *Server) KeepAlive(ctx context.Context) {
 	// 后面的环节全看到 0，等于白算。
 	runOne := func() {
 		peak := int(s.inflightPeak.Swap(0))
+		// 顺带维护上游模型清单：请求路径要拿它拒绝"已下架的模型"（见
+		// openUpstreamSpec），但校验本身绝不能去打上游 —— 所以刷新放在这里，
+		// 每轮一次（缓存 10 分钟，绝大多数轮次是空转）。
+		_ = s.models.List(ctx)
 		changed := s.adoptOnce(ctx, peak)
 		changed = s.warmOnce(ctx, peak) || changed
 		s.prewarmChats(ctx, peak)

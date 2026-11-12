@@ -283,6 +283,21 @@ func (s *Server) openUpstream(ctx context.Context, blobBase, model, gear, prompt
 // 绝不因为"对话正被别人用着"而阻塞或拒绝 —— 那会把一个 11 秒的任务变成 3 分钟。
 func (s *Server) openUpstreamSpec(ctx context.Context, blobBase, model, gear string,
 	ps submitPrompts, spec upstream.ChatSpec, dlgKey string) (*opened, error) {
+	// 模型已下架就别往下走了（2026-11-12 线上：qwen3.5-plus 被上游下架后
+	// 17 分钟打进来 830 次，每次都选号 + 建会话(3s) + 提交(1.5s) 才从上游
+	// 换回一个 404，还白占一个号的在途额度）。
+	// 上游清单可信时这里只要几百微秒 —— 这就是"旧模型自动淘汰"的落点：
+	// 清单跟着上游走，请求路径跟着清单走，中间不需要人去改配置。
+	//
+	// 只校验 t2t：agent 用的是底座名（qwen3.8-max），媒体模型走各自的端点。
+	if spec.ChatType == "t2t" {
+		if known, fresh := s.models.Lookup(model); fresh && !known {
+			return nil, upstream.NewErr(upstream.KindBadInput, "models", http.StatusNotFound,
+				"Model_Not_Found",
+				fmt.Sprintf("模型 %s 不在上游可用清单里（可能已下架），请改用 /v1/models 返回的名字", model),
+				false)
+		}
+	}
 	var lastErr error
 	lastAcct := ""
 	for attempt := 0; attempt < s.conf().Pool.MaxRotate; attempt++ {
