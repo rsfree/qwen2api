@@ -327,11 +327,6 @@ func (s *Server) prewarmChats(ctx context.Context, peak int) {
 	if n := s.chats.Trim(); n > 0 {
 		log.Printf("[qwen2api] 会话池清理过期 %d 个", n)
 	}
-	// 把"谁手里有货"同步给选号（见 pool.SetChatReady）。
-	// 🔴 位置在 Trim 之后：刚清掉的那批必须立刻从标志里消失，否则下一轮
-	// 请求仍会优先选中它们 —— 而它们恰恰是要多花 3 秒现建的。
-	// 本轮后续补货写入时会单点置真（见 prewarmChat），不必等下一轮。
-	s.pool.SetChatReady(s.chats.ReadyAccounts())
 	ka := s.conf().Pool.Keepalive.Effective()
 	// 🔴 need 用 warmTarget，不是 chatTarget（2026-11-12 线上实测修正）。
 	//
@@ -349,6 +344,18 @@ func (s *Server) prewarmChats(ctx context.Context, peak int) {
 	if len(names) == 0 {
 		return
 	}
+	// 把"谁手里有货 **且本轮会被保活**"同步给选号（见 pool.SetChatReady）。
+	//
+	// 🔴 必须取交集，不能直接拿 ReadyAccounts：会话池里会残留"上一轮预热建的、
+	// 但已经不在热点集里"的号（实测 ready=116 而保活面只有 80）。它们的会话是
+	// 现成的，chatReady 一置真，选号就优先挑它们 —— 但它们的**连接没人管**，
+	// 于是照样要付 2~5 秒握手。表现就是"命中率 99% 但 submit 还是 2.8 秒"。
+	//
+	// 交集之后：有货 ⇒ 一定在热点集 ⇒ 连接被游标保活。"命中"才真正等于"热"。
+	ready := capReadyToHot(s.chats.ReadyAccounts(), names)
+	// 位置在 Trim 之后：刚清掉的那批必须立刻从标志里消失。
+	// 本轮后续补货写入时会单点置真（见 prewarmChat），不必等下一轮。
+	s.pool.SetChatReady(ready)
 	limit := warmBatch(need, ka.BatchMax, ka.TickS)
 	// 按游标取一段，而不是"每轮都从头取 limit 个"：
 	// HotNames 的排序键（alive / served / tokenExp）不会被预热自己改写，
@@ -379,6 +386,28 @@ func (s *Server) prewarmChats(ctx context.Context, peak int) {
 		}(n, needChat)
 	}
 	wg.Wait()
+}
+
+// capReadyToHot 把"有预建会话"限制在"本轮会被保活"的号内。
+//
+// 为什么必须相交（2026-11-12 线上实测）：会话池会残留上一轮预热建的、但已经
+// 不在热点集里的号（实测 ready=116，保活面只有 80）。它们的会话是现成的，
+// chatReady 一置真，选号就优先挑它们 —— 但它们的连接没人管，照样要付
+// 2~5 秒握手。表现就是"命中率 99% 却 submit 2.8 秒"。
+//
+// 相交之后语义才闭合：**有货 ⇒ 一定在热点集 ⇒ 连接被游标保活**，
+// 于是"命中"同时等于"会话热"和"连接热"。
+func capReadyToHot(ready map[string]struct{}, hot []string) map[string]struct{} {
+	keep := make(map[string]struct{}, len(hot))
+	for _, n := range hot {
+		keep[n] = struct{}{}
+	}
+	for name := range ready {
+		if _, ok := keep[name]; !ok {
+			delete(ready, name)
+		}
+	}
+	return ready
 }
 
 // rotateHot 从 names 里按游标环形取 limit 个。

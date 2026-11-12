@@ -117,3 +117,22 @@ func TestRotateHotCoversAllAccounts(t *testing.T) {
 		t.Fatalf("limit=len 应原样返回，得到 %d 个", len(got))
 	}
 }
+
+// "有货"必须同时"在热点集内"，否则选号会优先挑到有会话但连接没保活的号。
+//
+// 线上症状：chats 命中率 99%、submit p50 却 2.8 秒 —— 因为 ready=116
+// 里有 36 个不在保活面（80）内，它们每次都要重付 SOCKS5+TLS。
+func TestCapReadyToHot(t *testing.T) {
+	ready := map[string]struct{}{"a": {}, "b": {}, "stale1": {}, "stale2": {}}
+	got := capReadyToHot(ready, []string{"a", "b", "c"})
+	if len(got) != 2 {
+		t.Fatalf("应只保留交集里的 2 个，得到 %v", got)
+	}
+	if _, ok := got["stale1"]; ok {
+		t.Fatal("不在热点集里的号必须被剔除")
+	}
+	// 空热点集 ⇒ 全部剔除（预热停摆时不能残留旧标志）。
+	if got := capReadyToHot(map[string]struct{}{"a": {}}, nil); len(got) != 0 {
+		t.Fatalf("热点集为空时应全部剔除，得到 %v", got)
+	}
+}
