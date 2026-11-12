@@ -639,6 +639,14 @@ func classifyHTTP(actual, status int, op string, raw []byte) error {
 		}
 		return NewErr(KindBadInput, op, actual, "Bad_Request", detail, false)
 	case actual == 404 || status == 404:
+		// 🔴 "Model not found" 是**调用方**的问题，不是上游抖动（2026-11-12 实测：
+		// 上游下架 qwen3.5-plus 后，17 分钟 830 次 404）。归到 KindBadInput 才能：
+		//   1) 映射成 400 而不是 502 —— 调用方一眼知道是自己模型名写错；
+		//   2) 不再换号重试（见 server.fastRetryable）—— 换号对模型名毫无帮助，
+		//      只会把一次错误放大成 max_rotate 次上游调用 + 每轮 1.5 秒。
+		if strings.Contains(strings.ToLower(detail), "model not found") {
+			return NewErr(KindBadInput, op, actual, "Model_Not_Found", detail, false)
+		}
 		return NewErr(KindUnknown, op, actual, "Not_Found", detail, false)
 	case actual >= 500 || status >= 500:
 		return NewErr(KindServer, op, actual, "", detail, false)

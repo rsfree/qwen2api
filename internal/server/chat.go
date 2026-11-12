@@ -1035,7 +1035,17 @@ func fastRetryable(err error, took time.Duration) bool {
 		return false
 	}
 	var ue *upstream.Error
-	return errors.As(err, &ue)
+	if !errors.As(err, &ue) {
+		return false
+	}
+	// 🔴 请求本身不合法（模型名写错、参数非法）换号结果一模一样：重试只是把
+	// 一次错误放大成 N 次上游调用（2026-11-12 实测：模型下架后 17 分钟
+	// 830 次 404，每次还换 3 个号、耗 5 秒）。上游明确说了"不接受"就该
+	// 立刻把话原样传给调用方。
+	if upstream.KindOf(err) == upstream.KindBadInput {
+		return false
+	}
+	return true
 }
 
 func httpStatusFor(err error) int {

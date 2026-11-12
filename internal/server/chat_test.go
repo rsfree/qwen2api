@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yuanjie-ai/qwen2api/internal/config"
 	"github.com/yuanjie-ai/qwen2api/internal/pool"
@@ -364,4 +365,25 @@ func newTestServerWithServer(t *testing.T, up *fakeUpstream, accounts int) *Serv
 	p := pool.New(cfg.Pool, cfg.Accounts, "")
 	cli := upstream.New(cfg.Upstream)
 	return New(cfg, p, cli, reqlog.New(10), "test")
+}
+
+// 请求本身不合法（如模型名写错）不该换号重试：换号结果一样，
+// 只是把一次错误放大成 N 次上游调用。
+//
+// 线上证据（2026-11-12）：上游下架 qwen3.5-plus 后 17 分钟 830 次 404，
+// 每个请求都换 3 个号、花 5 秒才把错误吐给调用方。
+func TestFastRetryableSkipsBadInput(t *testing.T) {
+	bad := upstream.NewErr(upstream.KindBadInput, "chat/completions", 404, "Model_Not_Found", "Model not found", false)
+	if fastRetryable(bad, time.Second) {
+		t.Fatal("KindBadInput 不应触发换号重试")
+	}
+	// 上游 5xx 这类"可能是偶发"的仍然要重试。
+	srv := upstream.NewErr(upstream.KindServer, "chat/completions", 500, "", "boom", false)
+	if !fastRetryable(srv, time.Second) {
+		t.Fatal("上游 5xx 仍应可重试")
+	}
+	// 慢失败一律不重试（可能已受理）。
+	if fastRetryable(srv, 30*time.Second) {
+		t.Fatal("超过快失败窗口不应重试")
+	}
 }

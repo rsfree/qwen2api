@@ -34,3 +34,25 @@ func TestAccountStateProblemIsAuth(t *testing.T) {
 		t.Fatalf("classifyBusiness 也要认账号状态，得到 %v", KindOf(biz))
 	}
 }
+
+// 上游 404 + "Model not found" 必须归到 KindBadInput（调用方的错），
+// 而不是 KindUnknown —— 后者会被上层当成"疑似偶发"再换号重试。
+//
+// 线上证据（2026-11-12）：qwen3.5-plus 下架后 17 分钟 830 次 404。
+func TestClassifyModelNotFound(t *testing.T) {
+	body := []byte(`{"success":false,"request_id":"x","data":{"code":"Not_Found","details":"Model not found"}}`)
+	err := classifyHTTP(404, 404, "chat/completions", body)
+	if got := KindOf(err); got != KindBadInput {
+		t.Fatalf("模型不存在应归 KindBadInput，得到 %v (%v)", got, err)
+	}
+	var ue *Error
+	if !errors.As(err, &ue) || ue.Code != "Model_Not_Found" {
+		t.Fatalf("code 应为 Model_Not_Found，得到 %+v", ue)
+	}
+
+	// 其它 404（路径错、真 Not_Found）保持原语义，不要误伤。
+	other := classifyHTTP(404, 404, "chats/new", []byte(`{"data":{"code":"Not_Found","details":"chat not found"}}`))
+	if KindOf(other) != KindUnknown {
+		t.Fatalf("会话类 404 应仍是 KindUnknown，得到 %v", KindOf(other))
+	}
+}
