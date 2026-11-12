@@ -44,6 +44,12 @@ type dialogEntry struct {
 	parentID string // 下一轮要用的 parentId（= 上一轮的 response_id）
 	model    string
 	lastUsed time.Time
+	// prevInput 上一轮的输入 token 数（上游 usage.prompt_tokens）。
+	//
+	// 用途只有一个：上游在某些链路**不报** cached_tokens 时，用它估算缓存量
+	// （见 estimateCached）。口径是"上一轮的完整上下文这一轮都还在会话里"，
+	// 所以下界取 min(prevInput, 本轮 prompt_tokens) —— 缓存不可能超过本次输入。
+	prevInput int
 
 	// mu 是**使用权**闸门：同一对话同时只容一个请求复用它。
 	//

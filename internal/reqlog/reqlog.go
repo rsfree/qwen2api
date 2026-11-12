@@ -30,7 +30,10 @@ type Entry struct {
 	// 与 Dialog 一起才能回答"粘性命中到底省没省到钱"——粘性只是必要条件，
 	// 真正命中的证据是这个数。
 	CachedTokens int64 `json:"cached_tokens,omitempty"`
-	FirstByteMS  int64 `json:"first_byte_ms"`
+	// CacheEst cached 是**估算**而非上游读数（粘性命中但上游没报 cached_tokens）。
+	// 流水里会标 (est)：排障时必须能分清"上游报的"和"我们推的"。
+	CacheEst    bool  `json:"cache_est,omitempty"`
+	FirstByteMS int64 `json:"first_byte_ms"`
 	// SubmitMS 提交（POST chat/completions）→ 收到上游响应头。
 	// 这一段是**上游推理排队**，不含建会话、不含我们的解析。
 	SubmitMS int64 `json:"submit_ms,omitempty"`
@@ -196,7 +199,11 @@ func (l *Log) Add(e Entry) {
 		}
 		// 缓存命中：粘性只说明"同一个会话"，命中要靠这个数证明。
 		if e.CachedTokens > 0 {
-			line += fmt.Sprintf(" cache=%d/%d", e.CachedTokens, e.PromptTokens)
+			suffix := ""
+			if e.CacheEst {
+				suffix = "(est)"
+			}
+			line += fmt.Sprintf(" cache=%d/%d%s", e.CachedTokens, e.PromptTokens, suffix)
 		}
 		if e.ChatID != "" {
 			line += " chat_id=" + e.ChatID

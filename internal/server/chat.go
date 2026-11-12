@@ -93,6 +93,8 @@ type opened struct {
 	dialogHit bool
 	// promptMode 本轮提交的 prompt 形态（delta / full），见 submitPrompts.Pick。
 	promptMode string
+	// dialogPrevInput 复用会话时，上一轮的输入 token（用于估算缓存命中）。
+	dialogPrevInput int
 }
 
 // handleChat `POST /v1/chat/completions`。
@@ -516,10 +518,12 @@ func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model,
 		hit      bool
 		chatMS   int64
 		reused   bool
+		prevInput int
 	)
 	if dlg != nil {
 		// 粘性命中：会话与号都已定，省掉一次 chats/new（0.6~3.8s）。
 		chatID, parentID, hit, reused = dlg.chatID, dlg.parentID, true, true
+		prevInput = dlg.prevInput
 	} else {
 		var err error
 		chatID, hit, chatMS, err = s.takeChat(actx, acct.Name, cred, model, attempt.ChatType)
@@ -550,7 +554,8 @@ func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model,
 		stream: st, chatID: chatID, chatHit: hit, chatMS: chatMS,
 		submitMS: submitMS, submitAt: tSubmit,
 		dialog: dlg, dialogKey: dlgKey, dialogHit: reused,
-		promptMode: promptMode,
+		promptMode:      promptMode,
+		dialogPrevInput: prevInput,
 	}, nil
 }
 
@@ -884,10 +889,14 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 		ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
 		Choices: []StreamChoice{{Index: 0, Delta: Delta{}, FinishReason: &stop}},
 	})
-	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage && usage != nil {
+	// usage 只算一次：既要喂给 include_usage 的收尾块，也要进流水。
+	// 🔴 顺序有讲究 —— sd.usageFor 会就地写回 prevInput（下一轮估算要用），
+	// 所以必须在使用后立刻落 entry，不能挪到 DONE 之后再补。
+	usageOut, cacheEst := sd.usageFor(usage)
+	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage && usageOut != nil {
 		s.writeChunk(w, flusher, ChatChunk{
 			ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
-			Choices: []StreamChoice{}, Usage: toUsage(usage),
+			Choices: []StreamChoice{}, Usage: usageOut,
 		})
 	}
 	_, _ = io.WriteString(w, "data: [DONE]\n\n")
@@ -895,11 +904,7 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 
 	entry.Chars = chars
 	entry.Tools = tools.String()
-	if usage != nil {
-		entry.PromptTokens = usage.InputTokens
-		entry.OutputTokens = usage.OutputTokens
-		entry.CachedTokens = int64(usage.CachedTokens())
-	}
+	applyUsage(entry, usage, usageOut, cacheEst)
 	entry.DurationMS = time.Since(start).Milliseconds()
 	s.addReq(entry)
 }
@@ -969,6 +974,7 @@ func (s *Server) serveChatOnce(w http.ResponseWriter, r *http.Request, sd *opene
 	}
 
 	stop := "stop"
+	usageOut, cacheEst := sd.usageFor(usage)
 	resp := ChatResponse{
 		ID:      "chatcmpl-" + strings.ReplaceAll(upstream.UUID(), "-", "")[:24],
 		Object:  "chat.completion",
@@ -979,7 +985,7 @@ func (s *Server) serveChatOnce(w http.ResponseWriter, r *http.Request, sd *opene
 			Message:      &ResponseMessage{Role: "assistant", Content: content, ReasoningContent: reasoning.String()},
 			FinishReason: &stop,
 		}},
-		Usage: toUsage(usage),
+		Usage: usageOut,
 	}
 	writeJSON(w, http.StatusOK, resp)
 
@@ -987,11 +993,7 @@ func (s *Server) serveChatOnce(w http.ResponseWriter, r *http.Request, sd *opene
 	entry.Tools = tools.String()
 	entry.Chars = len([]rune(content))
 	entry.FirstByteMS = time.Since(start).Milliseconds()
-	if usage != nil {
-		entry.PromptTokens = usage.InputTokens
-		entry.OutputTokens = usage.OutputTokens
-		entry.CachedTokens = int64(usage.CachedTokens())
-	}
+	applyUsage(entry, usage, usageOut, cacheEst)
 	entry.DurationMS = time.Since(start).Milliseconds()
 	s.addReq(entry)
 }
@@ -1010,6 +1012,64 @@ func (s *Server) writeSSE(w http.ResponseWriter, f http.Flusher, v any) {
 	_, _ = w.Write(raw)
 	_, _ = io.WriteString(w, "\n\n")
 	f.Flush()
+}
+
+// estimateCached 上游没报 cached_tokens 时的**保守**估算（仅粘性 + 增量）。
+//
+// 口径：复用会话且只发了增量 ⇒ 上一轮的完整上下文仍在会话里，这部分构成缓存命中。
+// 结构上的上界是 min(上一轮 input, 本轮 input)（缓存不可能超过本次输入）。
+//
+// 🔴 再乘 3/4 是刻意的：tokenizer 口径差异、上游可能对长会话做截断/分块，
+// 都会让真实命中低于这个上界。宁可少报 —— 调用方会拿这个数算省了多少钱，
+// 虚高的估算比没有更糟。
+func estimateCached(prevInput, promptTokens int) int {
+	if prevInput <= 0 || promptTokens <= 0 {
+		return 0
+	}
+	base := prevInput
+	if promptTokens < base {
+		base = promptTokens
+	}
+	return base * 3 / 4
+}
+
+// usageFor 算出对外 usage（含缓存命中），并把本轮输入写回给下一轮估算。
+func (sd *opened) usageFor(u *upstream.Usage) (*Usage, bool) {
+	out := toUsage(u)
+	if out == nil {
+		return nil, false
+	}
+	prev := sd.dialogPrevInput
+	// 无论上游报没报，本轮输入都要落库 —— 下一轮的估算靠它。
+	if sd.dialog != nil {
+		sd.dialog.prevInput = u.InputTokens
+	}
+	// 上游给了真读数就用它，不要覆盖。
+	if out.PromptTokensDetails != nil {
+		return out, false
+	}
+	// 只在"确定的链式复用 + 发的是增量"时估算：
+	// 发全量时 prompt 里已经有完整历史，上游未必走缓存，估了就是虚报。
+	if sd.dialogHit && sd.promptMode == "delta" {
+		if est := estimateCached(prev, out.PromptTokens); est > 0 {
+			out.PromptTokensDetails = &PromptTokensDetails{CachedTokens: est}
+			return out, true
+		}
+	}
+	return out, false
+}
+
+// applyUsage 把 usage 同时落到流水（cached/est 与对外响应保持一致）。
+func applyUsage(entry *reqlog.Entry, u *upstream.Usage, out *Usage, estimated bool) {
+	if u == nil || out == nil {
+		return
+	}
+	entry.PromptTokens = out.PromptTokens
+	entry.OutputTokens = out.CompletionTokens
+	if out.PromptTokensDetails != nil {
+		entry.CachedTokens = int64(out.PromptTokensDetails.CachedTokens)
+	}
+	entry.CacheEst = estimated
 }
 
 // toUsage 上游 usage → OpenAI usage（字段名不同，别直接透传）。
