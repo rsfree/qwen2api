@@ -317,12 +317,21 @@ type ChatChunk struct {
 
 // Usage OpenAI 用量形态。
 type Usage struct {
-	PromptTokens            int `json:"prompt_tokens"`
-	CompletionTokens        int `json:"completion_tokens"`
-	TotalTokens             int `json:"total_tokens"`
+	PromptTokens            int                  `json:"prompt_tokens"`
+	CompletionTokens        int                  `json:"completion_tokens"`
+	TotalTokens             int                  `json:"total_tokens"`
+	PromptTokensDetails     *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
 	} `json:"completion_tokens_details,omitempty"`
+}
+
+// PromptTokensDetails OpenAI Chat Completions 的输入明细。
+//
+// 只声明 cached_tokens：它是客户端/计费侧唯一真正会读的字段（按缓存价打折）。
+// audio_tokens 这类上游没有的口径不编 —— 留空比填 0 诚实。
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
 }
 
 // ErrorBody OpenAI 错误形态。

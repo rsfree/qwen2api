@@ -26,7 +26,11 @@ type Entry struct {
 	PromptTokens int       `json:"prompt_tokens"`
 	OutputTokens int       `json:"output_tokens"`
 	Chars        int       `json:"chars"`
-	FirstByteMS  int64     `json:"first_byte_ms"`
+	// CachedTokens 命中 prompt cache 的输入 token（上游只对 Agent 报，见 upstream.Usage）。
+	// 与 Dialog 一起才能回答"粘性命中到底省没省到钱"——粘性只是必要条件，
+	// 真正命中的证据是这个数。
+	CachedTokens int64 `json:"cached_tokens,omitempty"`
+	FirstByteMS  int64 `json:"first_byte_ms"`
 	// SubmitMS 提交（POST chat/completions）→ 收到上游响应头。
 	// 这一段是**上游推理排队**，不含建会话、不含我们的解析。
 	SubmitMS int64 `json:"submit_ms,omitempty"`
@@ -189,6 +193,10 @@ func (l *Log) Add(e Entry) {
 		}
 		if e.Prompt != "" {
 			line += " prompt=" + e.Prompt
+		}
+		// 缓存命中：粘性只说明"同一个会话"，命中要靠这个数证明。
+		if e.CachedTokens > 0 {
+			line += fmt.Sprintf(" cache=%d/%d", e.CachedTokens, e.PromptTokens)
 		}
 		if e.ChatID != "" {
 			line += " chat_id=" + e.ChatID

@@ -214,3 +214,25 @@ func TestIsCookieJar(t *testing.T) {
 		}
 	}
 }
+
+// Agent 的 usage 带 prompt_tokens_details.cached_tokens（§10.6 实测形态）。
+// 这个字段是"粘性到底省没省到钱"的唯一证据，不能被解析层丢掉。
+func TestParseCachedTokens(t *testing.T) {
+	frame := []byte(`{"choices":[{"delta":{"role":"assistant","phase":"answer","status":"finished",
+		"extra":{"model_service_info":{"usage":{"prompt_tokens":14605,"completion_tokens":142,
+		"total_tokens":14747,"prompt_tokens_details":{"cached_tokens":13312,"text_tokens":14605}}}}}}]}`)
+
+	ev, ok, err := NewParser().Parse(frame)
+	if err != nil || !ok {
+		t.Fatalf("解析失败 ok=%v err=%v", ok, err)
+	}
+	if ev.Usage == nil {
+		t.Fatal("应从 extra.model_service_info 取到 usage")
+	}
+	if got := ev.Usage.CachedTokens(); got != 13312 {
+		t.Fatalf("cached_tokens 应为 13312，得到 %d", got)
+	}
+	if ev.Usage.InputTokens != 14605 {
+		t.Fatalf("input_tokens 应归一为 14605，得到 %d", ev.Usage.InputTokens)
+	}
+}

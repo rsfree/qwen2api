@@ -878,6 +878,7 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, sd *ope
 	if usage != nil {
 		entry.PromptTokens = usage.InputTokens
 		entry.OutputTokens = usage.OutputTokens
+		entry.CachedTokens = int64(usage.CachedTokens())
 	}
 	entry.DurationMS = time.Since(start).Milliseconds()
 	s.addReq(entry)
@@ -968,6 +969,7 @@ func (s *Server) serveChatOnce(w http.ResponseWriter, r *http.Request, sd *opene
 	if usage != nil {
 		entry.PromptTokens = usage.InputTokens
 		entry.OutputTokens = usage.OutputTokens
+		entry.CachedTokens = int64(usage.CachedTokens())
 	}
 	entry.DurationMS = time.Since(start).Milliseconds()
 	s.addReq(entry)
@@ -1001,6 +1003,11 @@ func toUsage(u *upstream.Usage) *Usage {
 	}
 	if out.TotalTokens == 0 {
 		out.TotalTokens = u.InputTokens + u.OutputTokens
+	}
+	// 缓存命中按 OpenAI 口径透出（prompt_tokens_details.cached_tokens）。
+	// 🔴 只有 Agent 链路有这个读数；普通 t2t 上游不报，这里是 0 而不是"未命中"。
+	if cached := u.CachedTokens(); cached > 0 {
+		out.PromptTokensDetails = &PromptTokensDetails{CachedTokens: cached}
 	}
 	if u.OutputTokensDetails.ReasoningTokens > 0 {
 		out.CompletionTokensDetails = &struct {

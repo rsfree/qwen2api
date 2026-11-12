@@ -31,6 +31,24 @@ type Usage struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
 		TextTokens      int `json:"text_tokens"`
 	} `json:"output_tokens_details"`
+	// PromptTokensDetails 上游的缓存命中明细（2026-11-08 实测，见 §10.6）。
+	//
+	// 🔴 只有 **Agent** 会填：那个 14k 的系统提示在同一 chat_id 内命中 cache，
+	// 实测 `{"cached_tokens":13312,"text_tokens":14605}`。普通 t2t 只给
+	// input_tokens_details.text_tokens，没有缓存口径 —— 所以这个值为 0
+	// 有两种含义：真的没命中，或这条链路根本不报。不要拿 0 当"未命中"下结论。
+	PromptTokensDetails struct {
+		CachedTokens int `json:"cached_tokens"`
+		TextTokens   int `json:"text_tokens"`
+	} `json:"prompt_tokens_details"`
+}
+
+// CachedTokens 命中 prompt cache 的输入 token 数（没有该口径时为 0）。
+func (u *Usage) CachedTokens() int {
+	if u == nil {
+		return 0
+	}
+	return u.PromptTokensDetails.CachedTokens
 }
 
 // Created 首帧 `response.created` 的载荷（实测新增于旧契约之外）。

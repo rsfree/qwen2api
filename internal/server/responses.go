@@ -202,15 +202,27 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 func responsesUsage(u *upstream.Usage) map[string]any {
 	if u == nil {
-		return map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+		// 形状对齐成功路径：客户端不会为 0 做特判，少一个 key 就得自己兜。
+		return map[string]any{
+			"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+			"input_tokens_details":  map[string]any{"cached_tokens": 0},
+			"output_tokens_details": map[string]any{"reasoning_tokens": 0},
+		}
 	}
 	total := u.TotalTokens
 	if total == 0 {
 		total = u.InputTokens + u.OutputTokens
 	}
-	return map[string]any{
+	// OpenAI Responses 的 usage 形状与 Chat Completions 不同：
+	// 明细挂在 input_tokens_details / output_tokens_details 下。
+	out := map[string]any{
 		"input_tokens": u.InputTokens, "output_tokens": u.OutputTokens, "total_tokens": total,
+		"input_tokens_details": map[string]any{"cached_tokens": u.CachedTokens()},
+		"output_tokens_details": map[string]any{
+			"reasoning_tokens": u.OutputTokensDetails.ReasoningTokens,
+		},
 	}
+	return out
 }
 
 // responsesToChat 解析 input 字段（字符串 或 消息数组）。
