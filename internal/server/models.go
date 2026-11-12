@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"sort"
 	"sync"
@@ -161,7 +162,13 @@ func (c *ModelCache) refresh(ctx context.Context) {
 	// 失败不影响主清单（agents 保持上一份，不再更新即可）。
 	var agents []upstream.ModelEntry
 	if err == nil {
-		agents, _ = c.up.ListAgentModels(ctx, acct.Token)
+		var aerr error
+		agents, aerr = c.up.ListAgentModels(ctx, acct.Token)
+		if aerr != nil {
+			// 🔴 必须打出来：这个清单决定"上游上新能不能自动发现"，静默失败
+			// 的表现就是"新模型永远不出现"，而日志里一片干净。
+			log.Printf("[qwen2api] agent 底座清单拉取失败: %v", aerr)
+		}
 	}
 	c.pool.Release(acct)
 
@@ -171,6 +178,7 @@ func (c *ModelCache) refresh(ctx context.Context) {
 	if err != nil || len(entries) == 0 {
 		if err != nil {
 			c.lastErr = err.Error()
+			log.Printf("[qwen2api] 模型清单拉取失败: %v", err)
 		}
 		c.expiresAt = time.Now().Add(c.ttl)
 		return
