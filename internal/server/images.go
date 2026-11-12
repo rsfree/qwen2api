@@ -283,10 +283,23 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		// 浏览器地址栏直输能开，网页 <img> / 服务端 SDK 会 403/404 ——
 		// 需要绕过时用 /v1/media 代理（mediaproxy.go），改这里一行即可切回。
 		for _, u := range imgs {
+			// 去水印 + 转存自建存储。
+			// 🔴 失败**不降级**：宁可这张不产出，也不交带水印的图。
+			// 成功时顺带拿到 PNG 字节，b64_json 模式直接用，省一次回源下载。
+			var polished []byte
+			u, polished, perr := s.polishImage(r.Context(), u)
+			if perr != nil {
+				log.Printf("[qwen2api] 图片去水印失败（该张不产出）: %v", perr)
+				lastErr = perr
+				continue
+			}
+
 			d := ImageDatum{URL: u, RevisedPrompt: revised}
 			if format == "b64_json" {
-				b64, derr := downloadAsBase64(r.Context(), u)
-				if derr != nil {
+				if polished != nil {
+					d.B64JSON = base64.StdEncoding.EncodeToString(polished)
+					d.URL = ""
+				} else if b64, derr := downloadAsBase64(r.Context(), u); derr != nil {
 					// 直链拿不到就退回 url —— 绝不返回空 b64 让调用方存下一堆空文件。
 					log.Printf("[qwen2api] 图片转 base64 失败（改回 url）: %v", derr)
 				} else {
