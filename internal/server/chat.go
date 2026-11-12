@@ -236,14 +236,19 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if len(textFiles) > 0 {
 		ps.Delta = ""
 	}
-	// 🔴 增量还有一个硬前提：本轮 messages 必须是上一轮的**纯追加**。
-	// 客户端做过上下文压缩/摘要/编辑历史时，只发最后一句会让模型看不到
-	// 被改写的内容 —— 它会一本正经地按残缺上下文回答。
+	// 🔴 增量是 **Agent 专属**的，普通 t2t 一律发全量（2026-11-12 线上实测）。
 	//
-	// 而且回退必须**彻底**：不能"复用旧会话 + 发全量"，那会把完整历史再往
-	// 会话里写一遍，留下两份互相矛盾的历史。正确做法是丢掉这段对话、
-	// 按全新对话处理（新会话 + 全量），也就是旧版本的行为。
-	if ps.Delta != "" && dlgKey != "" && !s.dialogs.appendOnly(dlgKey, req.Messages) {
+	// 实测过程：普通文本第二轮发增量后，模型答"请问您指的是哪个数的平方"——
+	// 它根本没看到第一轮。同时 cached 从 512 涨到 1152，说明**历史确实进了
+	// 上游的 prompt 前缀并被缓存**，但模型输入只由我们发的 prompt 决定，
+	// 上游不会把 chat_id 里的历史补进去。
+	//
+	// 所以普通文本能优化的是"同号"，不是"少发"：保持同一个账号 ⇒ 历史前缀
+	// 命中 cache；会话照旧新取一个空的，prompt 照旧全量。
+	// 见 openOnce 里 t2t 分支的说明。
+	if isAgent && ps.Delta != "" && dlgKey != "" && !s.dialogs.appendOnly(dlgKey, req.Messages) {
+		// 历史被改写（压缩/摘要/编辑）：既不能发增量，也不能把全量塞进旧会话
+		// （那会让会话里留下两份矛盾的历史）。丢掉这段，按全新对话处理。
 		s.dialogs.drop(dlgKey)
 		ps.Delta = ""
 	}
@@ -567,10 +572,26 @@ func (s *Server) openOnce(actx context.Context, acct *pool.Account, cred, model,
 		prevInput int
 	)
 	if dlg != nil {
-		// 粘性命中：会话与号都已定，省掉一次 chats/new（0.6~3.8s）。
-		chatID, parentID, hit, reused = dlg.chatID, dlg.parentID, true, true
 		prevInput = dlg.prevInput
-	} else {
+	}
+	switch {
+	case dlg != nil && attempt.ChatType == "t2t":
+		// 普通文本：**只借账号，不复用会话**。
+		//
+		// 上游 t2t 不会把 chat_id 里的历史补进模型输入（2026-11-12 实测：
+		// 发增量后模型答"你指的哪个数字"，而 cached 反而从 512 涨到 1152 ——
+		// 历史进了 prompt 前缀缓存，却不在模型的上下文里）。
+		// 所以能省的是"同号"带来的 cache 命中，不是"少发 prompt"。
+		var err error
+		chatID, hit, chatMS, err = s.takeChat(actx, acct.Name, cred, model, attempt.ChatType)
+		if err != nil {
+			return nil, err
+		}
+	case dlg != nil:
+		// Agent 粘性命中：会话与号都已定，省掉一次 chats/new（0.6~3.8s），
+		// 且只发本轮增量（历史由上游会话链承载）。
+		chatID, parentID, hit, reused = dlg.chatID, dlg.parentID, true, true
+	default:
 		var err error
 		chatID, hit, chatMS, err = s.takeChat(actx, acct.Name, cred, model, attempt.ChatType)
 		if err != nil {

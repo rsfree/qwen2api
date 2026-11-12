@@ -244,93 +244,54 @@ func TestAgentDialogDisabled(t *testing.T) {
 }
 
 // 普通模型不受影响：即使带了 user 也不进对话表。
-// 普通文本也吃粘性（2026-11-12 扩围）：两轮纯追加 ⇒ 复用会话 + 只发增量。
+// 普通文本的粘性**只借账号**：同号吃 cache，但会话必须新取、prompt 必须全量。
 //
-// 线上数据推翻了旧结论"普通 t2t 复用会话换不到收益"：submit 与 prompt 大小
-// 单调相关（<2k→1039ms，10-20k→3575ms），而 prompt 大正是因为每轮重发全量历史。
-func TestPlainModelStickyWithDelta(t *testing.T) {
+// 2026-11-12 线上实测：上游 t2t 不会把 chat_id 里的历史补进模型输入。
+// 发增量时模型答"请问您指的是哪个数的平方"——它根本没看到第一轮，
+// 而 cached 反而从 512 涨到 1152（历史进了 prompt 前缀缓存，却不在上下文里）。
+func TestPlainModelKeepsAccountButResendsFull(t *testing.T) {
 	up := newFakeUpstream(t, 0)
 	up.dynamicChats = true
-	h := newTestServer(t, up, 2, nil)
+	s := newTestServerWithServer(t, up, 2)
+	h := s.Handler()
 
 	const first = "帮我解释一下 TCP 三次握手为什么必须三次而不是两次"
-
 	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,
 		"messages":[{"role":"user","content":"`+first+`"}]}`))
 	chat1 := up.gotSubmit["chatId"]
-	// 首轮没有可复用的会话 ⇒ 必须全量拼接（含"当前问题"包装或直出原文）。
-	if c := submitContent(t, up); c == "" {
-		t.Fatal("首轮应提交非空 prompt")
-	}
 
-	// 第二轮：纯追加（上一轮原样 + assistant + 新 user）⇒ 复用 + 增量。
-	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,
-		"messages":[{"role":"user","content":"`+first+`"},
-		            {"role":"assistant","content":"因为要确认双方的收发能力"},
-		            {"role":"user","content":"那四次挥手呢"}]}`))
-	if got := up.gotSubmit["chatId"]; got != chat1 {
-		t.Fatalf("普通文本第二轮应复用同一会话，%v → %v", chat1, got)
-	}
-	if c := submitContent(t, up); c != "那四次挥手呢" {
-		t.Fatalf("纯追加时应只发增量，实际 content=%q", c)
-	}
-}
-
-// 客户端改写过历史（上下文压缩/摘要）⇒ 必须回退全量。
-//
-// 这是"只发增量"的唯一安全前提：模型看不到被改写的内容，会一本正经地
-// 按残缺上下文回答——那种错比慢严重得多。
-func TestPlainModelRewrittenHistoryFallsBack(t *testing.T) {
-	up := newFakeUpstream(t, 0)
-	up.dynamicChats = true
-	h := newTestServer(t, up, 2, nil)
-
-	const first = "帮我解释一下 TCP 三次握手为什么必须三次而不是两次"
-	// 第一轮、第二轮纯追加，建立"上一轮形态"的指纹。
-	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,
-		"messages":[{"role":"user","content":"`+first+`"}]}`))
 	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,
 		"messages":[{"role":"user","content":"`+first+`"},
 		            {"role":"assistant","content":"因为要确认双方收发能力"},
 		            {"role":"user","content":"那四次挥手呢"}]}`))
-	if c := submitContent(t, up); c != "那四次挥手呢" {
-		t.Fatalf("前置条件：这一轮应是增量，实际 %q", c)
-	}
-	chatBefore := up.gotSubmit["chatId"]
 
-	// 第三轮：首条 user 不变（对话键仍命中），但中间那条 assistant 被改成了摘要。
-	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,
-		"messages":[{"role":"user","content":"`+first+`"},
-		            {"role":"assistant","content":"【摘要】三次握手的目的是确认收发能力"},
-		            {"role":"user","content":"那四次挥手呢"},
-		            {"role":"assistant","content":"四次挥手是断开连接的过程"},
-		            {"role":"user","content":"总结一下"}]}`))
-	got := submitContent(t, up)
-	if !strings.Contains(got, "对话历史") {
-		t.Fatalf("历史被改写后必须回退全量拼接，实际 content=%q", got)
+	// 会话必须换新的：复用旧会话只会让 history 写两遍，而上游 t2t 又不读它。
+	if got := up.gotSubmit["chatId"]; got == chat1 {
+		t.Fatalf("普通文本不应复用会话，实际仍用 %v", got)
 	}
-	// 且必须换新会话：把全量再塞进旧会话会留下两份矛盾的历史。
-	if chatNow := up.gotSubmit["chatId"]; chatNow == chatBefore {
-		t.Fatalf("改写历史后应丢弃旧会话，实际仍用 %v", chatNow)
+	// prompt 必须全量（含历史），否则模型看不到上下文。
+	if c := submitContent(t, up); !strings.Contains(c, "对话历史") {
+		t.Fatalf("普通文本必须发全量拼接，实际 content=%q", c)
+	}
+	// 账号要粘住 —— 这是 cache 能命中的唯一来源。
+	rows := s.log.Recent(2)
+	if len(rows) != 2 || rows[0].Account != rows[1].Account {
+		t.Fatalf("同一个对话应固定在同一账号上，得到 %+v", rows)
 	}
 }
 
-// 普通文本不走 user 字段当对话键：那是终端用户 ID，一个用户开多个对话会串。
-func TestPlainModelKeyIgnoresUser(t *testing.T) {
-	up := newFakeUpstream(t, 0)
-	up.dynamicChats = true
-	h := newTestServer(t, up, 2, nil)
+// 普通文本的对话键不能用 user 字段：那是终端用户 ID，一个用户开多个对话会串。
+func TestDialogKeySkipsUserForPlain(t *testing.T) {
+	msgs := []ChatMessage{{Role: "user", Content: json.RawMessage(`"一段足够长的开场白用于锚点"`)}}
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 
-	const a = "第一个对话的开场白，足够长以通过锚点下限"
-	const b = "第二个对话的开场白，内容完全不同但同样足够长"
-
-	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,"user":"same-user",
-		"messages":[{"role":"user","content":"`+a+`"}]}`))
-	chatA := up.gotSubmit["chatId"]
-	h.ServeHTTP(httptest.NewRecorder(), agentReq(`{"model":"qwen3.7-plus","stream":false,"user":"same-user",
-		"messages":[{"role":"user","content":"`+b+`"}]}`))
-	if got := up.gotSubmit["chatId"]; got == chatA {
-		t.Fatal("同一个 user 下的两段不同对话不能被并成一段（会泄漏上下文）")
+	k, src := dialogKeyOf(r, "u-same", "m", msgs, false)
+	if src == "user" || k == "u:u-same" {
+		t.Fatalf("普通文本不得用 user 做对话键，得到 %q/%q", k, src)
+	}
+	// Agent 仍然用它（一次一个长任务，语义上就是"这个用户的当前任务"）。
+	if _, src := dialogKeyOf(r, "u-same", "m", msgs, true); src != "user" {
+		t.Fatalf("Agent 应仍优先 user，得到 %q", src)
 	}
 }
 
