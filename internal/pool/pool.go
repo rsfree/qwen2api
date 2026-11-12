@@ -78,6 +78,16 @@ type Account struct {
 	//     续期的号，请求就轮不到它（几百 ms vs 几秒 + 最容易吃 WAF 的 signin）。
 	// 纯内存态、不落盘：重启后按 served 重新判断即可，不必背着历史包袱。
 	needLogin bool
+	// chatReady 该号当前是否有**预建好的空会话**（由 server 侧的会话池同步）。
+	//
+	// 为什么要让选号知道这件事（2026-11-12 线上实测）：预热只覆盖
+	// chatTarget 个号（按并发算，默认 6），而选号面是按 token 活着的
+	// 那一批（实测 116 个）—— 两者错开 20 倍，于是 38% 的请求落到
+	// "没货"的号上，每次现建会话要 2.9~3.1 秒，直接吃掉首字。
+	// 选号偏好"有货"的号之后，命中率不再取决于两张表的巧合。
+	//
+	// 只在持锁时读写（SetChatReady / lessPick），不做原子操作。
+	chatReady bool
 }
 
 // View 面板/日志用的只读快照（不含 token）。
@@ -304,6 +314,13 @@ func lessPick(a, b *Account, now time.Time) bool {
 	// 密码重登"的号上：前者几百毫秒，后者几秒且最容易吃 WAF（2026-11-02）。
 	if ap, bp := a.RefreshToken != "", b.RefreshToken != ""; ap != bp {
 		return ap
+	}
+	// 有预建会话的优先（2026-11-12 加）。这一档排在 served 之前是刻意的：
+	// served 轮转只能保证"摊得匀"，不知道哪个号手里有货 —— 而命中与否
+	// 直接等于 3 秒。预热覆盖会跟着这套排序自然收敛（见 keepalive.prewarmChats），
+	// 所以不会出现"只有少数几个号被永久用着"：池子铺满后目标号全都 chatReady。
+	if a.chatReady != b.chatReady {
+		return a.chatReady
 	}
 	if a.served != b.served {
 		return a.served < b.served
@@ -757,6 +774,33 @@ func (p *Pool) MarkNeedLogin(name string) {
 	defer p.mu.Unlock()
 	if a := p.lookupLocked(name); a != nil {
 		a.needLogin = true
+	}
+}
+
+// SetChatReady 全量刷新"哪些号手里有预建会话"（预热循环每轮调一次）。
+//
+// 🔴 必须全量：会话池里的条目会因为 TTL 过期、被 Take 消耗而消失，
+// 增量维护必然漏掉这两种，最后退化成"标志说有的号其实没货" —— 那正是
+// 要消灭的 miss（38% × 3 秒）。每轮 O(n) 重刷，3135 个号也就几十微秒。
+func (p *Pool) SetChatReady(names map[string]struct{}) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, a := range p.accounts {
+		_, ok := names[a.Name]
+		a.chatReady = ok
+	}
+}
+
+// MarkChatReady 单点更新：Take 消耗后立即置 false（别让下一个请求再撞它），
+// 后台补货写入后立即置 true。
+func (p *Pool) MarkChatReady(name string, ready bool) {
+	if name == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if a := p.lookupLocked(name); a != nil {
+		a.chatReady = ready
 	}
 }
 

@@ -318,11 +318,19 @@ func (s *Server) warmOnce(ctx context.Context, peak int) bool {
 // 建会话那 2.4s 占比可以忽略，不值得为它们维护池子。
 func (s *Server) prewarmChats(ctx context.Context, peak int) {
 	if !s.chats.Enabled() {
+		// 池被关掉（per=0）⇒ 没有任何号"手里有货"。不清标志的话，选号会一直
+		// 优先撞那些残留标志为 true 的号，而它们每次都要现建 3 秒。
+		s.pool.SetChatReady(nil)
 		return
 	}
 	if n := s.chats.Trim(); n > 0 {
 		log.Printf("[qwen2api] 会话池清理过期 %d 个", n)
 	}
+	// 把"谁手里有货"同步给选号（见 pool.SetChatReady）。
+	// 🔴 位置在 Trim 之后：刚清掉的那批必须立刻从标志里消失，否则下一轮
+	// 请求仍会优先选中它们 —— 而它们恰恰是要多花 3 秒现建的。
+	// 本轮后续补货写入时会单点置真（见 prewarmChat），不必等下一轮。
+	s.pool.SetChatReady(s.chats.ReadyAccounts())
 	ka := s.conf().Pool.Keepalive.Effective()
 	need := s.chatTarget(peak, s.warmTarget(peak))
 	// 记下来给 /stats 看：这个数通常远小于 warm.target，差值就是"省下来的保活"。

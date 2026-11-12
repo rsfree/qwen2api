@@ -1,15 +1,25 @@
 package server
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/yuanjie-ai/qwen2api/internal/upstream"
+)
 
 // 每轮批量要同时满足两件事：热满够快、且连接保活能在 TTL 内轮一遍。
 func TestWarmBatchMeetsConnTTL(t *testing.T) {
-	// 一个 TTL（90s）内必须把 target 个号走完，否则先保活的已被回收，白跑。
+	// 一个 TTL 内必须把 target 个号走完，否则先保活的已被回收，白跑。
+	//
+	// 🔴 用常量而不是写死 90：TTL 本身会跟着"号轮转周期"调整
+	// （2026-11-12 实测 90s 顶不住 96s 的轮转，已改 300s）。
+	// 写死的话，常量一改这条测试就从"守约束"退化成"守旧数字"。
+	ttl := int(upstream.IdleConnTimeout / time.Second)
 	for _, target := range []int{4, 8, 16, 32, 64, 128} {
 		b := warmBatch(target, 512, 20)
 		rounds := (target + b - 1) / b
-		if sec := rounds * 20; sec > 90 {
-			t.Fatalf("target=%d batch=%d 覆盖要 %ds > 90s，保活会失效", target, b, sec)
+		if sec := rounds * 20; sec > ttl {
+			t.Fatalf("target=%d batch=%d 覆盖要 %ds > %ds，保活会失效", target, b, sec, ttl)
 		}
 	}
 	// 上限必须生效（防止一轮把上游打太热）。
@@ -20,9 +30,11 @@ func TestWarmBatchMeetsConnTTL(t *testing.T) {
 	if b := warmBatch(1, 48, 20); b != 4 {
 		t.Fatalf("下限应为 4，得到 %d", b)
 	}
-	// tick 调大 ⇒ 每轮要多走一些，才能在同一 TTL 内覆盖完。
-	if small, big := warmBatch(64, 512, 10), warmBatch(64, 512, 30); big <= small {
-		t.Fatalf("tick 变大批量应变大：10s→%d，30s→%d", small, big)
+	// tick 大到"一个 TTL 里只剩几轮"时，批量必须被覆盖约束推大，
+	// 否则先保活的那批会先过期（TTL 拉长后，小 tick 不再需要额外补偿 ——
+	// 那时批量的主项是 target/8，即"8 轮热满"）。
+	if small, big := warmBatch(64, 512, 10), warmBatch(64, 512, 100); big <= small {
+		t.Fatalf("tick 大到 TTL 只够 3 轮时应推大批量：10s→%d，100s→%d", small, big)
 	}
 }
 

@@ -296,6 +296,32 @@ func (p *ChatPool) Stat() ChatPoolStat {
 	return out
 }
 
+// ReadyAccounts 当前手里有**可用** t2t 空会话的账号集合。
+//
+// 用途是给选号做先验（见 pool.SetChatReady）：谁手里有货，就优先用谁，
+// 命中率不再依赖"预热覆盖"和"选号面"两张表碰巧对齐。
+//
+// 🔴 必须按年龄过滤，不能只看"有条目"：TTL 到期的条目要等 Take/Trim 才被清，
+// 只报存在性会把选号引向一个已经失效的会话 —— 白送一次 miss，还不如不报。
+func (p *ChatPool) ReadyAccounts() map[string]struct{} {
+	out := map[string]struct{}{}
+	if p == nil || !p.Enabled() {
+		return out
+	}
+	now := p.now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for acct, byType := range p.m {
+		for _, e := range byType["t2t"] {
+			if now.Sub(e.at) <= p.ttl {
+				out[acct] = struct{}{}
+				break
+			}
+		}
+	}
+	return out
+}
+
 // Accounts 池里有哪些号（调试/观测用，按名字排序保证输出稳定）。
 func (p *ChatPool) Accounts() []string {
 	if p == nil {

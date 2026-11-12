@@ -358,6 +358,9 @@ func (s *Server) takeChat(ctx context.Context, acctName, cred, model, chatType s
 	// 只有 t2t 值得维护池子（占请求绝大多数）；t2i / image_edit / t2v 一次
 	// 就要 50~90 秒，建会话那 2.4s 占比可以忽略，补了纯属白花上游调用。
 	if id, ok := s.chats.Take(acctName, chatType); ok {
+		// 取走之后可能还有（per>1）：以"还剩没剩"为准，而不是一律置假 ——
+		// 一律置假会把多余的会话从选号视野里藏起来，等于白建。
+		s.pool.MarkChatReady(acctName, s.chats.Has(acctName, chatType))
 		// 🔴 补货的判断必须在 **Take 之后**：命中会把池子抽空，
 		// 用取之前的 Short 判断，看到的是"还满着"⇒ 永不补货，
 		// 命中率被锁死在 50%（命中一次、下一次必然现建）。
@@ -418,7 +421,11 @@ func (s *Server) prewarmChat(ctx context.Context, acctName, cred, model, chatTyp
 	if err != nil {
 		return
 	}
-	s.chats.Put(acctName, chatType, id)
+	if s.chats.Put(acctName, chatType, id) {
+		// 立刻让选号知道这个号有货了 —— 等下一轮 tick（20s）才置真的话，
+		// 这 20 秒里请求会继续绕开它，白建一个会话。
+		s.pool.MarkChatReady(acctName, true)
+	}
 }
 
 // openOnce 用指定账号跑一轮：上传图片（若有）→ 复用或建会话 → 提交 → 开流。
