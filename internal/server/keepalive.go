@@ -32,6 +32,8 @@ const (
 	// 预热带是按 tick 轮转的：不压住失败号，它就会被每轮重新选中，对同一张可能
 	// 已经作废的 refresh_token 持续打 auth 域 —— 既无意义，还容易招风控。
 	// 取 5 分钟，与失败日志的去重窗口一致：一个号一次故障只留一条日志、一次处置。
+	// ⚠️ 只压「结果未知」的失败。401 不进这张表：票已被撤销是确定性结论，
+	// 再退避只会推迟唯一有效的修复动作（见 afterRefreshFailure）。
 	refreshRetryBackoff = 5 * time.Minute
 	// refreshLockShards 换票互斥的分片数（见 lockRefresh）。
 	refreshLockShards = 64
@@ -183,6 +185,9 @@ func (s *Server) adoptOne(ctx context.Context, name string) bool {
 		s.pool.SetRefresh(name, refresh)
 	}
 	s.clearRefreshErr(name) // 修好了就别留着上一次的失败时间戳
+	// 成功必须留痕：否则「自愈」是静默的，出问题时分不清「还没轮到它」和
+	// 「早已修好」，只剩一条失败日志可看。
+	log.Printf("[qwen2api] 账号 %s 后台重登成功，凭据已换新", name)
 	return true
 }
 
@@ -561,6 +566,11 @@ func (s *Server) afterRefreshFailure(name string, err error) {
 		// 打上 needLogin：AdoptCandidates 会把它插到队列最前面（趁请求还没
 		// 碰到就修好），lessPick 也会把它排到最后（请求路径不再撞上几秒的 signin）。
 		s.pool.MarkNeedLogin(name)
+		// 🔴 401 是**确定性**失败：票已经清空，不存在「再撞同一张死票」的风险，
+		// 退避在这里没有防护价值 —— 留着它只会把唯一有效的修复动作（密码重登）
+		// 推迟满 5 分钟。实测 2026-11-13 17:06 一批 15 个号同时被撤销，最早的重登
+		// 尝试落在 5m21s 后、最晚 7m49s 后，这段停摆本可以只有一个 tick（20s）。
+		s.clearRefreshErr(name)
 		log.Printf("[qwen2api] 账号 %s 的 refresh_token 已失效（401），插队重登", name)
 	}
 }

@@ -779,6 +779,12 @@ func (s *Server) relogin(ctx context.Context, acct *pool.Account) bool {
 			log.Printf("[qwen2api] 账号 %s 凭据已续期（refresh_token）", acct.Name)
 			return true
 		} else {
+			// 401 = 这张票在服务端已经作废，必须当场丢掉。留着的代价是双份的：
+			// ① 这条路径下次还要先白付一次 refresh 往返（几百 ms）才轮到 signin；
+			// ② 后台重登被同一张死票的退避挡在 5 分钟之外。
+			// afterRefreshFailure 只对 401 生效，非 401 立即返回，不影响「上游只是
+			// 抖了一下」的场景。
+			s.afterRefreshFailure(acct.Name, err)
 			log.Printf("[qwen2api] 账号 %s refresh_token 续期失败，改用密码重登: %v", acct.Name, err)
 		}
 	}
