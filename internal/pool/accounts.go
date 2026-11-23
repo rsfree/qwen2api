@@ -48,6 +48,7 @@ func (p *Pool) Add(a config.Account) (*Account, bool) {
 		Token:        dropSessionTicket(name, a.Token),
 		Email:        strings.TrimSpace(a.Email),
 		Password:     a.Password,
+		Proxy:        strings.TrimSpace(a.Proxy),
 		RefreshToken: a.RefreshToken,
 		Note:         a.Note,
 	}
@@ -104,7 +105,10 @@ func (p *Pool) Export() []config.Account {
 			// 🔴 少了这一行，refresh_token 就只在内存里 —— 重启后全丢，
 			// 整池又要重新 signin 一遍（2026-10-30 实测踩到）。
 			RefreshToken: a.RefreshToken,
-			Note:         a.Note,
+			// 同理少了 Proxy：面板一保存，账号的专属出口就被静默抹掉，
+			// 下次重启这些号又落回主出口 signin。
+			Proxy: a.Proxy,
+			Note:  a.Note,
 		})
 	}
 	return out

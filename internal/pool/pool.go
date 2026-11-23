@@ -29,7 +29,9 @@ type Account struct {
 	Email string
 	// Password 非空 ⇒ 凭据失效时可自动重登（signin）。
 	Password string
-	Note     string
+	// Proxy 该账号专属出口 URL（空 = 共享模板/直连）。见 config.Account.Proxy。
+	Proxy string
+	Note  string
 
 	// authMode 探测到的凭据形态（cookie / bearer）；空 = 尚未探测。
 	authMode string
@@ -185,6 +187,7 @@ func New(cfg config.Pool, accounts []config.Account, stateFile string) *Pool {
 			Token:        dropSessionTicket(a.Name, a.Token),
 			Email:        a.Email,
 			Password:     a.Password,
+			Proxy:        strings.TrimSpace(a.Proxy),
 			RefreshToken: a.RefreshToken,
 			Note:         a.Note,
 		}
@@ -210,6 +213,23 @@ func (p *Pool) Len() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return len(p.accounts)
+}
+
+// AccountProxy 返回账号的专属出口 URL（空串 = 未配置，走共享模板/直连）。
+//
+// 这是 accounts[].proxy 字段真正"落地"的出口：main 启动时把它注入
+// upstream 客户端（SetAccountProxy），signin/refresh/业务请求就都会
+// 按账号选出口了。
+func (p *Pool) AccountProxy(name string) string {
+	if name == "" {
+		return ""
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if a := p.lookupLocked(name); a != nil {
+		return a.Proxy
+	}
+	return ""
 }
 
 // Pick 取一个可用账号并加在途租约。ok=false 表示全部冷却/失效。

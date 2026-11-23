@@ -29,6 +29,13 @@ type Account struct {
 	Name  string `json:"name"`  // 展示名（面板/日志用），空则自动编号
 	Token string `json:"token"` // 凭据本体；可带 cookie:/bearer: 前缀显式指定形态
 	Email string `json:"email"` // 登录邮箱（配 password 时用于自动续期）
+	// Proxy 该账号**专属出口** URL（socks5:// / socks5h:// / http:// / https://…）。
+	// 留空 = 用共享的 upstream.proxy.url_template（如果启用），否则直连。
+	// 优先级高于模板：单个号要换出口时不必动全局配置 —— 尤其是登录（signin）
+	// 也要走这个出口时，模板做不到"只给某几个号换出口"。
+	// ⚠️ 生效需要 main 里把 pool.AccountProxy 接到 upstream 客户端
+	// （见 cmd/server/main.go 的 SetAccountProxy 接线）。
+	Proxy string `json:"proxy,omitempty"`
 	// RefreshToken signin 之后 refresh 下发的 refresh_token（**可重复使用**）。
 	// 有了它，access token（TTL 900s）过期时不必再用密码登录 —— 换一张新的即可。
 	// 由网关自动填充；手写配置留空则退回"密码重登"（慢且更容易吃 WAF）。

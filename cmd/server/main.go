@@ -116,6 +116,9 @@ func main() {
 
 	pool := pool.New(cfg.Pool, cfg.Accounts, cfg.StateFile)
 	up := upstream.New(cfg.Upstream)
+	// 账号级出口接线：accounts[].proxy 对 signin/refresh/业务请求生效的关键。
+	// 没有这一行，该字段只是配置里的一行字，谁也不会去读。
+	up.SetAccountProxy(pool.AccountProxy)
 	// 启动时把账号"点亮"：只有密码的走 signin，有 token 的探测凭据形态。
 	// 这两步都是一次只读请求，换来的是"第一个用户请求不用替我们试错"。
 	bootstrapAccounts(cfg, pool, up)

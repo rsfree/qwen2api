@@ -51,10 +51,33 @@ type proxyRouter struct {
 	cfg   config.Proxy
 	mu    sync.Mutex
 	cache map[string]*http.Transport
+
+	// accountProxy "账号名 → 专属出口 URL"解析器（main 在 pool 就绪后注入）。
+	// nil = 未注入（测试场景），只走 url_template / 直连。
+	accountProxyMu sync.RWMutex
+	accountProxy   func(string) string
 }
 
 func newProxyRouter(base *http.Transport, cfg config.Proxy) http.RoundTripper {
 	return &proxyRouter{base: base, cfg: cfg, cache: map[string]*http.Transport{}}
+}
+
+// SetAccountProxyResolver 注入解析器。注入/换人都不清 cache ——
+// cache 键里带 URL（见 transportFor），换 URL 自然是新键，旧键随 LRU 无所谓。
+func (r *proxyRouter) SetAccountProxyResolver(f func(string) string) {
+	r.accountProxyMu.Lock()
+	r.accountProxy = f
+	r.accountProxyMu.Unlock()
+}
+
+func (r *proxyRouter) resolveAccountProxy(account string) string {
+	r.accountProxyMu.RLock()
+	f := r.accountProxy
+	r.accountProxyMu.RUnlock()
+	if f == nil || account == "" {
+		return ""
+	}
+	return strings.TrimSpace(f(account))
 }
 
 func (r *proxyRouter) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -95,6 +118,16 @@ func isDirectHost(host string) bool {
 }
 
 func (r *proxyRouter) transportFor(account string) (*http.Transport, error) {
+	// 1) 账号专属 URL —— **即使 upstream.proxy.enabled=false 也生效**：
+	//    URL 写在账号身上，就是运维明确要"这个号走这个出口"，
+	//    拿全局开关去否决它反而违背字段的本意。
+	//    典型场景：signin 的 IP 频率墙把主出口打花了，只给新导入的几个号
+	//    指一条住宅出口，主流量继续直连。
+	if account != "" {
+		if raw := r.resolveAccountProxy(account); raw != "" {
+			return r.transportForURL(account, raw)
+		}
+	}
 	if !r.cfg.Enabled || strings.TrimSpace(r.cfg.URLTemplate) == "" {
 		return r.base, nil
 	}
@@ -105,36 +138,57 @@ func (r *proxyRouter) transportFor(account string) (*http.Transport, error) {
 		}
 		return nil, errors.New("代理已启用且禁止直连，但本次请求缺少账号上下文")
 	}
+	return r.transportForURL(account, expandProxyURL(r.cfg.URLTemplate, account, r.cfg.Password))
+}
 
+// transportForURL 按键（账号 + 完整 URL）取缓存的 transport，
+// 没有则现建。键里带 URL：账号的 URL 变了（面板改代理）不会命中旧连接。
+func (r *proxyRouter) transportForURL(account, raw string) (*http.Transport, error) {
+	key := account + "\x00" + raw
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if tr, ok := r.cache[account]; ok {
+	if tr, ok := r.cache[key]; ok {
 		return tr, nil
 	}
-	tr, err := r.buildFor(account)
+	tr, err := buildForURL(r.base, raw)
 	if err != nil {
 		return nil, err
 	}
-	r.cache[account] = tr
+	r.cache[key] = tr
 	return tr, nil
 }
 
-// buildFor 给单个账号建 transport。
-func (r *proxyRouter) buildFor(account string) (*http.Transport, error) {
-	raw := expandProxyURL(r.cfg.URLTemplate, account, r.cfg.Password)
+// buildForURL 给单个出口建 transport。
+//
+// 支持两类出口：
+//   - socks5 / socks5h：换出口 IP + 远端 DNS；
+//   - http / https：CONNECT 隧道。TLS 是端到端的（CONNECT 只转发 TCP 流），
+//     换出口 IP 的目的完全达成；CONNECT 本身也不加 X-Forwarded-For
+//     （那是代理后端应用自己加的头）。住宅 HTTP 代理是最容易买到的
+//     出口形态，不支持它等于把这类资源拒之门外。
+func buildForURL(base *http.Transport, raw string) (*http.Transport, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("代理 URL 解析失败（检查 url_template）: %w", err)
+		return nil, fmt.Errorf("代理 URL 解析失败（检查 url_template / accounts[].proxy）: %w", err)
 	}
 	switch u.Scheme {
 	case "socks5", "socks5h":
+	case "http", "https":
 	default:
-		// 只支持 SOCKS5：HTTP 代理在这里没有意义（我们要的是"换出口 IP"，
-		// 而 HTTP CONNECT 代理通常仍带 X-Forwarded-For，起不到隔离作用）。
-		return nil, fmt.Errorf("代理只支持 socks5/socks5h，收到 %q", u.Scheme)
+		// 不支持的 scheme 直接报错：静默直连会把"以为走了出口"的请求
+		// 变成真实 IP 直连 —— 这是本文件最要防的事故。
+		return nil, fmt.Errorf("代理只支持 socks5/socks5h/http/https，收到 %q", u.Scheme)
 	}
 	if u.Host == "" {
 		return nil, errors.New("代理 URL 缺少 host:port")
+	}
+	switch u.Scheme {
+	case "http", "https":
+		tr := base.Clone()
+		// ProxyFromEnvironment 必须被显式覆盖，否则环境里的 HTTP_PROXY
+		// 会跟这里指定的出口叠一层。
+		tr.Proxy = http.ProxyURL(u)
+		return tr, nil
 	}
 	user, pass := "", ""
 	if u.User != nil {
@@ -143,7 +197,7 @@ func (r *proxyRouter) buildFor(account string) (*http.Transport, error) {
 	}
 	proxyAddr := u.Host
 
-	tr := r.base.Clone()
+	tr := base.Clone()
 	// 关键：必须清掉环境代理，否则 socks 隧道又被 HTTP_PROXY 劫一层。
 	tr.Proxy = nil
 	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {

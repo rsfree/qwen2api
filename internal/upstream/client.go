@@ -24,9 +24,10 @@ import (
 
 // Client 上游 HTTP 客户端（并发安全，进程内单例）。
 type Client struct {
-	cfg  config.Upstream
-	base string
-	http *http.Client
+	cfg    config.Upstream
+	base   string
+	http   *http.Client
+	router *proxyRouter
 }
 
 // IdleConnTimeout 空闲连接保留时长。
@@ -62,13 +63,26 @@ func New(cfg config.Upstream) *Client {
 	if cfg.InsecureSkipVerify {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 显式调试开关
 	}
+	router := newProxyRouter(transport, cfg.Proxy)
 	return &Client{
 		cfg:  cfg,
 		base: strings.TrimRight(cfg.BaseURL, "/"),
 		// 不设 Client.Timeout：流式响应可能持续数分钟，总超时由各调用的
 		// context 控制（connect 超时在 Dialer 上）。
 		// 代理按账号分流：账号身份从 ctx 取，未启用时 router 直接透传给 base。
-		http: &http.Client{Transport: newProxyRouter(transport, cfg.Proxy)},
+		http:   &http.Client{Transport: router},
+		router: router.(*proxyRouter),
+	}
+}
+
+// SetAccountProxy 注入"账号名 → 专属出口 URL"解析器（main 在 pool 就绪后调用）。
+//
+// 没有这一步，config.Account.Proxy 字段只在配置里躺着：router 不知道每个
+// 账号的出口，signin/refresh/业务请求全都落在共享出口（或直连）上 ——
+// 而这恰恰是导入新号时最容易出事的环节（ signin 的 IP 频率墙）。
+func (c *Client) SetAccountProxy(f func(string) string) {
+	if c.router != nil {
+		c.router.SetAccountProxyResolver(f)
 	}
 }
 

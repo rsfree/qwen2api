@@ -292,12 +292,12 @@ func TestProxyRequiresAccountWhenDirectForbidden(t *testing.T) {
 
 func TestProxyRejectsNonSocksScheme(t *testing.T) {
 	cfg := config.Default().Upstream
-	cfg.Proxy = config.Proxy{Enabled: true, URLTemplate: "http://user:pass@127.0.0.1:8080"}
+	cfg.Proxy = config.Proxy{Enabled: true, URLTemplate: "ftp://user:pass@127.0.0.1:8080"}
 	cli := New(cfg)
 	ctx := WithAccount(context.Background(), "a1")
 	_, err := cli.http.Do(mustReqCtx(ctx, "http://example.invalid/"))
-	if err == nil || !strings.Contains(err.Error(), "socks5") {
-		t.Fatalf("非 socks 协议应被拒绝: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "socks5/socks5h/http/https") {
+		t.Fatalf("非 socks/http 协议应被拒绝: %v", err)
 	}
 }
 
@@ -371,5 +371,84 @@ func TestProxyRouterPrivateHostBlockedWhenDirectForbidden(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, "http://172.30.38.1:8790/healthz", nil)
 	if _, err := r.RoundTrip(req); err == nil {
 		t.Fatal("期望报错（禁止直连时内网目标不应放行），实际没有")
+	}
+}
+
+// 账号专属出口（accounts[].proxy）：即使 upstream.proxy.enabled=false 也必须生效。
+// 典型场景：主出口被 signin 频率墙标记，只给新导入的号指一条住宅出口。
+func TestAccountProxyOverridesDisabledGlobal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("via-socks"))
+	}))
+	defer srv.Close()
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+
+	socks := newFakeSocks(t, "res", "pw", true)
+	cfg := config.Default().Upstream // Proxy.Enabled = false
+	cli := New(cfg)
+	cli.SetAccountProxy(func(name string) string {
+		if name == "a6" {
+			return fmt.Sprintf("socks5h://res:pw@%s", socks.addr())
+		}
+		return ""
+	})
+
+	// a6 → 专属出口；anon → 直连（无账号归属，全局又没开）。
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(WithAccount(ctx, "a6"), http.MethodGet,
+		fmt.Sprintf("http://localhost:%d/", port), nil)
+	resp, err := cli.http.Do(req)
+	if err != nil {
+		t.Fatalf("a6 应走专属 socks 出口: %v", err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(b) != "via-socks" {
+		t.Fatalf("应经代理到达目标: %q", string(b))
+	}
+	if _, _, conns := socks.snapshot(); conns != 1 {
+		t.Fatalf("应有且仅有 1 次代理连接，得到 %d", conns)
+	}
+
+	// 同一实例里没有专属出口的账号继续直连（不误伤存量号）。
+	req2, _ := http.NewRequestWithContext(WithAccount(ctx, "a1"), http.MethodGet,
+		fmt.Sprintf("http://localhost:%d/", port), nil)
+	resp2, err := cli.http.Do(req2)
+	if err != nil {
+		t.Fatalf("a1 应直连: %v", err)
+	}
+	resp2.Body.Close()
+	if _, _, conns := socks.snapshot(); conns != 1 {
+		t.Fatalf("a1 不该新开代理连接: %d", conns)
+	}
+}
+
+// http/https（CONNECT）出口在 buildForURL 里应得到显式的 Proxy 设置，
+// 且环境代理（ProxyFromEnvironment）必须被覆盖掉 —— 否则环境里的
+// HTTP_PROXY 会叠在指定出口外面。
+func TestBuildForURLHTTPSchemeSetsProxy(t *testing.T) {
+	tr, err := buildForURL(http.DefaultTransport.(*http.Transport), "http://u:p@10.1.2.3:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Proxy == nil {
+		t.Fatal("http 出口应设置 tr.Proxy")
+	}
+	req, _ := http.NewRequest(http.MethodGet, "https://chat.qwen.ai/", nil)
+	u, err := tr.Proxy(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u == nil || u.Host != "10.1.2.3:8080" || u.User.Username() != "u" {
+		t.Fatalf("Proxy 应指向给定出口: %+v", u)
+	}
+	// socks 分支保持旧行为：显式清掉 Proxy。
+	tr2, err := buildForURL(http.DefaultTransport.(*http.Transport), "socks5h://u:p@10.1.2.3:1080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr2.Proxy != nil {
+		t.Fatal("socks 出口必须清掉 tr.Proxy（DialContext 才是唯一通道）")
 	}
 }
